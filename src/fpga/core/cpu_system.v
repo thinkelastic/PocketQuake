@@ -894,6 +894,25 @@ always @(posedge clk or posedge reset) begin
                         psram_cmd_issued <= 0;
                         psram_issue_wait <= 0;
                     end
+                end else if (live_sram_select) begin
+                    sram_addr <= live_mem_addr[23:2];  // 22-bit word address (256KB)
+                    sram_wdata <= live_mem_wdata;
+                    sram_wstrb <= live_mem_wstrb;
+                    if (live_mem_write) begin
+                        mem_pending <= 1;
+                        sram_write_pending <= 1;
+                        sram_read_started <= 0;
+                        sram_write_started <= 0;
+                        sram_cmd_issued <= 0;
+                        sram_issue_wait <= 0;
+                    end else begin
+                        mem_pending <= 1;
+                        sram_read_pending <= 1;
+                        sram_read_started <= 0;
+                        sram_write_started <= 0;
+                        sram_cmd_issued <= 0;
+                        sram_issue_wait <= 0;
+                    end
                 end else if (live_term_select) begin
                     mem_pending <= 1;
                     term_pending <= 1;
@@ -941,6 +960,14 @@ always @(posedge clk or posedge reset) begin
                             atm_reg_wr <= 1;
                             atm_reg_wdata <= live_mem_wdata;
                         end
+                    end
+                end else if (live_sramfill_select) begin
+                    mem_pending <= 1;
+                    sramfill_pending <= 1;
+                    sramfill_reg_addr <= live_mem_addr[6:2];
+                    if (|live_mem_wstrb) begin
+                        sramfill_reg_wr <= 1;
+                        sramfill_reg_wdata <= live_mem_wdata;
                     end
                 end else if (live_audio_select) begin
                     mem_pending <= 1;
