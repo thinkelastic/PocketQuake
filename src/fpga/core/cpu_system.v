@@ -685,13 +685,44 @@ reg audio_pending;
 reg link_pending;
 reg sramfill_pending;
 reg [31:0] pending_rdata;
+reg sdram_read_is_prefetch;
+reg sdram_prefetch_primary_done;
+reg [20:0] sdram_prefetch_line_tag;
+reg [2:0] sdram_prefetch_req_idx;
+reg [2:0] sdram_prefetch_fill_idx;
+reg [3:0] sdram_prefetch_fill_count;
+reg sdram_prefetch_valid;
+reg [31:0] sdram_prefetch_data [0:7];
+reg [31:0] prefetch_hit_rdata;
 
 localparam BUS_NONE = 2'd0;
 localparam BUS_IBUS = 2'd1;
 localparam BUS_DBUS = 2'd2;
+localparam [2:0] SDRAM_PREFETCH_BURST_LEN = 3'd7;  // 8-word cache line fill
 
 assign ram_addr_mux = mem_pending ? req_addr[15:2] : live_mem_addr[15:2];
 assign ram_wren = accept_access && live_ram_select && |live_mem_wstrb;
+
+wire [2:0] live_sdram_word_idx = live_mem_addr[4:2];
+wire live_prefetch_line_hit = sdram_prefetch_valid &&
+                              live_sdram_select &&
+                              (live_mem_addr[25:5] == sdram_prefetch_line_tag);
+wire live_prefetch_word_available =
+    live_prefetch_line_hit && (sdram_prefetch_fill_count > {1'b0, live_sdram_word_idx});
+wire live_ibus_prefetch_hit = live_ibus_grant && !live_mem_write && live_prefetch_word_available;
+
+always @(*) begin
+    case (live_sdram_word_idx)
+        3'd0: prefetch_hit_rdata = sdram_prefetch_data[0];
+        3'd1: prefetch_hit_rdata = sdram_prefetch_data[1];
+        3'd2: prefetch_hit_rdata = sdram_prefetch_data[2];
+        3'd3: prefetch_hit_rdata = sdram_prefetch_data[3];
+        3'd4: prefetch_hit_rdata = sdram_prefetch_data[4];
+        3'd5: prefetch_hit_rdata = sdram_prefetch_data[5];
+        3'd6: prefetch_hit_rdata = sdram_prefetch_data[6];
+        3'd7: prefetch_hit_rdata = sdram_prefetch_data[7];
+    endcase
+end
 
 always @(posedge clk or posedge reset) begin
     if (reset) begin
@@ -711,6 +742,13 @@ always @(posedge clk or posedge reset) begin
         sdram_read_started <= 0;
         sdram_write_started <= 0;
         sdram_cmd_issued <= 0;
+        sdram_read_is_prefetch <= 0;
+        sdram_prefetch_primary_done <= 0;
+        sdram_prefetch_line_tag <= 0;
+        sdram_prefetch_req_idx <= 0;
+        sdram_prefetch_fill_idx <= 0;
+        sdram_prefetch_fill_count <= 0;
+        sdram_prefetch_valid <= 0;
         psram_read_pending <= 0;
         psram_write_pending <= 0;
         psram_read_started <= 0;
@@ -776,6 +814,7 @@ always @(posedge clk or posedge reset) begin
         dbus_ack <= 0;
         sdram_rd <= 0;
         sdram_wr <= 0;
+        sdram_burst_len <= 3'd0;
         psram_rd <= 0;
         psram_wr <= 0;
         sram_rd <= 0;
@@ -790,154 +829,180 @@ always @(posedge clk or posedge reset) begin
         link_reg_rd <= 0;
 
         if (!mem_pending && live_mem_valid) begin
-            // Start new memory access
-            pending_bus <= live_dbus_grant ? BUS_DBUS : BUS_IBUS;
-            req_addr <= live_mem_addr;
-            req_wdata <= live_mem_wdata;
-            req_wstrb <= live_mem_wstrb;
-            if (live_ram_select) begin
-                mem_pending <= 1;
-                ram_pending <= 1;
-            end else if (live_sdram_select || live_sdram_uc_select) begin
-                sdram_addr <= live_mem_addr[25:2];
-                sdram_wdata <= live_mem_wdata;
-                sdram_wstrb <= live_mem_wstrb;  // Pass byte enables to SDRAM
-                if (live_mem_write) begin
-                    mem_pending <= 1;
-                    sdram_write_pending <= 1;
-                    sdram_read_started <= 0;
-                    sdram_write_started <= 0;
-                    sdram_cmd_issued <= 0;
-                    sdram_issue_wait <= 0;
-                end else begin
-                    mem_pending <= 1;
-                    sdram_read_pending <= 1;
-                    sdram_read_started <= 0;
-                    sdram_write_started <= 0;
-                    sdram_cmd_issued <= 0;
-                    sdram_issue_wait <= 0;
-                end
-            end else if (live_psram_select) begin
-                psram_addr <= live_mem_addr[23:2];  // 22-bit word address (16MB)
-                psram_wdata <= live_mem_wdata;
-                psram_wstrb <= live_mem_wstrb;  // Pass byte enables to PSRAM
-                if (live_mem_write) begin
-                    mem_pending <= 1;
-                    psram_write_pending <= 1;
-                    psram_read_started <= 0;
-                    psram_write_started <= 0;
-                    psram_cmd_issued <= 0;
-                    psram_issue_wait <= 0;
-                end else begin
-                    mem_pending <= 1;
-                    psram_read_pending <= 1;
-                    psram_read_started <= 0;
-                    psram_write_started <= 0;
-                    psram_cmd_issued <= 0;
-                    psram_issue_wait <= 0;
-                end
-            end else if (live_sram_select) begin
-                sram_addr <= live_mem_addr[23:2];  // 22-bit word address (256KB)
-                sram_wdata <= live_mem_wdata;
-                sram_wstrb <= live_mem_wstrb;
-                if (live_mem_write) begin
-                    mem_pending <= 1;
-                    sram_write_pending <= 1;
-                    sram_read_started <= 0;
-                    sram_write_started <= 0;
-                    sram_cmd_issued <= 0;
-                    sram_issue_wait <= 0;
-                end else begin
-                    mem_pending <= 1;
-                    sram_read_pending <= 1;
-                    sram_read_started <= 0;
-                    sram_write_started <= 0;
-                    sram_cmd_issued <= 0;
-                    sram_issue_wait <= 0;
-                end
-            end else if (live_term_select) begin
-                mem_pending <= 1;
-                term_pending <= 1;
-            end else if (live_sysreg_select) begin
-                mem_pending <= 1;
-                sysreg_pending <= 1;
-            end else if (live_dma_select) begin
-                mem_pending <= 1;
-                dma_pending <= 1;
-                // Always set address (for both reads and writes)
-                dma_reg_addr <= live_mem_addr[6:2];
-                // Issue DMA register write immediately on accept
-                if (|live_mem_wstrb) begin
-                    dma_reg_wr <= 1;
-                    dma_reg_wdata <= live_mem_wdata;
-                end
-            end else if (live_span_select) begin
-                mem_pending <= 1;
-                span_pending <= 1;
-                span_reg_addr <= live_mem_addr[6:2];
-                if (|live_mem_wstrb) begin
-                    span_reg_wr <= 1;
-                    span_reg_wdata <= live_mem_wdata;
-                end
-            end else if (live_cmap_select) begin
-                // Colormap BRAM: address presented via cmap_addr_mux,
-                // write via cmap_wren. Data ready next cycle.
-                mem_pending <= 1;
-                cmap_pending <= 1;
-            end else if (live_atm_select) begin
-                mem_pending <= 1;
-                atm_pending <= 1;
-                atm_is_write <= |live_mem_wstrb;
-                if (live_mem_addr[12]) begin
-                    // Normal table write (0x58001000+)
-                    if (|live_mem_wstrb) begin
-                        atm_norm_wr <= 1;
-                        atm_norm_addr <= {live_mem_addr[2], live_mem_addr[10:3]};
-                        atm_norm_wdata <= live_mem_wdata;
-                    end
-                end else begin
-                    // Control registers (0x58000000-0x5800007F)
-                    atm_reg_addr <= live_mem_addr[6:2];
-                    if (|live_mem_wstrb) begin
-                        atm_reg_wr <= 1;
-                        atm_reg_wdata <= live_mem_wdata;
-                    end
-                end
-            end else if (live_sramfill_select) begin
-                mem_pending <= 1;
-                sramfill_pending <= 1;
-                sramfill_reg_addr <= live_mem_addr[6:2];
-                if (|live_mem_wstrb) begin
-                    sramfill_reg_wr <= 1;
-                    sramfill_reg_wdata <= live_mem_wdata;
-                end
-            end else if (live_audio_select) begin
-                mem_pending <= 1;
-                audio_pending <= 1;
-                // Write to 0x4C000000: push sample to FIFO
-                if (|live_mem_wstrb && live_mem_addr[3:2] == 2'b00) begin
-                    audio_sample_wr <= 1;
-                    audio_sample_data <= live_mem_wdata;
-                end
-            end else if (live_link_select) begin
-                mem_pending <= 1;
-                link_pending <= 1;
-                link_reg_addr <= live_mem_addr[6:2];
-                if (|live_mem_wstrb) begin
-                    link_reg_wr <= 1;
-                    link_reg_wdata <= live_mem_wdata;
-                end else begin
-                    // Pulse read so RX_DATA can pop on demand.
-                    link_reg_rd <= 1;
-                end
+            if (live_ibus_prefetch_hit) begin
+                // Cache hit in completed SDRAM prefetch line.
+                ibus_ack <= 1;
+                ibus_dat_miso <= prefetch_hit_rdata;
             end else begin
-                // Unknown region - return 0 immediately
-                if (live_dbus_grant) begin
-                    dbus_ack <= 1;
-                    dbus_dat_miso <= 32'h0;
+                // Start new memory access
+                pending_bus <= live_dbus_grant ? BUS_DBUS : BUS_IBUS;
+                req_addr <= live_mem_addr;
+                req_wdata <= live_mem_wdata;
+                req_wstrb <= live_mem_wstrb;
+                if (live_ram_select) begin
+                    mem_pending <= 1;
+                    ram_pending <= 1;
+                end else if (live_sdram_select || live_sdram_uc_select) begin
+                    sdram_wdata <= live_mem_wdata;
+                    sdram_wstrb <= live_mem_wstrb;  // Pass byte enables to SDRAM
+                    if (live_mem_write) begin
+                        sdram_addr <= live_mem_addr[25:2];
+                        mem_pending <= 1;
+                        sdram_write_pending <= 1;
+                        sdram_read_started <= 0;
+                        sdram_write_started <= 0;
+                        sdram_cmd_issued <= 0;
+                        sdram_issue_wait <= 0;
+                        sdram_read_is_prefetch <= 0;
+                        // Any SDRAM write can invalidate the prefetched instruction line.
+                        sdram_prefetch_valid <= 0;
+                        sdram_prefetch_fill_count <= 0;
+                    end else begin
+                        mem_pending <= 1;
+                        sdram_read_pending <= 1;
+                        sdram_read_started <= 0;
+                        sdram_write_started <= 0;
+                        sdram_cmd_issued <= 0;
+                        sdram_issue_wait <= 0;
+
+                        // Only prefetch cached instruction reads (0x1000....).
+                        if (live_sdram_select && live_ibus_grant) begin
+                            sdram_addr <= {live_mem_addr[25:5], 3'b000};  // 8-word line aligned
+                            sdram_burst_len <= SDRAM_PREFETCH_BURST_LEN;
+                            sdram_read_is_prefetch <= 1;
+                            sdram_prefetch_primary_done <= 0;
+                            sdram_prefetch_line_tag <= live_mem_addr[25:5];
+                            sdram_prefetch_req_idx <= live_mem_addr[4:2];
+                            sdram_prefetch_fill_idx <= 0;
+                            sdram_prefetch_fill_count <= 0;
+                            sdram_prefetch_valid <= 1;
+                        end else begin
+                            sdram_addr <= live_mem_addr[25:2];
+                            sdram_read_is_prefetch <= 0;
+                        end
+                    end
+                end else if (live_psram_select) begin
+                    psram_addr <= live_mem_addr[23:2];  // 22-bit word address (16MB)
+                    psram_wdata <= live_mem_wdata;
+                    psram_wstrb <= live_mem_wstrb;  // Pass byte enables to PSRAM
+                    if (live_mem_write) begin
+                        mem_pending <= 1;
+                        psram_write_pending <= 1;
+                        psram_read_started <= 0;
+                        psram_write_started <= 0;
+                        psram_cmd_issued <= 0;
+                        psram_issue_wait <= 0;
+                    end else begin
+                        mem_pending <= 1;
+                        psram_read_pending <= 1;
+                        psram_read_started <= 0;
+                        psram_write_started <= 0;
+                        psram_cmd_issued <= 0;
+                        psram_issue_wait <= 0;
+                    end
+                end else if (live_sram_select) begin
+                    sram_addr <= live_mem_addr[23:2];  // 22-bit word address (256KB)
+                    sram_wdata <= live_mem_wdata;
+                    sram_wstrb <= live_mem_wstrb;
+                    if (live_mem_write) begin
+                        mem_pending <= 1;
+                        sram_write_pending <= 1;
+                        sram_read_started <= 0;
+                        sram_write_started <= 0;
+                        sram_cmd_issued <= 0;
+                        sram_issue_wait <= 0;
+                    end else begin
+                        mem_pending <= 1;
+                        sram_read_pending <= 1;
+                        sram_read_started <= 0;
+                        sram_write_started <= 0;
+                        sram_cmd_issued <= 0;
+                        sram_issue_wait <= 0;
+                    end
+                end else if (live_term_select) begin
+                    mem_pending <= 1;
+                    term_pending <= 1;
+                end else if (live_sysreg_select) begin
+                    mem_pending <= 1;
+                    sysreg_pending <= 1;
+                end else if (live_dma_select) begin
+                    mem_pending <= 1;
+                    dma_pending <= 1;
+                    // Always set address (for both reads and writes)
+                    dma_reg_addr <= live_mem_addr[6:2];
+                    // Issue DMA register write immediately on accept
+                    if (|live_mem_wstrb) begin
+                        dma_reg_wr <= 1;
+                        dma_reg_wdata <= live_mem_wdata;
+                    end
+                end else if (live_span_select) begin
+                    mem_pending <= 1;
+                    span_pending <= 1;
+                    span_reg_addr <= live_mem_addr[6:2];
+                    if (|live_mem_wstrb) begin
+                        span_reg_wr <= 1;
+                        span_reg_wdata <= live_mem_wdata;
+                    end
+                end else if (live_cmap_select) begin
+                    // Colormap BRAM: address presented via cmap_addr_mux,
+                    // write via cmap_wren. Data ready next cycle.
+                    mem_pending <= 1;
+                    cmap_pending <= 1;
+                end else if (live_atm_select) begin
+                    mem_pending <= 1;
+                    atm_pending <= 1;
+                    atm_is_write <= |live_mem_wstrb;
+                    if (live_mem_addr[12]) begin
+                        // Normal table write (0x58001000+)
+                        if (|live_mem_wstrb) begin
+                            atm_norm_wr <= 1;
+                            atm_norm_addr <= {live_mem_addr[2], live_mem_addr[10:3]};
+                            atm_norm_wdata <= live_mem_wdata;
+                        end
+                    end else begin
+                        // Control registers (0x58000000-0x5800007F)
+                        atm_reg_addr <= live_mem_addr[6:2];
+                        if (|live_mem_wstrb) begin
+                            atm_reg_wr <= 1;
+                            atm_reg_wdata <= live_mem_wdata;
+                        end
+                    end
+                end else if (live_sramfill_select) begin
+                    mem_pending <= 1;
+                    sramfill_pending <= 1;
+                    sramfill_reg_addr <= live_mem_addr[6:2];
+                    if (|live_mem_wstrb) begin
+                        sramfill_reg_wr <= 1;
+                        sramfill_reg_wdata <= live_mem_wdata;
+                    end
+                end else if (live_audio_select) begin
+                    mem_pending <= 1;
+                    audio_pending <= 1;
+                    // Write to 0x4C000000: push sample to FIFO
+                    if (|live_mem_wstrb && live_mem_addr[3:2] == 2'b00) begin
+                        audio_sample_wr <= 1;
+                        audio_sample_data <= live_mem_wdata;
+                    end
+                end else if (live_link_select) begin
+                    mem_pending <= 1;
+                    link_pending <= 1;
+                    link_reg_addr <= live_mem_addr[6:2];
+                    if (|live_mem_wstrb) begin
+                        link_reg_wr <= 1;
+                        link_reg_wdata <= live_mem_wdata;
+                    end else begin
+                        // Pulse read so RX_DATA can pop on demand.
+                        link_reg_rd <= 1;
+                    end
                 end else begin
-                    ibus_ack <= 1;
-                    ibus_dat_miso <= 32'h0;
+                    // Unknown region - return 0 immediately
+                    if (live_dbus_grant) begin
+                        dbus_ack <= 1;
+                        dbus_dat_miso <= 32'h0;
+                    end else begin
+                        ibus_ack <= 1;
+                        ibus_dat_miso <= 32'h0;
+                    end
                 end
             end
         end else if (mem_pending) begin
@@ -955,6 +1020,13 @@ always @(posedge clk or posedge reset) begin
                 ram_pending <= 0;
                 pending_bus <= BUS_NONE;
             end else if (sdram_read_pending) begin
+                // While draining an instruction prefetch burst, allow hits on already
+                // captured words so instruction fetch can advance within the same line.
+                if (sdram_read_is_prefetch && sdram_prefetch_primary_done && live_ibus_prefetch_hit) begin
+                    ibus_ack <= 1;
+                    ibus_dat_miso <= prefetch_hit_rdata;
+                end
+
                 // Issue read when controller is idle.
                 // Recover if command pulse is dropped (no busy seen) by retrying.
                 if (!sdram_cmd_issued) begin
@@ -979,21 +1051,76 @@ always @(posedge clk or posedge reset) begin
                         end
                     end
                     if (sdram_rdata_valid) begin
-                        pending_rdata <= sdram_rdata;
-                        if (pending_bus == BUS_DBUS) begin
-                            dbus_ack <= 1;
-                            dbus_dat_miso <= sdram_rdata;
+                        if (sdram_read_is_prefetch) begin
+                            // Capture each word from the 8-word burst into the line buffer.
+                            case (sdram_prefetch_fill_idx)
+                                3'd0: sdram_prefetch_data[0] <= sdram_rdata;
+                                3'd1: sdram_prefetch_data[1] <= sdram_rdata;
+                                3'd2: sdram_prefetch_data[2] <= sdram_rdata;
+                                3'd3: sdram_prefetch_data[3] <= sdram_rdata;
+                                3'd4: sdram_prefetch_data[4] <= sdram_rdata;
+                                3'd5: sdram_prefetch_data[5] <= sdram_rdata;
+                                3'd6: sdram_prefetch_data[6] <= sdram_rdata;
+                                3'd7: sdram_prefetch_data[7] <= sdram_rdata;
+                            endcase
+                            sdram_prefetch_fill_count <= sdram_prefetch_fill_count + 1'b1;
+
+                            // First complete the original miss that triggered this burst.
+                            if (!sdram_prefetch_primary_done &&
+                                (sdram_prefetch_fill_idx == sdram_prefetch_req_idx)) begin
+                                pending_rdata <= sdram_rdata;
+                                if (pending_bus == BUS_DBUS) begin
+                                    dbus_ack <= 1;
+                                    dbus_dat_miso <= sdram_rdata;
+                                end else begin
+                                    ibus_ack <= 1;
+                                    ibus_dat_miso <= sdram_rdata;
+                                end
+                                sdram_prefetch_primary_done <= 1;
+                                pending_bus <= BUS_NONE;
+                            end
+
+                            // Burst done after 8 returned words.
+                            if (sdram_prefetch_fill_idx == 3'd7) begin
+                                if (!sdram_prefetch_primary_done) begin
+                                    // Safety fallback: never leave the original request unacked.
+                                    pending_rdata <= sdram_rdata;
+                                    if (pending_bus == BUS_DBUS) begin
+                                        dbus_ack <= 1;
+                                        dbus_dat_miso <= sdram_rdata;
+                                    end else begin
+                                        ibus_ack <= 1;
+                                        ibus_dat_miso <= sdram_rdata;
+                                    end
+                                end
+                                mem_pending <= 0;
+                                sdram_read_pending <= 0;
+                                sdram_read_started <= 0;
+                                sdram_write_started <= 0;
+                                sdram_cmd_issued <= 0;
+                                sdram_issue_wait <= 0;
+                                sdram_read_is_prefetch <= 0;
+                                pending_bus <= BUS_NONE;
+                            end
+                            sdram_prefetch_fill_idx <= sdram_prefetch_fill_idx + 1'b1;
                         end else begin
-                            ibus_ack <= 1;
-                            ibus_dat_miso <= sdram_rdata;
+                            pending_rdata <= sdram_rdata;
+                            if (pending_bus == BUS_DBUS) begin
+                                dbus_ack <= 1;
+                                dbus_dat_miso <= sdram_rdata;
+                            end else begin
+                                ibus_ack <= 1;
+                                ibus_dat_miso <= sdram_rdata;
+                            end
+                            mem_pending <= 0;
+                            sdram_read_pending <= 0;
+                            sdram_read_started <= 0;
+                            sdram_write_started <= 0;
+                            sdram_cmd_issued <= 0;
+                            sdram_issue_wait <= 0;
+                            sdram_read_is_prefetch <= 0;
+                            pending_bus <= BUS_NONE;
                         end
-                        mem_pending <= 0;
-                        sdram_read_pending <= 0;
-                        sdram_read_started <= 0;
-                        sdram_write_started <= 0;
-                        sdram_cmd_issued <= 0;
-                        sdram_issue_wait <= 0;
-                        pending_bus <= BUS_NONE;
                     end
                 end
             end else if (sdram_write_pending) begin
@@ -1030,6 +1157,7 @@ always @(posedge clk or posedge reset) begin
                         sdram_write_started <= 0;
                         sdram_cmd_issued <= 0;
                         sdram_issue_wait <= 0;
+                        sdram_read_is_prefetch <= 0;
                         pending_bus <= BUS_NONE;
                     end
                 end

@@ -3,7 +3,7 @@
  *
  * RV32IMAFC with Wishbone bus, no MMU, no debug.
  *   I-cache: 32KB (2-way, 32B lines)
- *   D-cache: 64KB (2-way, 32B lines)
+ *   D-cache: 128KB (2-way, 32B lines)
  *
  * Usage:
  *   1. Clone VexRiscv: git clone https://github.com/SpinalHDL/VexRiscv.git
@@ -47,7 +47,7 @@ object GenPocketQuake extends App {
       ),
       new DBusCachedPlugin(
         config = new DataCacheConfig(
-          cacheSize = 65536,          // 64 KB
+          cacheSize = 131072,         // 128 KB
           bytePerLine = 32,
           wayCount = 2,               // 2-way associative
           addressWidth = 32,
@@ -59,9 +59,11 @@ object GenPocketQuake extends App {
         ),
         dBusCmdMasterPipe = true      // required for Wishbone
       ),
-      // IO range: everything except 0x0 (BRAM), 0x1 (SDRAM), 0x3 (PSRAM+SRAM) is uncacheable
+      // Cacheable: 0x1X (SDRAM), 0x30-0x37 (PSRAM)
+      // Uncacheable: 0x0X (BRAM — already fast), 0x38-0x3F (SRAM — HW writes bypass cache), all IO
       new StaticMemoryTranslatorPlugin(
-        ioRange = addr => addr(31 downto 28) =/= 0x0 && addr(31 downto 28) =/= 0x1 && addr(31 downto 28) =/= 0x3
+        ioRange = addr => addr(31 downto 28) =/= 0x1 &&
+                          !(addr(31 downto 28) === 0x3 && !addr(27))
       ),
       new DecoderSimplePlugin(
         catchIllegalInstruction = true

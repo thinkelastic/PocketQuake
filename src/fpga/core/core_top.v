@@ -733,7 +733,7 @@ always @(posedge clk_ram_controller) begin
             // CPU SDRAM access - direct pass-through (same clock domain)
             ram1_word_rd <= 1;
             ram1_word_addr <= cpu_sdram_addr;
-            ram1_word_burst_len <= 3'd0;  // Single word reads (burst support disabled)
+            ram1_word_burst_len <= cpu_sdram_burst_len;
         end else if (cpu_sdram_wr) begin
             ram1_word_wr <= 1;
             ram1_word_addr <= cpu_sdram_addr;

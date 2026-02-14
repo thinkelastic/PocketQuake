@@ -2,6 +2,33 @@
 
 Quake (1996) running natively on the [Analogue Pocket](https://www.analogue.co/pocket) via a VexRiscv RISC-V soft CPU on the Cyclone V FPGA. No emulation — the id Software Quake engine runs as bare-metal firmware on a hardware CPU synthesized in the FPGA fabric.
 
+## Installation
+
+1. Copy the contents of the `release/` directory to your Analogue Pocket SD card root
+2. Copy `pak0.pak` from your Quake installation (`id1/` directory) to `Assets/pocketquake/common/` on the SD card
+3. For link cable multiplayer, you **must** use a **GBC link cable** — GBA cables will NOT work
+
+See [Installation Layout](#installation-layout) below for the full SD card directory structure.
+
+### Controls
+
+| Button | Action |
+|--------|--------|
+| D-pad left/right | Look left/right |
+| D-pad up/down | Look up/down |
+| L1 | Change weapon |
+| R1 | Fire |
+| Y (left face) | Strafe left |
+| A (right face) | Strafe right |
+| B (bottom face) | Walk forward |
+| X (top face) | Jump |
+| Left stick | Move (forward/back/strafe) |
+| L2/R2 | Strafe left/right |
+| Start | Menu |
+| Select | Show scores |
+
+In menus, A and B act as confirm and D-pad up/down navigates.
+
 ## Features
 
 - **Full Quake engine** — Software-rendered Quake at 320x240, 8-bit indexed color with hardware palette lookup
@@ -204,9 +231,7 @@ cd src/fpga
 make quick            # Build firmware + update MIF + program via JTAG
 ```
 
-## Installation
-
-1. Copy the `release/` directory contents to your Analogue Pocket SD card root:
+## Installation Layout
 
 ```
 SD Card Root/
@@ -225,8 +250,6 @@ SD Card Root/
     |   +-- pocketquake.bin
     +-- pocketquake.json
 ```
-
-2. You must supply your own `pak0.pak` from the registered version of Quake (id1 directory).
 
 ## Project Structure
 

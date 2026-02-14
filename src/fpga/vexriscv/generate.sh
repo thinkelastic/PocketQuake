@@ -33,8 +33,8 @@ if [ -f "$VEXRISCV_DIR/VexRiscv.v" ]; then
     cp "$VEXRISCV_DIR/VexRiscv.v" "$SCRIPT_DIR/VexRiscv_Full.v"
     echo "Copied generated VexRiscv.v -> VexRiscv_Full.v"
     echo ""
-    echo "Cacheability for 0x3X (PSRAM+SRAM) is built into the generation"
-    echo "(StaticMemoryTranslatorPlugin ioRange excludes 0x0, 0x1, 0x3)"
+    echo "Cacheable: 0x1X (SDRAM), 0x30-0x37 (PSRAM)"
+    echo "Uncacheable: 0x0X (BRAM), 0x38+ (SRAM), all IO"
 else
     echo "ERROR: VexRiscv.v not found after generation"
     exit 1

@@ -42,8 +42,11 @@ static int key_poll_logs = 0;
 static unsigned int key_poll_count = 0;
 static int active_pad = 1;
 static int face_a_down_key = 0;
+static int face_b_down_key = 0;
 static qboolean dpad_up_nav_down = false;
 static qboolean dpad_down_nav_down = false;
+static qboolean dpad_up_game_down = false;
+static qboolean dpad_down_game_down = false;
 
 static unsigned int normalize_keys(unsigned int raw_keys)
 {
@@ -106,13 +109,12 @@ typedef struct {
 } keymap_t;
 
 static const keymap_t keymap[] = {
-    { KEY_DPAD_LEFT,   K_LEFTARROW },
-    { KEY_DPAD_RIGHT,  K_RIGHTARROW },
-    { KEY_FACE_B,      K_SPACE },      /* Jump */
-    { KEY_FACE_X,      'e' },          /* Use/Open */
-    { KEY_FACE_Y,      '/' },          /* Next weapon */
-    { KEY_TRIG_L1,     ',' },          /* Strafe left */
-    { KEY_TRIG_R1,     '.' },          /* Strafe right */
+    { KEY_DPAD_LEFT,   K_LEFTARROW },  /* Turn left */
+    { KEY_DPAD_RIGHT,  K_RIGHTARROW }, /* Turn right */
+    { KEY_FACE_X,      K_SPACE },      /* Jump (top) */
+    { KEY_FACE_Y,      ',' },          /* Strafe left (left) */
+    { KEY_TRIG_L1,     '/' },          /* Change weapon (left shoulder) */
+    { KEY_TRIG_R1,     K_CTRL },       /* Fire (right shoulder) */
     { KEY_SELECT,      K_TAB },        /* Show scores */
     { KEY_START,       K_ESCAPE },     /* Menu */
     { 0, 0 }
@@ -137,8 +139,11 @@ void IN_Init(void)
     key_poll_logs = 0;
     key_poll_count = 0;
     face_a_down_key = 0;
+    face_b_down_key = 0;
     dpad_up_nav_down = false;
     dpad_down_nav_down = false;
+    dpad_up_game_down = false;
+    dpad_down_game_down = false;
     if (0) Con_Printf("IN init CONT%d c1(k=%08x j=%08x) c2(k=%08x j=%08x) raw=%08x norm=%08x active_%s\n",
                       active_pad, c1k, c1j, c2k, c2j, raw_keys, prev_keys,
                       "calibrated");
@@ -180,11 +185,9 @@ void IN_Move(usercmd_t *cmd)
     cmd->forwardmove += lstick_y * cl_forwardspeed.value / 128.0f;
     cmd->sidemove += lstick_x * cl_sidespeed.value / 128.0f;
 
-    /* Digital movement mapping for gameplay:
-     * D-pad up/down -> forward/back, L2/R2 -> strafe left/right. */
+    /* D-pad is look (handled via key events in IN_SendKeyEvents).
+     * L2/R2 analog triggers for strafe if available. */
     if (key_dest == key_game) {
-        if (keys & KEY_DPAD_UP)   cmd->forwardmove += cl_forwardspeed.value;
-        if (keys & KEY_DPAD_DOWN) cmd->forwardmove -= cl_forwardspeed.value;
         if (keys & KEY_TRIG_L2)   cmd->sidemove -= cl_sidespeed.value;
         if (keys & KEY_TRIG_R2)   cmd->sidemove += cl_sidespeed.value;
     }
@@ -222,13 +225,16 @@ void IN_SendKeyEvents(void)
         prev_raw_key_bits = raw_key_bits;
     }
 
-    /* Keep D-pad up/down as navigation keys only in menu/console.
-     * Gameplay movement for these is handled directly in IN_Move. */
+    /* D-pad up/down: menu = K_UPARROW/K_DOWNARROW, game = 'a'/'z' (look up/down) */
     nav_context = (key_dest == key_menu) || (key_dest == key_console);
     up_down = (keys & KEY_DPAD_UP) ? true : false;
     down_down = (keys & KEY_DPAD_DOWN) ? true : false;
 
     if (nav_context) {
+        /* Release game-mode look keys when entering menus */
+        if (dpad_up_game_down) { Key_Event('a', false); dpad_up_game_down = false; }
+        if (dpad_down_game_down) { Key_Event('z', false); dpad_down_game_down = false; }
+
         if (up_down && !dpad_up_nav_down) {
             Key_Event(K_UPARROW, true);
             dpad_up_nav_down = true;
@@ -245,28 +251,52 @@ void IN_SendKeyEvents(void)
             dpad_down_nav_down = false;
         }
     } else {
-        if (dpad_up_nav_down) {
-            Key_Event(K_UPARROW, false);
-            dpad_up_nav_down = false;
+        /* Release nav keys when entering game */
+        if (dpad_up_nav_down) { Key_Event(K_UPARROW, false); dpad_up_nav_down = false; }
+        if (dpad_down_nav_down) { Key_Event(K_DOWNARROW, false); dpad_down_nav_down = false; }
+
+        if (up_down && !dpad_up_game_down) {
+            Key_Event('a', true);
+            dpad_up_game_down = true;
+        } else if (!up_down && dpad_up_game_down) {
+            Key_Event('a', false);
+            dpad_up_game_down = false;
         }
-        if (dpad_down_nav_down) {
-            Key_Event(K_DOWNARROW, false);
-            dpad_down_nav_down = false;
+
+        if (down_down && !dpad_down_game_down) {
+            Key_Event('z', true);
+            dpad_down_game_down = true;
+        } else if (!down_down && dpad_down_game_down) {
+            Key_Event('z', false);
+            dpad_down_game_down = false;
         }
     }
 
-    /* Quake menus consume K_ENTER, while gameplay defaults use K_CTRL for fire.
-     * Choose mapping on press and remember it so release uses the same key code. */
+    /* Face A (right): menu = K_ENTER, game = strafe right */
     if (changed & KEY_FACE_A) {
         qboolean down = (keys & KEY_FACE_A) ? true : false;
         if (down) {
-            face_a_down_key = (key_dest == key_menu) ? K_ENTER : K_CTRL;
+            face_a_down_key = (key_dest == key_menu) ? K_ENTER : '.';
             Key_Event(face_a_down_key, true);
         } else {
             if (face_a_down_key == 0)
-                face_a_down_key = (key_dest == key_menu) ? K_ENTER : K_CTRL;
+                face_a_down_key = (key_dest == key_menu) ? K_ENTER : '.';
             Key_Event(face_a_down_key, false);
             face_a_down_key = 0;
+        }
+    }
+
+    /* Face B (bottom): menu = K_ENTER, game = walk forward */
+    if (changed & KEY_FACE_B) {
+        qboolean down = (keys & KEY_FACE_B) ? true : false;
+        if (down) {
+            face_b_down_key = (key_dest == key_menu) ? K_ENTER : K_UPARROW;
+            Key_Event(face_b_down_key, true);
+        } else {
+            if (face_b_down_key == 0)
+                face_b_down_key = (key_dest == key_menu) ? K_ENTER : K_UPARROW;
+            Key_Event(face_b_down_key, false);
+            face_b_down_key = 0;
         }
     }
 
