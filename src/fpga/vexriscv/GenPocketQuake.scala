@@ -59,11 +59,11 @@ object GenPocketQuake extends App {
         ),
         dBusCmdMasterPipe = true      // required for Wishbone
       ),
-      // Cacheable: 0x1X (SDRAM), 0x30-0x37 (PSRAM)
-      // Uncacheable: 0x0X (BRAM — already fast), 0x38-0x3F (SRAM — HW writes bypass cache), all IO
+      // IO range: only 0x3 (PSRAM+SRAM) is cacheable for now.
+      // SDRAM (0x1) is uncacheable to avoid DMA coherency issues with bridge.
+      // This is temporary — re-enable SDRAM caching once DMA path is verified.
       new StaticMemoryTranslatorPlugin(
-        ioRange = addr => addr(31 downto 28) =/= 0x1 &&
-                          !(addr(31 downto 28) === 0x3 && !addr(27))
+        ioRange = addr => addr(31 downto 28) =/= 0x3
       ),
       new DecoderSimplePlugin(
         catchIllegalInstruction = true

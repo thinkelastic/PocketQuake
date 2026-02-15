@@ -51,6 +51,11 @@
 #define CPU_TO_BRIDGE_ADDR(cpu_addr) ((uint32_t)(cpu_addr) - 0x10000000)
 #define BRIDGE_TO_CPU_ADDR(br_addr)  ((uint32_t)(br_addr) + 0x10000000)
 
+/* Uncacheable SDRAM alias: 0x50000000-0x53FFFFFF maps to same physical SDRAM
+ * as 0x10000000-0x13FFFFFF but bypasses D-cache.  Use this to read data
+ * written by DMA (bridge) without cache coherency issues. */
+#define SDRAM_UNCACHED(addr) ((void *)((uint32_t)(addr) + 0x40000000))
+
 /* Open file parameter structure (256 + 4 + 4 = 264 bytes) */
 typedef struct __attribute__((packed)) {
     char     filename[256];   /* Null-terminated path */

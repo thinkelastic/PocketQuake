@@ -19,17 +19,8 @@
 #define SYS_CYCLE_LO    (*(volatile unsigned int *)0x40000004)
 #define SYS_CYCLE_HI    (*(volatile unsigned int *)0x40000008)
 
-/* Data slot IDs (from data.json) */
-#define SLOT_QUAKE_BIN  0
-#define SLOT_PAK_DATA   1
-
 /* Load addresses */
-#define QUAKE_BIN_ADDR  0x10200000  /* SDRAM (bridge loads here) */
-#define PAK_DATA_ADDR   0x11000000  /* SDRAM (bridge loads here) */
-
-/* Maximum sizes to load */
-#define QUAKE_BIN_SIZE  (4 * 1024 * 1024)    /* 4 MB */
-#define PAK_DATA_SIZE   (20 * 1024 * 1024)   /* 20 MB */
+#define QUAKE_BIN_ADDR  0x10200000  /* SDRAM LMA (bridge loads here, copied to PSRAM) */
 
 /* External symbols from linker */
 extern char _qbss_start[], _qbss_end[];
@@ -131,12 +122,38 @@ int main(void) {
     BOOT_LOG("BSS: 0x%x - 0x%x\n", (unsigned int)_qbss_start, (unsigned int)_qbss_end);
     BOOT_LOG("BSS size: %d bytes\n", (int)(_qbss_end - _qbss_start));
 
+    /* === DATASLOT READ DIAGNOSTIC (deferload) ===
+     * Slot 0 (pak0.pak) has deferload:true — read on demand.
+     * DMA to SDRAM, verify via uncacheable alias (0x50000000+). */
+    {
+        term_printf("\n=== DS READ TEST ===\n");
+
+        /* Fill DMA buffer with sentinel pattern to detect dropped writes */
+        volatile unsigned int *buf = (volatile unsigned int *)0x13F00000;
+        for (int i = 0; i < 16; i++)
+            buf[i] = 0xDEAD0000 | i;
+        term_printf("Pre-fill: w0=%x w1=%x w2=%x w3=%x\n",
+                     buf[0], buf[1], buf[2], buf[3]);
+
+        int rc = dataslot_read(0, 0, (void *)0x13F00000, 64);
+        volatile unsigned int *uc = (volatile unsigned int *)SDRAM_UNCACHED(0x13F00000);
+        term_printf("S0/64B: rc=%d\n", rc);
+        term_printf("  w0=%x w1=%x w2=%x w3=%x\n", uc[0], uc[1], uc[2], uc[3]);
+        term_printf("  w4=%x w5=%x w6=%x w7=%x\n", uc[4], uc[5], uc[6], uc[7]);
+        term_printf("  w8=%x w9=%x wA=%x wB=%x\n", uc[8], uc[9], uc[10], uc[11]);
+        term_printf("  wC=%x wD=%x wE=%x wF=%x\n", uc[12], uc[13], uc[14], uc[15]);
+        term_printf("  %s\n",
+                     (rc == 0 && uc[0] == 0x4B434150) ? "PACK OK!" : "FAIL");
+
+        term_printf("=== END DS TEST ===\n\n");
+    }
+
     /* Copy Quake code+data from SDRAM to PSRAM */
     BOOT_LOG("\n=== COPY TO PSRAM ===\n");
     copy_to_psram();
 
-    /* PAK stays in cached SDRAM (0x11000000) for fast D-cache burst reads. */
-    BOOT_LOG("PAK: cached SDRAM @ 0x11000000\n");
+    /* PAK read on demand from SD card via dataslot_read(). */
+    BOOT_LOG("PAK: on-demand via deferload\n");
 
     /* Clear BSS section before running Quake */
     BOOT_LOG("\nClearing BSS 0x%x-0x%x...\n", (unsigned int)_qbss_start, (unsigned int)_qbss_end);

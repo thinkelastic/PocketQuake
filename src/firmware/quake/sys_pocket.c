@@ -2,12 +2,14 @@
  * sys_pocket.c -- PocketQuake system driver
  * Bare-metal VexRiscv on Analogue Pocket
  *
- * PAK file is memory-mapped in SDRAM at a known address (loaded by APF).
- * No filesystem -- all file I/O operates directly on SDRAM-mapped data.
+ * PAK file is read on demand from SD card via APF dataslot_read().
+ * The PAK directory is cached in memory at init time; file data is
+ * fetched on each Sys_FileRead call.
  */
 
 #include "quakedef.h"
 #include <stdarg.h>
+#include "../dataslot.h"
 
 /* Not a dedicated server */
 qboolean isDedicated = false;
@@ -17,11 +19,11 @@ volatile unsigned int pq_dbg_info = 0;
 /* Hardware registers (SYS_CYCLE_LO/HI already defined in libc.h) */
 #define CPU_FREQ         100000000  /* clk_cpu currently runs at 100 MHz */
 
-/* PAK file location in SDRAM (cached).
- * Using 0x11000000 (cached) for ~4x faster loading via D-cache burst fills
- * (~2.6 cycles/word vs ~11 cycles/word uncached). */
-#define PAK_BASE_ADDR    0x11000000
+/* On-demand PAK reading via APF dataslot */
+#define PAK_SLOT_ID      0      /* data.json slot id for pak0.pak */
 #define PAK_MAX_SIZE     (48 * 1024 * 1024)  /* 48MB max */
+#define DMA_BUFFER       0x13F00000          /* Fixed SDRAM address for DMA */
+#define DMA_CHUNK_SIZE   (512 * 1024)        /* Max bytes per DMA transfer */
 
 /* PAK file structure */
 #define PAK_HEADER_MAGIC  (('P') | ('A' << 8) | ('C' << 16) | ('K' << 24))
@@ -38,27 +40,81 @@ typedef struct {
     int filelen;
 } pakfile_t;
 
-static unsigned char *pak_data = (unsigned char *)PAK_BASE_ADDR;
-static pakheader_t *pak_header;
-static pakfile_t *pak_dir;
+#define MAX_PAK_FILES 2048
+
+static pakfile_t pak_dir_cache[MAX_PAK_FILES];  /* cached PAK directory (BSS/SDRAM) */
+static pakfile_t *pak_dir = pak_dir_cache;
 static int pak_numfiles;
+static int pak_total_size;  /* dirofs + dirlen, returned by Sys_FileOpenRead */
 static int pak_initialized = 0;
+
+/* (DMA buffer at fixed SDRAM address DMA_BUFFER, read via SDRAM_UNCACHED) */
+
+/* Terminal printf for error reporting */
+extern void term_printf(const char *fmt, ...);
 
 static void Pak_Init(void)
 {
+    pakheader_t hdr;
+    int rc;
+
     if (pak_initialized)
         return;
 
-    pak_header = (pakheader_t *)pak_data;
-    if (pak_header->ident != PAK_HEADER_MAGIC) {
-        /* PAK not loaded or invalid */
+    /* DMA PAK header into SDRAM, then read via uncacheable alias to
+     * bypass D-cache (bridge DMA writes bypass cache). */
+    {
+        rc = dataslot_read(PAK_SLOT_ID, 0, (void *)DMA_BUFFER, sizeof(pakheader_t));
+        if (rc != 0) {
+            term_printf("Pak_Init: dataslot_read header failed (%d)\n", rc);
+            pak_numfiles = 0;
+            pak_initialized = 1;
+            return;
+        }
+        volatile unsigned int *uc = (volatile unsigned int *)SDRAM_UNCACHED(DMA_BUFFER);
+        hdr.ident = uc[0];
+        hdr.dirofs = uc[1];
+        hdr.dirlen = uc[2];
+        term_printf("Pak_Init: magic=%x dirofs=%x dirlen=%x\n",
+                     hdr.ident, hdr.dirofs, hdr.dirlen);
+    }
+
+    if (hdr.ident != PAK_HEADER_MAGIC) {
+        term_printf("Pak_Init: bad magic 0x%x\n", hdr.ident);
         pak_numfiles = 0;
         pak_initialized = 1;
         return;
     }
 
-    pak_dir = (pakfile_t *)(pak_data + pak_header->dirofs);
-    pak_numfiles = pak_header->dirlen / sizeof(pakfile_t);
+    pak_total_size = hdr.dirofs + hdr.dirlen;
+    pak_numfiles = hdr.dirlen / sizeof(pakfile_t);
+    if (pak_numfiles > MAX_PAK_FILES)
+        pak_numfiles = MAX_PAK_FILES;
+
+    /* Read PAK directory: DMA to SDRAM, copy from uncacheable alias to BSS. */
+    {
+        int dir_bytes = pak_numfiles * sizeof(pakfile_t);
+        int done = 0;
+        while (done < dir_bytes) {
+            int chunk = dir_bytes - done;
+            if (chunk > DMA_CHUNK_SIZE)
+                chunk = DMA_CHUNK_SIZE;
+            rc = dataslot_read(PAK_SLOT_ID, hdr.dirofs + done,
+                               (void *)DMA_BUFFER, chunk);
+            if (rc != 0)
+                break;
+            Q_memcpy((byte *)pak_dir_cache + done, SDRAM_UNCACHED(DMA_BUFFER), chunk);
+            done += chunk;
+        }
+    }
+    if (rc != 0) {
+        term_printf("Pak_Init: dataslot_read dir failed (%d)\n", rc);
+        pak_numfiles = 0;
+        pak_initialized = 1;
+        return;
+    }
+
+    term_printf("Pak_Init: %d files, total %d bytes\n", pak_numfiles, pak_total_size);
     pak_initialized = 1;
 }
 
@@ -88,7 +144,7 @@ FILE IO
 
 typedef struct {
     int used;
-    unsigned char *data;  /* pointer into SDRAM */
+    unsigned char *data;  /* NULL = on-demand PAK via dataslot_read */
     int length;
     int position;
 } syshandle_t;
@@ -121,7 +177,7 @@ int Sys_FileOpenRead(char *path, int *hndl)
 
     i = findhandle();
 
-    /* Intercept requests for pak0.pak itself — return the raw PAK blob */
+    /* Intercept requests for pak0.pak itself — return an on-demand handle */
     {
         const char *p = path;
         int found = 0;
@@ -133,22 +189,14 @@ int Sys_FileOpenRead(char *path, int *hndl)
             p++;
         }
         if (found) {
-            pakheader_t *hdr = (pakheader_t *)PAK_BASE_ADDR;
-            if (hdr->ident == PAK_HEADER_MAGIC) {
-                int paklen = hdr->dirofs + hdr->dirlen;
+            Pak_Init();  /* ensure directory is loaded from SD */
+            if (pak_numfiles > 0) {
                 sys_handles[i].used = 1;
-                sys_handles[i].data = (unsigned char *)PAK_BASE_ADDR;
-                /* Do not clamp reads to directory end.
-                 * Quake uses this handle as a raw backing store and seeks to
-                 * file offsets from the directory; some builds can hit entries
-                 * beyond a conservative dir-end clamp.
-                 */
+                sys_handles[i].data = NULL;  /* on-demand: no memory-mapped data */
                 sys_handles[i].length = PAK_MAX_SIZE;
                 sys_handles[i].position = 0;
                 *hndl = i;
-                Sys_Printf("DBG pak open: dirofs=0x%x dirlen=0x%x dirend=0x%x limit=0x%x\n",
-                           hdr->dirofs, hdr->dirlen, paklen, sys_handles[i].length);
-                return paklen;
+                return pak_total_size;
             }
         }
     }
@@ -183,7 +231,6 @@ int Sys_FileRead(int handle, void *dest, int count)
 {
     syshandle_t *h;
     int remaining;
-    int req = count;
 
     if (handle < 0 || handle >= MAX_HANDLES)
         return 0;
@@ -195,18 +242,30 @@ int Sys_FileRead(int handle, void *dest, int count)
     if (count > remaining)
         count = remaining;
     if (count <= 0)
-    {
-        Sys_Printf("DBG read EOF/underflow: h=%d pos=0x%x len=0x%x req=0x%x rem=0x%x\n",
-                   handle, h->position, h->length, req, remaining);
         return 0;
+
+    if (h->data == NULL) {
+        /* On-demand PAK read: DMA to SDRAM, copy from uncacheable alias. */
+        {
+            int done = 0;
+            while (done < count) {
+                int chunk = count - done;
+                if (chunk > DMA_CHUNK_SIZE)
+                    chunk = DMA_CHUNK_SIZE;
+                int rc = dataslot_read(PAK_SLOT_ID, h->position + done,
+                                       (void *)DMA_BUFFER, chunk);
+                if (rc != 0)
+                    return done;
+                Q_memcpy((byte *)dest + done, SDRAM_UNCACHED(DMA_BUFFER), chunk);
+                done += chunk;
+            }
+        }
+    } else {
+        /* Memory-mapped data (not currently used, kept for safety) */
+        Q_memcpy(dest, h->data + h->position, count);
     }
 
-    Q_memcpy(dest, h->data + h->position, count);
     h->position += count;
-    if (count != req) {
-        Sys_Printf("DBG short read: h=%d got=0x%x req=0x%x pos=0x%x len=0x%x\n",
-                   handle, count, req, h->position, h->length);
-    }
     return count;
 }
 

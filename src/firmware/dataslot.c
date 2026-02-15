@@ -8,6 +8,14 @@
 #include "libc/libc.h"
 #include "terminal.h"
 
+/* Set to 1 for verbose dataslot debug output (slow — prints on every read) */
+#define DS_DEBUG 0
+#if DS_DEBUG
+#define DS_LOG(...) term_printf(__VA_ARGS__)
+#else
+#define DS_LOG(...) do {} while(0)
+#endif
+
 /* Parameter buffer in SDRAM (placed at a known location) */
 /* We use the end of SDRAM test region to avoid conflicts */
 #define PARAM_BUFFER_ADDR   0x10F00000  /* CPU address for param struct */
@@ -22,46 +30,46 @@ int dataslot_wait_complete(void) {
     volatile int timeout = TIMEOUT_LOOPS;
     uint32_t status;
 
-    term_printf("wait: initial status=%x\n", DS_STATUS);
+    DS_LOG("wait: initial status=%x\n", DS_STATUS);
 
     /* First, if ACK is already high from previous command, wait for it to clear.
      * This proves the bridge received our new command and cleared old status. */
     status = DS_STATUS;
     if (status & DS_STATUS_ACK) {
-        term_printf("wait: ACK high, waiting to clear\n");
+        DS_LOG("wait: ACK high, waiting to clear\n");
         while (DS_STATUS & DS_STATUS_ACK) {
             if (--timeout <= 0) {
-                term_printf("wait: timeout at clear, t=%d\n", timeout);
+                DS_LOG("wait: timeout at clear, t=%d\n", timeout);
                 return -3;
             }
         }
-        term_printf("wait: ACK cleared\n");
+        DS_LOG("wait: ACK cleared\n");
     }
 
     /* Wait for this command's ack */
     timeout = TIMEOUT_LOOPS;
     while (!(DS_STATUS & DS_STATUS_ACK)) {
         if (--timeout <= 0) {
-            term_printf("wait: timeout at ack, t=%d\n", timeout);
+            DS_LOG("wait: timeout at ack, t=%d\n", timeout);
             return -1;
         }
     }
-    term_printf("wait: got ACK\n");
+    DS_LOG("wait: got ACK\n");
 
     /* Wait for done */
     timeout = TIMEOUT_LOOPS;
     while (!(DS_STATUS & DS_STATUS_DONE)) {
         if (--timeout <= 0) {
-            term_printf("wait: timeout at done, t=%d s=%x\n", timeout, DS_STATUS);
+            DS_LOG("wait: timeout at done, t=%d s=%x\n", timeout, DS_STATUS);
             return -2;
         }
     }
-    term_printf("wait: got DONE\n");
+    DS_LOG("wait: got DONE\n");
 
     /* Check error code */
     uint32_t final_status = DS_STATUS;
     int err = (final_status & DS_STATUS_ERR_MASK) >> DS_STATUS_ERR_SHIFT;
-    term_printf("wait: final status=%x err=%d\n", final_status, err);
+    DS_LOG("wait: final status=%x err=%d\n", final_status, err);
     return err ? -err : 0;
 }
 
@@ -100,9 +108,14 @@ int dataslot_read(uint32_t slot_id, uint32_t offset, void *dest, uint32_t length
     uint32_t bridge_addr = CPU_TO_BRIDGE_ADDR(dest_addr);
 
     /* Debug: print parameters */
-    term_printf("DS: slot=%d off=%x br=%x len=%x\n",
+    DS_LOG("DS: slot=%d off=%x br=%x len=%x\n",
                 slot_id, offset, bridge_addr, length);
-    term_printf("DS: status before=%x\n", DS_STATUS);
+
+    /* Write back dirty D-cache lines before DMA so the bridge doesn't
+     * read stale data if it ever needs to, and so dirty lines at the
+     * dest address become clean (preventing later eviction writeback
+     * from overwriting DMA'd data). */
+    __asm__ volatile("fence");
 
     /* Set up registers */
     DS_SLOT_ID = slot_id;
@@ -116,12 +129,17 @@ int dataslot_read(uint32_t slot_id, uint32_t offset, void *dest, uint32_t length
     /* Wait for completion */
     int result = dataslot_wait_complete();
 
-    term_printf("DS: status after=%x result=%d\n", DS_STATUS, result);
+    /* The bridge sets DONE when it finishes sending data, but the last
+     * few bridge writes may still be in the CDC pipeline (4-stage sync
+     * from clk_74a to clk_ram + SDRAM write latency ≈ 15-20 cycles).
+     * Spin-wait to ensure all writes have landed in SDRAM before the
+     * caller reads the data. */
+    for (volatile int i = 0; i < 32; i++) {}
 
-    /* Debug: print first 16 bytes of destination */
-    volatile uint8_t *p = (volatile uint8_t *)dest;
-    term_printf("DS: data=%02x%02x%02x%02x %02x%02x%02x%02x\n",
-                p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+    /* NOTE: After DMA, the D-cache may still hold stale data for dest.
+     * Callers MUST read DMA'd data through the uncacheable SDRAM alias:
+     *   SDRAM_UNCACHED(dest)  (0x50000000 + offset, same physical SDRAM)
+     * This bypasses the D-cache entirely, reading fresh data from SDRAM. */
 
     return result;
 }

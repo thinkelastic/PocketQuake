@@ -42,9 +42,9 @@ static void free_file(FILE *f) {
     }
 }
 
-/* PAK file location in SDRAM (same as sys_pocket.c) */
-#define PAK_BASE_ADDR    0x11000000
-#define PAK_HEADER_MAGIC (('P') | ('A' << 8) | ('C' << 16) | ('K' << 24))
+/* PAK data slot ID (matches data.json) */
+#define PAK_SLOT_ID      0
+#define PAK_MAX_SIZE     (48 * 1024 * 1024)  /* 48MB max */
 
 /* Check if string ends with suffix */
 static int str_ends_with(const char *str, const char *suffix) {
@@ -54,11 +54,11 @@ static int str_ends_with(const char *str, const char *suffix) {
     return strcmp(str + str_len - suf_len, suffix) == 0;
 }
 
-/* Map filename to data slot ID, or -2 for memory-mapped PAK */
+/* Map filename to data slot ID, or -2 for on-demand PAK */
 static int filename_to_slot(const char *pathname) {
-    /* Check for pak0.pak - use memory-mapped PAK data */
+    /* Check for pak0.pak - on-demand reads via dataslot */
     if (str_ends_with(pathname, "pak0.pak") || str_ends_with(pathname, "PAK0.PAK")) {
-        return -2;  /* Special: use memory-mapped PAK */
+        return -2;  /* Special: on-demand PAK via dataslot_read */
     }
 
     /* Check for known filenames from other projects */
@@ -99,16 +99,10 @@ FILE *fopen(const char *pathname, const char *mode) {
     f->flags = 0;
 
     if (slot_id == -2) {
-        /* Memory-mapped PAK file - read directly from SDRAM */
-        typedef struct { int ident; int dirofs; int dirlen; } pakheader_t;
-        pakheader_t *hdr = (pakheader_t *)PAK_BASE_ADDR;
-        if (hdr->ident == PAK_HEADER_MAGIC) {
-            f->data = (void *)PAK_BASE_ADDR;
-            f->size = hdr->dirofs + hdr->dirlen;  /* Total PAK size */
-        } else {
-            free_file(f);
-            return NULL;  /* Invalid PAK header */
-        }
+        /* On-demand PAK file via dataslot_read */
+        f->slot_id = PAK_SLOT_ID;
+        f->data = NULL;
+        f->size = PAK_MAX_SIZE;
     } else {
         /* Get slot size from dataslot system */
         if (dataslot_get_size(slot_id, &f->size) != 0) {

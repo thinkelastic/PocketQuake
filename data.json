@@ -11,7 +11,7 @@
                     "pak"
                 ],
                 "filename": "pak0.pak",
-                "address": "0x01000000"
+                "deferload": true
             },
             {
                 "id": 1,

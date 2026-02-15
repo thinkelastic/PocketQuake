@@ -17,7 +17,7 @@ module mf_pllram_133(
         .reference_clock_frequency("74.25 MHz"),
         .operation_mode("normal"),
         .number_of_clocks(5),
-        .output_clock_frequency0("110.000000 MHz"),
+        .output_clock_frequency0("90.000000 MHz"),
         .phase_shift0("0 ps"),
         .duty_cycle0(50),
         .output_clock_frequency1("110.000000 MHz"),

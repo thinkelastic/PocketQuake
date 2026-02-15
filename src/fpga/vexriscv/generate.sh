@@ -33,8 +33,8 @@ if [ -f "$VEXRISCV_DIR/VexRiscv.v" ]; then
     cp "$VEXRISCV_DIR/VexRiscv.v" "$SCRIPT_DIR/VexRiscv_Full.v"
     echo "Copied generated VexRiscv.v -> VexRiscv_Full.v"
     echo ""
-    echo "Cacheable: 0x1X (SDRAM), 0x30-0x37 (PSRAM)"
-    echo "Uncacheable: 0x0X (BRAM), 0x38+ (SRAM), all IO"
+    echo "Cacheable: 0x3X (PSRAM+SRAM)"
+    echo "Uncacheable: 0x0X (BRAM), 0x1X (SDRAM — DMA coherency), all IO"
 else
     echo "ERROR: VexRiscv.v not found after generation"
     exit 1
