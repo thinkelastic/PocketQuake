@@ -52,8 +52,14 @@ halt:
 
 
 /* ========================================
- * Trap entry - saves all registers and dispatches
- * Trap frame layout: x0-x31 (32 words), mepc, mcause, mtval = 35 words = 140 bytes
+ * Trap entry - saves all integer + float registers and dispatches
+ * Trap frame layout:
+ *   x0-x31  (32 words) at sp+0   .. sp+124
+ *   mepc    (1 word)   at sp+128
+ *   mcause  (1 word)   at sp+132
+ *   mtval   (1 word)   at sp+136
+ *   f0-f31  (32 words) at sp+140 .. sp+264
+ * Total: 67 words = 268 bytes (round to 272 for 8-byte alignment)
  * ======================================== */
 _trap_entry:
     /* We need a safe stack. Use top of BRAM scratch area temporarily.
@@ -64,8 +70,8 @@ _trap_entry:
     lui sp, %hi(_stack_top)
     addi sp, sp, %lo(_stack_top)
 
-    /* Allocate trap frame: 35 words = 140 bytes */
-    addi sp, sp, -140
+    /* Allocate trap frame: 272 bytes */
+    addi sp, sp, -272
 
     /* Save x1-x31 (skip x0 which is always 0) */
     sw x1,   4(sp)
@@ -113,6 +119,40 @@ _trap_entry:
     /* Store 0 at x0 position (for completeness) */
     sw zero, 0(sp)
 
+    /* Save f0-f31 (floating-point registers) */
+    fsw f0,  140(sp)
+    fsw f1,  144(sp)
+    fsw f2,  148(sp)
+    fsw f3,  152(sp)
+    fsw f4,  156(sp)
+    fsw f5,  160(sp)
+    fsw f6,  164(sp)
+    fsw f7,  168(sp)
+    fsw f8,  172(sp)
+    fsw f9,  176(sp)
+    fsw f10, 180(sp)
+    fsw f11, 184(sp)
+    fsw f12, 188(sp)
+    fsw f13, 192(sp)
+    fsw f14, 196(sp)
+    fsw f15, 200(sp)
+    fsw f16, 204(sp)
+    fsw f17, 208(sp)
+    fsw f18, 212(sp)
+    fsw f19, 216(sp)
+    fsw f20, 220(sp)
+    fsw f21, 224(sp)
+    fsw f22, 228(sp)
+    fsw f23, 232(sp)
+    fsw f24, 236(sp)
+    fsw f25, 240(sp)
+    fsw f26, 244(sp)
+    fsw f27, 248(sp)
+    fsw f28, 252(sp)
+    fsw f29, 256(sp)
+    fsw f30, 260(sp)
+    fsw f31, 264(sp)
+
     /* Call C handler: handle_misaligned(trap_frame_t *frame)
      * Returns 1 if handled (should return), 0 if fatal */
     mv a0, sp
@@ -125,7 +165,41 @@ _trap_entry:
     lw t0, 128(sp)
     csrw mepc, t0
 
-    /* Restore registers */
+    /* Restore f0-f31 (may have been modified by FLW emulation) */
+    flw f0,  140(sp)
+    flw f1,  144(sp)
+    flw f2,  148(sp)
+    flw f3,  152(sp)
+    flw f4,  156(sp)
+    flw f5,  160(sp)
+    flw f6,  164(sp)
+    flw f7,  168(sp)
+    flw f8,  172(sp)
+    flw f9,  176(sp)
+    flw f10, 180(sp)
+    flw f11, 184(sp)
+    flw f12, 188(sp)
+    flw f13, 192(sp)
+    flw f14, 196(sp)
+    flw f15, 200(sp)
+    flw f16, 204(sp)
+    flw f17, 208(sp)
+    flw f18, 212(sp)
+    flw f19, 216(sp)
+    flw f20, 220(sp)
+    flw f21, 224(sp)
+    flw f22, 228(sp)
+    flw f23, 232(sp)
+    flw f24, 236(sp)
+    flw f25, 240(sp)
+    flw f26, 244(sp)
+    flw f27, 248(sp)
+    flw f28, 252(sp)
+    flw f29, 256(sp)
+    flw f30, 260(sp)
+    flw f31, 264(sp)
+
+    /* Restore integer registers */
     lw x1,   4(sp)
     /* Restore original sp to mscratch temporarily */
     lw t0,   8(sp)

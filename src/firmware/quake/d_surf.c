@@ -106,16 +106,27 @@ D_FlushCaches
 void D_FlushCaches (void)
 {
 	surfcache_t     *c;
-	
+	byte *sc_end = (byte *)sc_base + sc_size;
+
 	if (!sc_base)
 		return;
 
 	for (c = sc_base ; c ; c = c->next)
 	{
+		if ((byte *)c < (byte *)sc_base || (byte *)c >= sc_end)
+			break;  /* corrupt next pointer - stop walking */
 		if (c->owner)
-			*c->owner = NULL;
+		{
+			/* Only dereference owner if it points to mapped memory */
+			unsigned int addr = (unsigned int)c->owner;
+			if ((addr >= 0x10000000u && addr < 0x14000000u) ||
+			    addr < 0x00010000u ||
+			    (addr >= 0x30000000u && addr < 0x31000000u))
+				*c->owner = NULL;
+			/* else: skip - corrupt owner would hang on unmapped address */
+		}
 	}
-	
+
 	sc_rover = sc_base;
 	sc_base->next = NULL;
 	sc_base->owner = NULL;
@@ -139,6 +150,7 @@ surfcache_t     *D_SCAlloc (int width, int size)
 		Sys_Error ("D_SCAlloc: bad cache size %d\n", size);
 	
 	size = (int)&((surfcache_t *)0)->data[size];
+	size += 64;  /* guard padding: absorb HW surface block overrun */
 	size = (size + 3) & ~3;
 	if (size > sc_size)
 		Sys_Error ("D_SCAlloc: %i > cache size",size);

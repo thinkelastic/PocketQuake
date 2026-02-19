@@ -5,16 +5,16 @@
  * - Bootloader: 64KB BRAM at 0x00000000 (initialized from firmware.mif)
  * - Quake binary: bridge loads to SDRAM at 0x10200000,
  *   bootloader copies to PSRAM at 0x30000000 for execution
- * - PAK data: SDRAM at 0x11000000 (loaded via dataslot from pak0.pak)
+ * - PAK data: bridge loads to SDRAM at 0x11000000 (cached access)
  *
  * Memory layout:
  * - BRAM:     0x00000000 (64KB)  - Bootloader code, stack
- * - SDRAM:    0x10000000 (64MB)  - PAK data + BSS + Heap
+ * - SDRAM:    0x10000000 (64MB)  - Staging area + BSS + Heap
  *   - 0x10200000: quake.bin LMA (bridge loads here, copied to PSRAM)
- *   - 0x11000000: pak0.pak (game data, ~18MB)
+ *   - 0x11000000: pak0.pak (bridge loads here, copied to PSRAM)
  *   - 0x12400000: BSS + Heap (~28MB)
  * - Terminal: 0x20000000 (8KB)   - Character VRAM
- * - PSRAM:    0x30000000 (16MB)  - Quake code + data (execution address)
+ * - PSRAM:    0x30000000 (16MB)  - Quake code + data (CRAM0)
  * - SRAM:     0x38000000 (256KB) - Z-buffer
  * - SysRegs:  0x40000000         - System control registers
  */
@@ -23,7 +23,7 @@ ENTRY(_start)
 
 MEMORY {
     BRAM      (rwx) : ORIGIN = 0x00000000, LENGTH = 64K
-    PSRAM     (rwx) : ORIGIN = 0x30000000, LENGTH = 2M      /* Quake code VMA (execution address) */
+    PSRAM     (rwx) : ORIGIN = 0x30000000, LENGTH = 16M     /* Quake code VMA (CRAM0) */
     SDRAM_BSS (rwx) : ORIGIN = 0x12400000, LENGTH = 28M     /* BSS + Heap in SDRAM after pak0.pak */
 }
 
@@ -35,7 +35,7 @@ __sdram_size = 64M;
 __quake_entry = 0x30000000;
 __quake_load_addr = 0x10200000;
 
-/* PAK data location */
+/* PAK data location (cached SDRAM, loaded by bridge) */
 __pak_base = 0x11000000;
 
 SECTIONS {

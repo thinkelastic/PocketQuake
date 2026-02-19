@@ -266,7 +266,7 @@ assign link_sd_i = port_tran_sd;
 // PSRAM Controller for CRAM0 (16MB)
 // Uses muxed signals for bridge/CPU arbitration
 psram_controller #(
-    .CLOCK_SPEED(110.0)
+    .CLOCK_SPEED(100.0)
 ) psram0 (
     .clk(clk_ram_controller),
     .reset_n(reset_n),
@@ -296,18 +296,18 @@ psram_controller #(
     .cram_lb_n(cram0_lb_n)
 );
 
-// CRAM1 unused - framebuffer moved to SDRAM
-assign cram1_a = 6'h0;
-assign cram1_dq = 16'hZZZZ;
-assign cram1_clk = 1'b0;
+// CRAM1 unused - tie off all outputs
+assign cram1_a     = 6'h0;
+assign cram1_dq    = 16'hZZZZ;
+assign cram1_clk   = 1'b0;
 assign cram1_adv_n = 1'b1;
-assign cram1_cre = 1'b0;
+assign cram1_cre   = 1'b0;
 assign cram1_ce0_n = 1'b1;
 assign cram1_ce1_n = 1'b1;
-assign cram1_oe_n = 1'b1;
-assign cram1_we_n = 1'b1;
-assign cram1_ub_n = 1'b1;
-assign cram1_lb_n = 1'b1;
+assign cram1_oe_n  = 1'b1;
+assign cram1_we_n  = 1'b1;
+assign cram1_ub_n  = 1'b1;
+assign cram1_lb_n  = 1'b1;
 
 // SDRAM word interface signals (directly matching io_sdram interface)
 reg             ram1_word_rd;
@@ -331,6 +331,7 @@ wire [31:0] cpu_sdram_rdata;
 wire        cpu_sdram_busy;
 
 // CPU to PSRAM interface (same clock domain as CPU - no CDC needed)
+// 22-bit word address covers 16MB (CRAM0 only)
 wire        cpu_psram_rd;
 wire        cpu_psram_wr;
 wire [21:0] cpu_psram_addr;
@@ -701,13 +702,15 @@ end
 wire bridge_wr_active = bridge_wr_sync3 | bridge_wr_sync4 | bridge_wr_pending | bridge_wr_done;
 wire bridge_rd_active = bridge_rd_sync3 | bridge_rd_sync4 | bridge_rd_pending | bridge_rd_done;
 
-// SDRAM access arbiter - runs at SDRAM controller clock (100 MHz)
+// SDRAM access arbiter - runs at SDRAM controller clock (95 MHz)
 // Priority: Bridge > Peripheral DMA > CPU
 // CPU runs at same clock as SDRAM controller (no CDC needed)
+reg cpu_sdram_accepted;  // Pulses when arbiter actually forwards a CPU command
 always @(posedge clk_ram_controller) begin
     ram1_word_rd <= 0;
     ram1_word_wr <= 0;
     ram1_word_burst_len <= 3'd0;  // Default: single word reads
+    cpu_sdram_accepted <= 0;
 
     // Issue SDRAM command on sync4 rising edge for bridge
     if (bridge_wr_sync4 && !bridge_wr_done && !bridge_wr_pending && !ram1_word_busy) begin
@@ -734,11 +737,13 @@ always @(posedge clk_ram_controller) begin
             ram1_word_rd <= 1;
             ram1_word_addr <= cpu_sdram_addr;
             ram1_word_burst_len <= cpu_sdram_burst_len;
+            cpu_sdram_accepted <= 1;
         end else if (cpu_sdram_wr) begin
             ram1_word_wr <= 1;
             ram1_word_addr <= cpu_sdram_addr;
             ram1_word_data <= cpu_sdram_wdata;
             ram1_word_wstrb <= cpu_sdram_wstrb;
+            cpu_sdram_accepted <= 1;
         end
     end
 end
@@ -778,15 +783,15 @@ end
 
 // PSRAM mux: Bridge writes have priority, CPU access when bridge idle
 // CPU runs at same clock as PSRAM controller (no CDC needed)
-assign psram_mux_rd = cpu_psram_rd && !bridge_psram_wr_active;
+assign psram_mux_rd = bridge_psram_wr_active ? 1'b0 : cpu_psram_rd;
 assign psram_mux_wr = bridge_psram_write_pending ? 1'b1 : cpu_psram_wr;
 assign psram_mux_addr = bridge_psram_write_pending ? bridge_psram_addr_ram_clk[23:2] : cpu_psram_addr;
 assign psram_mux_wdata = bridge_psram_write_pending ? bridge_psram_wr_data_ram_clk : cpu_psram_wdata;
 assign psram_mux_wstrb = bridge_psram_write_pending ? 4'b1111 : cpu_psram_wstrb;
 
-// CPU PSRAM data connections - direct (same clock domain)
+// CPU PSRAM data connections - single CRAM0
 assign cpu_psram_rdata = psram_mux_rdata;
-assign cpu_psram_busy = psram_mux_busy | bridge_psram_wr_active;
+assign cpu_psram_busy = bridge_psram_wr_active | psram_mux_busy;
 assign cpu_psram_rdata_valid = psram_mux_rdata_valid;
 
 
@@ -1084,9 +1089,9 @@ assign video_hs = vidout_hs;
     wire display_mode;
     wire [24:0] fb_display_addr;
 
-    // VexRiscv CPU system - running at 100 MHz (CPU + memory)
+    // VexRiscv CPU system - running at 95 MHz (CPU + memory)
     cpu_system cpu (
-        .clk(clk_cpu),  // 100 MHz
+        .clk(clk_cpu),  // 95 MHz
         .clk_74a(clk_74a),
         .reset_n(reset_n),
         .dataslot_allcomplete(dataslot_allcomplete),
@@ -1113,6 +1118,7 @@ assign video_hs = vidout_hs;
         .sdram_burst_len(cpu_sdram_burst_len),
         .sdram_rdata(cpu_sdram_rdata),
         .sdram_busy(cpu_sdram_busy),
+        .sdram_accepted(cpu_sdram_accepted),
         .sdram_rdata_valid(ram1_word_q_valid),
         // PSRAM interface (to psram_controller)
         .psram_rd(cpu_psram_rd),
@@ -1309,7 +1315,7 @@ assign video_hs = vidout_hs;
 
     text_terminal terminal (
         .clk(clk_core_12288),
-        .clk_cpu(clk_cpu),  // CPU clock for memory interface (100 MHz)
+        .clk_cpu(clk_cpu),  // CPU clock for memory interface (95 MHz)
         .reset_n(reset_n),
         .pixel_x(visible_x),
         .pixel_y(visible_y),
@@ -1354,7 +1360,7 @@ assign video_hs = vidout_hs;
         .line_start(line_start),
         .pixel_color(framebuffer_pixel_color),
         .fb_base_addr(fb_display_addr),  // 25-bit SDRAM 16-bit word address
-        // SDRAM clock domain (100 MHz)
+        // SDRAM clock domain (110 MHz)
         .clk_sdram(clk_ram_controller),
         // SDRAM burst read interface
         .burst_rd(video_burst_rd),
@@ -1444,7 +1450,7 @@ end
 // Link MMIO peripheral (FIFO + synchronous SCK/SO/SI PHY)
 //
 link_mmio #(
-    .CLK_HZ(110000000),
+    .CLK_HZ(100000000),
     .SCK_HZ(256000),
     .POLL_HZ(3000),
     .FIFO_DEPTH(256)
@@ -1494,9 +1500,9 @@ audio_output audio_out (
 
     wire    clk_core_12288;
     wire    clk_core_12288_90deg;
-    wire    clk_cpu;            // CPU clock (100 MHz)
-    wire    clk_ram_controller; // 100 MHz SDRAM controller clock
-    wire    clk_ram_chip;       // 100 MHz SDRAM chip clock (phase shifted)
+    wire    clk_cpu;            // CPU clock (95 MHz)
+    wire    clk_ram_controller; // 95 MHz SDRAM controller clock
+    wire    clk_ram_chip;       // 95 MHz SDRAM chip clock (phase shifted)
 
     wire    pll_core_locked;
     wire    pll_ram_locked;
@@ -1521,8 +1527,8 @@ mf_pllbase mp1 (
 mf_pllram_133 mp_ram (
     .refclk         ( clk_74a ),
     .rst            ( 0 ),
-    .outclk_0       ( clk_ram_controller ), // 100 MHz for SDRAM controller
-    .outclk_1       ( clk_ram_chip ),       // 100 MHz for SDRAM chip (phase shifted)
+    .outclk_0       ( clk_ram_controller ), // 95 MHz for SDRAM controller
+    .outclk_1       ( clk_ram_chip ),       // 95 MHz for SDRAM chip (phase shifted)
     .locked         ( pll_ram_locked )
 );
 

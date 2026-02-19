@@ -9,15 +9,18 @@ extern volatile unsigned int pq_dbg_info;
 
 /* Trap frame layout (matches start.S) */
 typedef struct {
-    unsigned int regs[32];  /* x0-x31 (x0 always 0) */
-    unsigned int mepc;
-    unsigned int mcause;
-    unsigned int mtval;
+    unsigned int regs[32];   /* x0-x31 (x0 always 0) at offset 0 */
+    unsigned int mepc;       /* at offset 128 */
+    unsigned int mcause;     /* at offset 132 */
+    unsigned int mtval;      /* at offset 136 */
+    unsigned int fregs[32];  /* f0-f31 at offset 140 */
 } trap_frame_t;
 
 /* RISC-V instruction encodings */
 #define OPCODE_LOAD   0x03
 #define OPCODE_STORE  0x23
+#define OPCODE_FLW    0x07  /* Float load (I-type, funct3=010) */
+#define OPCODE_FSW    0x27  /* Float store (S-type, funct3=010) */
 
 #define FUNCT3_LB     0x0
 #define FUNCT3_LH     0x1
@@ -34,10 +37,14 @@ typedef struct {
 #define CAUSE_STORE_MISALIGNED  6
 
 /* Valid memory regions for emulation */
-#define BRAM_START   0x00000000
-#define BRAM_END     0x00010000
-#define SDRAM_START  0x10000000
-#define SDRAM_END    0x14000000
+#define BRAM_START      0x00000000
+#define BRAM_END        0x00010000
+#define SDRAM_START     0x10000000
+#define SDRAM_END       0x14000000
+#define PSRAM_START     0x30000000
+#define PSRAM_END       0x38000000
+#define SDRAM_UC_START  0x50000000  /* Uncached SDRAM alias */
+#define SDRAM_UC_END    0x54000000
 
 /* Check if address range is in valid memory */
 __attribute__((section(".text.boot")))
@@ -47,8 +54,12 @@ static int addr_valid(unsigned int addr, unsigned int len) {
     if (end < addr) return 0;
     /* BRAM */
     if (addr >= BRAM_START && end < BRAM_END) return 1;
-    /* SDRAM */
+    /* SDRAM (cached) */
     if (addr >= SDRAM_START && end < SDRAM_END) return 1;
+    /* PSRAM */
+    if (addr >= PSRAM_START && end < PSRAM_END) return 1;
+    /* SDRAM (uncached alias — used for PAK data) */
+    if (addr >= SDRAM_UC_START && end < SDRAM_UC_END) return 1;
     return 0;
 }
 
@@ -180,6 +191,44 @@ int handle_misaligned(trap_frame_t *frame) {
         emulate_store(addr, val, funct3);
 
         /* Advance PC past the instruction */
+        frame->mepc += 4;
+        return 1;
+    }
+
+    /* FLW: float load word (I-type, opcode 0x07, funct3=010) */
+    if (opcode == OPCODE_FLW) {
+        /* I-type immediate: instr[31:20] sign-extended */
+        imm = ((int)instr) >> 20;
+        addr = frame->regs[rs1] + imm;
+
+        if (!addr_valid(addr, 4))
+            return 0;
+
+        /* Emulate 4-byte load using byte reads */
+        unsigned int val = emulate_load(addr, FUNCT3_LW);
+
+        /* Write raw bits to float register in trap frame */
+        frame->fregs[rd] = val;
+
+        frame->mepc += 4;
+        return 1;
+    }
+
+    /* FSW: float store word (S-type, opcode 0x27, funct3=010) */
+    if (opcode == OPCODE_FSW) {
+        /* S-type immediate: {instr[31:25], instr[11:7]} sign-extended */
+        imm = ((instr >> 7) & 0x1F) | (((int)instr >> 20) & 0xFFFFFFE0);
+        addr = frame->regs[rs1] + imm;
+
+        if (!addr_valid(addr, 4))
+            return 0;
+
+        /* Read raw bits from float register in trap frame */
+        unsigned int val = frame->fregs[rs2];
+
+        /* Emulate 4-byte store using byte writes */
+        emulate_store(addr, val, FUNCT3_SW);
+
         frame->mepc += 4;
         return 1;
     }

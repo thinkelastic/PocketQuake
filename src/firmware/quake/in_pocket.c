@@ -111,11 +111,11 @@ typedef struct {
 static const keymap_t keymap[] = {
     { KEY_DPAD_LEFT,   K_LEFTARROW },  /* Turn left */
     { KEY_DPAD_RIGHT,  K_RIGHTARROW }, /* Turn right */
-    { KEY_FACE_X,      K_SPACE },      /* Jump (top) */
+    { KEY_FACE_X,      K_UPARROW },    /* Move forward (top) */
     { KEY_FACE_Y,      ',' },          /* Strafe left (left) */
-    { KEY_TRIG_L1,     '/' },          /* Change weapon (left shoulder) */
+    { KEY_TRIG_L1,     K_SPACE },      /* Jump (left shoulder) */
     { KEY_TRIG_R1,     K_CTRL },       /* Fire (right shoulder) */
-    { KEY_SELECT,      K_TAB },        /* Show scores */
+    { KEY_SELECT,      '/' },          /* Change weapon (left of Analogue) */
     { KEY_START,       K_ESCAPE },     /* Menu */
     { 0, 0 }
 };
@@ -286,15 +286,15 @@ void IN_SendKeyEvents(void)
         }
     }
 
-    /* Face B (bottom): menu = K_ENTER, game = walk forward */
+    /* Face B (bottom): menu = K_ENTER, game = walk backward */
     if (changed & KEY_FACE_B) {
         qboolean down = (keys & KEY_FACE_B) ? true : false;
         if (down) {
-            face_b_down_key = (key_dest == key_menu) ? K_ENTER : K_UPARROW;
+            face_b_down_key = (key_dest == key_menu) ? K_ENTER : K_DOWNARROW;
             Key_Event(face_b_down_key, true);
         } else {
             if (face_b_down_key == 0)
-                face_b_down_key = (key_dest == key_menu) ? K_ENTER : K_UPARROW;
+                face_b_down_key = (key_dest == key_menu) ? K_ENTER : K_DOWNARROW;
             Key_Event(face_b_down_key, false);
             face_b_down_key = 0;
         }

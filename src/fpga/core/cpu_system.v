@@ -4,7 +4,7 @@
 // - 64KB RAM for program/data (using block RAM)
 // - Memory-mapped terminal at 0x20000000
 // - SDRAM access at 0x10000000 (64MB) - includes framebuffer
-// - PSRAM access at 0x30000000 (16MB) - cram0 chip
+// - PSRAM access at 0x30000000 (16MB) - cram0 only
 // - SRAM access at 0x38000000 (256KB) - async SRAM
 // - System registers at 0x40000000
 //
@@ -42,12 +42,13 @@ module cpu_system (
     output reg  [2:0]  sdram_burst_len,  // Burst length: 0=single word, 7=8 words (cache line fill)
     input wire  [31:0] sdram_rdata,
     input wire         sdram_busy,
+    input wire         sdram_accepted,     // Pulses when arbiter actually forwards CPU command
     input wire         sdram_rdata_valid,  // Pulses when read data is valid
 
     // PSRAM word interface (to psram_controller via core_top)
     output reg         psram_rd,
     output reg         psram_wr,
-    output reg  [21:0] psram_addr,         // 22-bit word address (16MB addressable)
+    output reg  [21:0] psram_addr,         // 22-bit word address (16MB addressable, CRAM0)
     output reg  [31:0] psram_wdata,
     output reg  [3:0]  psram_wstrb,        // Byte enables for PSRAM writes
     input wire  [31:0] psram_rdata,
@@ -233,7 +234,7 @@ wire        live_mem_write = live_dbus_grant & dbus_we;
 //   Framebuffer 1: 0x10100000 - 0x10125800 (153,600 bytes)
 // 0x50000000 - 0x53FFFFFF : SDRAM uncached alias (64MB, same physical SDRAM window)
 // 0x20000000 - 0x20001FFF : Terminal VRAM
-// 0x30000000 - 0x30FFFFFF : PSRAM (16MB) - cram0 chip
+// 0x30000000 - 0x30FFFFFF : PSRAM (16MB) - cram0 only
 // 0x38000000 - 0x3803FFFF : SRAM (256KB) - async SRAM
 // 0x40000000 - 0x400000FF : System registers
 // 0x44000000 - 0x44FFFFFF : DMA Clear/Blit peripheral
@@ -242,22 +243,61 @@ wire        live_mem_write = live_dbus_grant & dbus_we;
 // 0x54000000 - 0x54003FFF : Colormap BRAM (16KB)
 // 0x58000000 - 0x58001FFF : Alias Transform MAC (registers + normal table)
 // 0x5C000000 - 0x5C025FFF : Z-buffer BRAM (153,600 bytes)
-// Decode memory regions
-wire live_ram_select    = (live_mem_addr[31:16] == 16'b0);                    // 0x00000000-0x0000FFFF (64KB)
-wire live_sdram_select  = (live_mem_addr[31:26] == 6'b000100);                // 0x10000000-0x13FFFFFF (64MB)
-wire live_sdram_uc_select = (live_mem_addr[31:26] == 6'b010100);              // 0x50000000-0x53FFFFFF (64MB uncached alias)
-wire live_term_select   = (live_mem_addr[31:13] == 19'h10000);                // 0x20000000-0x20001FFF
-wire live_psram_select  = (live_mem_addr[31:24] == 8'h30);                    // 0x30000000-0x30FFFFFF (16MB)
-wire live_sram_select   = (live_mem_addr[31:18] == 14'h0E00);                // 0x38000000-0x3803FFFF (256KB)
-wire live_sysreg_select = (live_mem_addr[31:8] == 24'h400000);                // 0x40000000-0x400000FF
-wire live_dma_select    = (live_mem_addr[31:24] == 8'h44);                    // 0x44000000-0x44FFFFFF
-wire live_span_select   = (live_mem_addr[31:24] == 8'h48);                    // 0x48000000-0x48FFFFFF
-wire live_link_select   = (live_mem_addr[31:24] == 8'h4D);                    // 0x4D000000-0x4DFFFFFF
-wire live_cmap_select   = (live_mem_addr[31:14] == 18'h15000);                // 0x54000000-0x54003FFF (colormap BRAM, 16KB)
-wire live_atm_select    = (live_mem_addr[31:13] == 19'h2C000);               // 0x58000000-0x58001FFF (ATM regs + norm table)
-wire live_audio_select  = (live_mem_addr[31:24] == 8'h4C);                   // 0x4C000000-0x4CFFFFFF (audio output)
-wire live_sramfill_select = (live_mem_addr[31:24] == 8'h5C);                 // 0x5C000000-0x5CFFFFFF (SRAM fill)
-wire accept_access      = !mem_pending && live_mem_valid;
+// Pre-decode address regions from each bus independently.
+// This runs address decode in PARALLEL with grant arbitration, removing
+// the 32-bit address mux + comparator chain from the critical path.
+// After the grant decision, only a 1-bit mux is needed per region.
+wire [31:0] dbus_byte_addr = {dbus_adr, 2'b00};
+wire [31:0] ibus_byte_addr = {ibus_adr, 2'b00};
+
+// D-bus pre-decode
+wire dbus_ram_select       = (dbus_byte_addr[31:16] == 16'b0);
+wire dbus_sdram_select     = (dbus_byte_addr[31:26] == 6'b000100);
+wire dbus_sdram_uc_select  = (dbus_byte_addr[31:26] == 6'b010100);
+wire dbus_term_select      = (dbus_byte_addr[31:13] == 19'h10000);
+wire dbus_psram_select     = (dbus_byte_addr[31:24] == 8'h30);  // 0x30 only (16MB, CRAM0)
+wire dbus_sram_select      = (dbus_byte_addr[31:18] == 14'h0E00);
+wire dbus_sysreg_select    = (dbus_byte_addr[31:8]  == 24'h400000);
+wire dbus_dma_select       = (dbus_byte_addr[31:24] == 8'h44);
+wire dbus_span_select      = (dbus_byte_addr[31:24] == 8'h48);
+wire dbus_link_select      = (dbus_byte_addr[31:24] == 8'h4D);
+wire dbus_cmap_select      = (dbus_byte_addr[31:14] == 18'h15000);
+wire dbus_atm_select       = (dbus_byte_addr[31:13] == 19'h2C000);
+wire dbus_audio_select     = (dbus_byte_addr[31:24] == 8'h4C);
+wire dbus_sramfill_select  = (dbus_byte_addr[31:24] == 8'h5C);
+
+// I-bus pre-decode
+wire ibus_ram_select       = (ibus_byte_addr[31:16] == 16'b0);
+wire ibus_sdram_select     = (ibus_byte_addr[31:26] == 6'b000100);
+wire ibus_sdram_uc_select  = (ibus_byte_addr[31:26] == 6'b010100);
+wire ibus_term_select      = (ibus_byte_addr[31:13] == 19'h10000);
+wire ibus_psram_select     = (ibus_byte_addr[31:24] == 8'h30);  // 0x30 only (16MB, CRAM0)
+wire ibus_sram_select      = (ibus_byte_addr[31:18] == 14'h0E00);
+wire ibus_sysreg_select    = (ibus_byte_addr[31:8]  == 24'h400000);
+wire ibus_dma_select       = (ibus_byte_addr[31:24] == 8'h44);
+wire ibus_span_select      = (ibus_byte_addr[31:24] == 8'h48);
+wire ibus_link_select      = (ibus_byte_addr[31:24] == 8'h4D);
+wire ibus_cmap_select      = (ibus_byte_addr[31:14] == 18'h15000);
+wire ibus_atm_select       = (ibus_byte_addr[31:13] == 19'h2C000);
+wire ibus_audio_select     = (ibus_byte_addr[31:24] == 8'h4C);
+wire ibus_sramfill_select  = (ibus_byte_addr[31:24] == 8'h5C);
+
+// Mux decoded results based on grant (1-bit mux vs 32-bit address mux + decode)
+wire live_ram_select       = live_dbus_grant ? dbus_ram_select       : ibus_ram_select;       // 0x00000000-0x0000FFFF (64KB)
+wire live_sdram_select     = live_dbus_grant ? dbus_sdram_select     : ibus_sdram_select;     // 0x10000000-0x13FFFFFF (64MB)
+wire live_sdram_uc_select  = live_dbus_grant ? dbus_sdram_uc_select  : ibus_sdram_uc_select;  // 0x50000000-0x53FFFFFF (64MB uncached alias)
+wire live_term_select      = live_dbus_grant ? dbus_term_select      : ibus_term_select;      // 0x20000000-0x20001FFF
+wire live_psram_select     = live_dbus_grant ? dbus_psram_select     : ibus_psram_select;     // 0x30000000-0x30FFFFFF (16MB)
+wire live_sram_select      = live_dbus_grant ? dbus_sram_select      : ibus_sram_select;      // 0x38000000-0x3803FFFF (256KB)
+wire live_sysreg_select    = live_dbus_grant ? dbus_sysreg_select    : ibus_sysreg_select;    // 0x40000000-0x400000FF
+wire live_dma_select       = live_dbus_grant ? dbus_dma_select       : ibus_dma_select;       // 0x44000000-0x44FFFFFF
+wire live_span_select      = live_dbus_grant ? dbus_span_select      : ibus_span_select;      // 0x48000000-0x48FFFFFF
+wire live_link_select      = live_dbus_grant ? dbus_link_select      : ibus_link_select;      // 0x4D000000-0x4DFFFFFF
+wire live_cmap_select      = live_dbus_grant ? dbus_cmap_select      : ibus_cmap_select;      // 0x54000000-0x54003FFF (colormap BRAM, 16KB)
+wire live_atm_select       = live_dbus_grant ? dbus_atm_select       : ibus_atm_select;       // 0x58000000-0x58001FFF (ATM regs + norm table)
+wire live_audio_select     = live_dbus_grant ? dbus_audio_select     : ibus_audio_select;     // 0x4C000000-0x4CFFFFFF (audio output)
+wire live_sramfill_select  = live_dbus_grant ? dbus_sramfill_select  : ibus_sramfill_select;  // 0x5C000000-0x5CFFFFFF (SRAM fill)
+wire accept_access         = !mem_pending && live_mem_valid;
 
 // ============================================
 // RAM using block RAM (64KB = 16384 x 32-bit words)
@@ -886,7 +926,7 @@ always @(posedge clk or posedge reset) begin
                         end
                     end
                 end else if (live_psram_select) begin
-                    psram_addr <= live_mem_addr[23:2];  // 22-bit word address (16MB)
+                    psram_addr <= live_mem_addr[23:2];  // 22-bit word address (16MB, CRAM0)
                     psram_wdata <= live_mem_wdata;
                     psram_wstrb <= live_mem_wstrb;  // Pass byte enables to PSRAM
                     if (live_mem_write) begin
@@ -1032,7 +1072,8 @@ always @(posedge clk or posedge reset) begin
                 end
 
                 // Issue read when controller is idle.
-                // Recover if command pulse is dropped (no busy seen) by retrying.
+                // Use sdram_accepted (from arbiter) to confirm command was forwarded,
+                // not sdram_busy which can rise from unrelated bridge/peripheral activity.
                 if (!sdram_cmd_issued) begin
                     if (!sdram_busy) begin
                         sdram_rd <= 1;
@@ -1042,7 +1083,7 @@ always @(posedge clk or posedge reset) begin
                     end
                 end else begin
                     if (!sdram_read_started) begin
-                        if (sdram_busy) begin
+                        if (sdram_accepted) begin
                             sdram_read_started <= 1;
                             sdram_issue_wait <= 0;
                         end else begin
@@ -1137,7 +1178,9 @@ always @(posedge clk or posedge reset) begin
                     end
                 end else begin
                     // Write completion: wait for busy HIGH then LOW after command issue.
-                    // If busy never rises, retry command.
+                    // Note: using sdram_busy (not sdram_accepted) here because write
+                    // completion is detected by !sdram_busy, and we need word_busy to
+                    // have risen in io_sdram before we check for its fall.
                     if (!sdram_write_started && sdram_busy) begin
                         sdram_write_started <= 1;
                         sdram_issue_wait <= 0;

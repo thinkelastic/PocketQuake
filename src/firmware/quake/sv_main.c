@@ -1078,11 +1078,10 @@ void SV_SpawnServer (char *server)
 		current_skill = 3;
 
 	Cvar_SetValue ("skill", (float)current_skill);
-	
+
 //
 // set up the new server
 //
-	Sys_Printf ("SV_Spawn: ClearMemory\n");
 	Host_ClearMemory ();
 
 	memset (&sv, 0, sizeof(sv));
@@ -1094,26 +1093,25 @@ void SV_SpawnServer (char *server)
 #endif
 
 // load progs to get entity field count
-	Sys_Printf ("SV_Spawn: PR_LoadProgs\n");
 	PR_LoadProgs ();
 
 // allocate server memory
 	sv.max_edicts = MAX_EDICTS;
-	
+
 	sv.edicts = Hunk_AllocName (sv.max_edicts*pr_edict_size, "edicts");
 
 	sv.datagram.maxsize = sizeof(sv.datagram_buf);
 	sv.datagram.cursize = 0;
 	sv.datagram.data = sv.datagram_buf;
-	
+
 	sv.reliable_datagram.maxsize = sizeof(sv.reliable_datagram_buf);
 	sv.reliable_datagram.cursize = 0;
 	sv.reliable_datagram.data = sv.reliable_datagram_buf;
-	
+
 	sv.signon.maxsize = sizeof(sv.signon_buf);
 	sv.signon.cursize = 0;
 	sv.signon.data = sv.signon_buf;
-	
+
 // leave slots at start for clients only
 	sv.num_edicts = svs.maxclients+1;
 	for (i=0 ; i<svs.maxclients ; i++)
@@ -1121,33 +1119,28 @@ void SV_SpawnServer (char *server)
 		ent = EDICT_NUM(i+1);
 		svs.clients[i].edict = ent;
 	}
-	
+
 	sv.state = ss_loading;
 	sv.paused = false;
 
 	sv.time = 1.0;
-	
+
 	strcpy (sv.name, server);
 	sprintf (sv.modelname,"maps/%s.bsp", server);
-	/* Switch to terminal display for debug visibility during load */
-	(*(volatile unsigned int *)0x4000000C) = 0;
-	Sys_Printf ("SV_Spawn: loading %s\n", sv.modelname);
 	sv.worldmodel = Mod_ForName (sv.modelname, false);
 	if (!sv.worldmodel)
 	{
-		Sys_Printf ("SV_Spawn: FAIL %s\n", sv.modelname);
 		Con_Printf ("Couldn't spawn server %s\n", sv.modelname);
 		sv.active = false;
 		return;
 	}
-	Sys_Printf ("SV_Spawn: world OK\n");
 	sv.models[1] = sv.worldmodel;
-	
+
 //
 // clear world interaction links
 //
 	SV_ClearWorld ();
-	
+
 	sv.sound_precache[0] = pr_strings;
 
 	sv.model_precache[0] = pr_strings;
@@ -1160,7 +1153,7 @@ void SV_SpawnServer (char *server)
 
 //
 // load the rest of the entities
-//	
+//
 	ent = EDICT_NUM(0);
 	memset (&ent->v, 0, progs->entityfields * 4);
 	ent->free = false;
@@ -1181,8 +1174,7 @@ void SV_SpawnServer (char *server)
 
 // serverflags are for cross level information (sigils)
 	pr_global_struct->serverflags = svs.serverflags;
-	
-	Sys_Printf ("SV_Spawn: ED_LoadFromFile\n");
+
 	ED_LoadFromFile (sv.worldmodel->entities);
 
 	sv.active = true;
@@ -1191,12 +1183,9 @@ void SV_SpawnServer (char *server)
 	sv.state = ss_active;
 
 // run two frames to allow everything to settle
-	Sys_Printf ("SV_Spawn: SV_Physics x2\n");
 	host_frametime = 0.1;
 	SV_Physics ();
-	Sys_Printf ("SV_Spawn: physics 1 done\n");
 	SV_Physics ();
-	Sys_Printf ("SV_Spawn: physics 2 done\n");
 
 // create a baseline for more efficient communications
 	SV_CreateBaseline ();
@@ -1206,7 +1195,6 @@ void SV_SpawnServer (char *server)
 		if (host_client->active)
 			SV_SendServerinfo (host_client);
 
-	Sys_Printf ("SV_Spawn: DONE\n");
 	Con_DPrintf ("Server spawned.\n");
 }
 

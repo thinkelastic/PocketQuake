@@ -668,7 +668,7 @@ void SCR_BeginLoadingPlaque (void)
 		return;
 	if (cls.signon != SIGNONS)
 		return;
-	
+
 // redraw with no console and the loading plaque
 	Con_ClearNotify ();
 	scr_centertime_off = 0;

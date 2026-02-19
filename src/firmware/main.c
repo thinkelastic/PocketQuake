@@ -1,12 +1,13 @@
 /*
  * PocketQuake Bootloader
- * Runs from BRAM, initializes system, waits for data slot loading, then jumps to Quake in PSRAM
+ * Runs from BRAM, initializes system, waits for data slot loading, then jumps to Quake
+ * Copies quake.bin from SDRAM to PSRAM (CRAM0) for execution
  */
 
 #include "terminal.h"
 #include "dataslot.h"
 
-#define BOOT_VERBOSE 0
+#define BOOT_VERBOSE 1
 #if BOOT_VERBOSE
 #define BOOT_LOG(...) term_printf(__VA_ARGS__)
 #else
@@ -23,8 +24,8 @@
 #define SLOT_PAK_DATA   1
 
 /* Load addresses */
-#define QUAKE_BIN_ADDR  0x10200000  /* SDRAM LMA (bridge loads here, copied to PSRAM) */
-#define PAK_DATA_ADDR   0x11000000  /* SDRAM (bulk data) */
+#define QUAKE_BIN_ADDR  0x10200000  /* SDRAM (bridge loads here) */
+#define PAK_DATA_ADDR   0x11000000  /* SDRAM (bridge loads here) */
 
 /* Maximum sizes to load */
 #define QUAKE_BIN_SIZE  (4 * 1024 * 1024)    /* 4 MB */
@@ -33,10 +34,9 @@
 /* External symbols from linker */
 extern char _qbss_start[], _qbss_end[];
 extern char _runtime_stack_top[];
-extern char _quake_copy_src[];   /* SDRAM LMA (where bridge loaded quake.bin) */
-extern char _quake_copy_dst[];   /* PSRAM VMA (where code executes from) */
+extern char _quake_copy_src[];   /* Source address (SDRAM LMA) */
+extern char _quake_copy_dst[];   /* Destination address (PSRAM VMA) */
 extern char _quake_copy_size[];  /* Size of .text + .data to copy */
-
 /* Quake entry point (in sys_pocket.c, linked in PSRAM) */
 extern void quake_main(void);
 extern void switch_to_runtime_stack_and_call(void (*entry)(void), void *stack_top);
@@ -90,7 +90,7 @@ __attribute__((section(".text.boot")))
 int main(void) {
     /* Initialize terminal early for debug output (safe: uses terminal BRAM) */
     term_init();
-    BOOT_LOG("Boot @ 66MHz\n\n");
+    BOOT_LOG("Boot @ 100MHz\n\n");
     BOOT_LOG("Waiting for dataslot_allcomplete (SYS_STATUS bit1)...\n");
 
     /* CRITICAL: Wait for APF dataslot loading BEFORE touching SDRAM */
@@ -107,8 +107,6 @@ int main(void) {
             break;
         }
     }
-
-    /* Framebuffers on CRAM1 are cleared by hardware init in core_top.v */
 
     /* Keep boot checks lightweight to avoid triggering timing-sensitive failures. */
     BOOT_LOG("=== SDRAM SMOKE TEST ===\n");
@@ -133,12 +131,12 @@ int main(void) {
     BOOT_LOG("BSS: 0x%x - 0x%x\n", (unsigned int)_qbss_start, (unsigned int)_qbss_end);
     BOOT_LOG("BSS size: %d bytes\n", (int)(_qbss_end - _qbss_start));
 
-    /* Keep boot path minimal and avoid extra PSRAM reads before handoff. */
-    BOOT_LOG("\n=== SDRAM LOAD SAMPLE ===\n");
-    BOOT_LOG("(skipped pre-jump reads)\n");
-
     /* Copy Quake code+data from SDRAM to PSRAM */
+    BOOT_LOG("\n=== COPY TO PSRAM ===\n");
     copy_to_psram();
+
+    /* PAK stays in cached SDRAM (0x11000000) for fast D-cache burst reads. */
+    BOOT_LOG("PAK: cached SDRAM @ 0x11000000\n");
 
     /* Clear BSS section before running Quake */
     BOOT_LOG("\nClearing BSS 0x%x-0x%x...\n", (unsigned int)_qbss_start, (unsigned int)_qbss_end);

@@ -15,12 +15,12 @@ volatile unsigned int pq_dbg_stage = 0;
 volatile unsigned int pq_dbg_info = 0;
 
 /* Hardware registers (SYS_CYCLE_LO/HI already defined in libc.h) */
-#define CPU_FREQ         110000000  /* clk_cpu currently runs at 110 MHz */
+#define CPU_FREQ         100000000  /* clk_cpu currently runs at 100 MHz */
 
-/* PAK file location in SDRAM (loaded by APF data slot).
- * Use uncached SDRAM alias (0x50000000) so CPU reads bypass D-cache
- * and always see data written by the bridge. */
-#define PAK_BASE_ADDR    0x51000000
+/* PAK file location in SDRAM (cached).
+ * Using 0x11000000 (cached) for ~4x faster loading via D-cache burst fills
+ * (~2.6 cycles/word vs ~11 cycles/word uncached). */
+#define PAK_BASE_ADDR    0x11000000
 #define PAK_MAX_SIZE     (48 * 1024 * 1024)  /* 48MB max */
 
 /* PAK file structure */

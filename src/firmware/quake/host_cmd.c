@@ -264,7 +264,7 @@ void Host_Map_f (void)
 	cls.demonum = -1;		// stop demo loop in case this fails
 
 	CL_Disconnect ();
-	Host_ShutdownServer(false);		
+	Host_ShutdownServer(false);
 
 	key_dest = key_game;			// remove console or menu
 	SCR_BeginLoadingPlaque ();
@@ -279,13 +279,11 @@ void Host_Map_f (void)
 
 	svs.serverflags = 0;			// haven't completed an episode yet
 	strcpy (name, Cmd_Argv(1));
-	Sys_Printf ("Host_Map: map %s\n", name);
 #ifdef QUAKE2
 	SV_SpawnServer (name, NULL);
 #else
 	SV_SpawnServer (name);
 #endif
-	Sys_Printf ("Host_Map: spawn returned, active=%d\n", sv.active);
 	if (!sv.active)
 		return;
 
@@ -299,9 +297,7 @@ void Host_Map_f (void)
 			strcat (cls.spawnparms, " ");
 		}
 
-		Sys_Printf ("Host_Map: connect local\n");
 		Cmd_ExecuteString ("connect local", src_command);
-		Sys_Printf ("Host_Map: connect done\n");
 	}
 }
 

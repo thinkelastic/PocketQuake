@@ -1,9 +1,11 @@
 /*
- * Memory Controller Interleaved Access Test
+ * Memory Controller Interleaved Access Test + Data Integrity Check
  *
  * Tests SDRAM (64MB), PSRAM/CRAM0 (16MB), and SRAM (256KB)
  * with 1/2/4 byte accesses including byte-enable preservation.
  * Tests DMA contention with concurrent CPU memory access.
+ * Computes CRC-32 checksums of quake.bin and pak0.pak to verify
+ * APF bridge loading integrity.
  *
  * Video scanout continuously reads SDRAM via burst interface,
  * providing realistic background contention for all SDRAM tests.
@@ -13,8 +15,9 @@
 #include "terminal.h"
 
 /* ---- System registers ---- */
+#define SYS_STATUS       (*(volatile uint32_t *)0x40000000)
+#define SYS_CYCLE_LO     (*(volatile uint32_t *)0x40000004)
 #define SYS_DISPLAY_MODE (*(volatile uint32_t *)0x4000000C)
-#define SYS_CYCLE_LO    (*(volatile uint32_t *)0x40000004)
 
 /* ---- DMA registers (0x44000000) ---- */
 #define DMA_SRC_ADDR  (*(volatile uint32_t *)0x44000000)
@@ -24,15 +27,20 @@
 #define DMA_CONTROL   (*(volatile uint32_t *)0x44000010)
 #define DMA_STATUS    (*(volatile uint32_t *)0x44000014)
 
-/* ---- Test addresses (non-overlapping) ---- */
-#define SDRAM_TEST    0x10400000u  /* SDRAM test area (past FBs) */
+/* ---- Loaded data addresses ---- */
+#define QUAKE_BIN_ADDR  0x10200000u  /* quake.bin in SDRAM (4MB slot) */
+#define QUAKE_BIN_SIZE  (4u * 1024 * 1024)
+#define PAK_DATA_ADDR   0x11000000u  /* pak0.pak in SDRAM (20MB slot) */
+
+/* ---- Test addresses (past loaded data regions) ---- */
+#define SDRAM_TEST    0x12800000u  /* SDRAM test area (past pak0.pak) */
 #define PSRAM_TEST    0x30100000u  /* PSRAM test area */
 #define SRAM_TEST     0x38000000u  /* SRAM test area (256KB at 0x38000000) */
-#define SDRAM_DMA_CPU 0x10600000u  /* CPU area during DMA */
+#define SDRAM_DMA_CPU 0x12900000u  /* CPU area during DMA */
 #define PSRAM_DMA_CPU 0x30200000u  /* CPU PSRAM area during DMA */
 #define SRAM_DMA_CPU  0x38010000u  /* CPU SRAM area during DMA */
-#define DMA_TARGET    0x10800000u  /* DMA fill/copy target */
-#define DMA_TARGET2   0x10804000u  /* DMA copy destination */
+#define DMA_TARGET    0x12A00000u  /* DMA fill/copy target */
+#define DMA_TARGET2   0x12A04000u  /* DMA copy destination */
 
 #define N_WORDS   256
 #define DMA_SIZE  16384  /* 16KB - long enough for overlap */
@@ -54,6 +62,44 @@ static void report(const char *name, int errs)
         term_putchar('\n');
         fail_count++;
     }
+}
+
+/* ============================================ */
+/* CRC-32 (IEEE 802.3 / Ethernet / zip)        */
+/* ============================================ */
+
+static uint32_t crc32_table[256];
+
+static void crc32_init(void)
+{
+    for (int i = 0; i < 256; i++) {
+        uint32_t c = (uint32_t)i;
+        for (int j = 0; j < 8; j++)
+            c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        crc32_table[i] = c;
+    }
+}
+
+/* Compute CRC-32 over a memory region (word-at-a-time for speed) */
+static uint32_t crc32_compute(const void *data, uint32_t len)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    const uint32_t *wp = (const uint32_t *)data;
+    uint32_t words = len >> 2;
+
+    for (uint32_t i = 0; i < words; i++) {
+        uint32_t w = wp[i];
+        crc = (crc >> 8) ^ crc32_table[(crc ^ w) & 0xFF];
+        crc = (crc >> 8) ^ crc32_table[(crc ^ (w >> 8)) & 0xFF];
+        crc = (crc >> 8) ^ crc32_table[(crc ^ (w >> 16)) & 0xFF];
+        crc = (crc >> 8) ^ crc32_table[(crc ^ (w >> 24)) & 0xFF];
+    }
+
+    const uint8_t *bp = (const uint8_t *)(wp + words);
+    for (uint32_t i = 0; i < (len & 3); i++)
+        crc = (crc >> 8) ^ crc32_table[(crc ^ bp[i]) & 0xFF];
+
+    return crc ^ 0xFFFFFFFFu;
 }
 
 /* ============================================ */
@@ -312,12 +358,89 @@ static int test_dma_copy_psram(void)
 }
 
 /* ============================================ */
+/* Data integrity checksums                     */
+/* ============================================ */
+static void test_checksums(void)
+{
+    uint32_t t0, t1, crc;
+
+    term_puts("\n-- Data Checksums --\n");
+
+    /* Wait for APF bridge to finish loading data slots */
+    term_puts("wait load...");
+    t0 = SYS_CYCLE_LO;
+    while (!(SYS_STATUS & (1 << 1))) {
+        if ((SYS_CYCLE_LO - t0) > 1000000000u) {  /* ~10s timeout */
+            term_puts("TIMEOUT\n");
+            return;
+        }
+    }
+    t1 = SYS_CYCLE_LO;
+    term_puts("OK ");
+    term_putdec((int32_t)(t1 - t0));
+    term_puts(" cyc\n");
+
+    /* ---- quake.bin (full 4MB slot) ---- */
+    term_puts("quake.bin 4MB ");
+    t0 = SYS_CYCLE_LO;
+    crc = crc32_compute((const void *)QUAKE_BIN_ADDR, QUAKE_BIN_SIZE);
+    t1 = SYS_CYCLE_LO;
+    term_puts("CRC=");
+    term_puthex(crc, 8);
+    term_putchar(' ');
+    term_putdec((int32_t)(t1 - t0));
+    term_puts("c\n");
+
+    /* ---- pak0.pak (size from PAK header) ---- */
+    volatile uint32_t *pak = (volatile uint32_t *)PAK_DATA_ADDR;
+    uint32_t ident  = pak[0];
+    uint32_t dirofs = pak[1];
+    uint32_t dirlen = pak[2];
+
+    /* Validate PAK magic ('PACK' as LE uint32 = 0x4B434150) */
+    term_puts("pak0.pak ");
+    if (ident != 0x4B434150u) {
+        term_puts("BAD MAGIC ");
+        term_puthex(ident, 8);
+        term_putchar('\n');
+        return;
+    }
+    term_puts("PACK OK\n");
+
+    uint32_t pak_size = dirofs + dirlen;
+    term_puts("  ofs=");
+    term_puthex(dirofs, 8);
+    term_puts(" len=");
+    term_puthex(dirlen, 8);
+    term_putchar('\n');
+
+    term_puts("  size=");
+    term_putdec((int32_t)pak_size);
+    term_puts(" (");
+    term_putdec((int32_t)(pak_size >> 20));
+    term_puts("MB)\n");
+
+    term_puts("  ");
+    t0 = SYS_CYCLE_LO;
+    crc = crc32_compute((const void *)PAK_DATA_ADDR, pak_size);
+    t1 = SYS_CYCLE_LO;
+    term_puts("CRC=");
+    term_puthex(crc, 8);
+    term_putchar(' ');
+    term_putdec((int32_t)(t1 - t0));
+    term_puts("c\n");
+}
+
+/* ============================================ */
 /* Main                                         */
 /* ============================================ */
 int main(void)
 {
     SYS_DISPLAY_MODE = 0;  /* Terminal mode */
     term_init();
+
+    /* Build CRC-32 lookup table */
+    crc32_init();
 
     term_puts("=== Mem Controller Test ===\n\n");
 
@@ -387,11 +510,14 @@ int main(void)
     term_puts(" cyc\n");
 
     if (fail_count == 0)
-        term_puts("ALL PASSED\n");
+        term_puts("ALL PASSED");
     else {
         term_putdec(fail_count);
-        term_puts(" FAILED\n");
+        term_puts(" FAILED");
     }
+
+    /* ---- Data integrity checksums ---- */
+    test_checksums();
 
     while (1)
         __asm__ volatile("wfi");
