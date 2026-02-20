@@ -149,9 +149,9 @@ void Turbulent8 (espan_t *pspan)
 	SPAN_TEX_WIDTH = 64;
 #endif
 
-	sdivz16stepu = d_sdivzstepu * 16;
-	tdivz16stepu = d_tdivzstepu * 16;
-	zi16stepu = d_zistepu * 16;
+	sdivz16stepu = d_sdivzstepu * 32;
+	tdivz16stepu = d_tdivzstepu * 32;
+	zi16stepu = d_zistepu * 32;
 
 	do
 	{
@@ -184,8 +184,8 @@ void Turbulent8 (espan_t *pspan)
 		do
 		{
 		// calculate s and t at the far end of the span
-			if (count >= 16)
-				r_turb_spancount = 16;
+			if (count >= 32)
+				r_turb_spancount = 32;
 			else
 				r_turb_spancount = count;
 
@@ -214,8 +214,8 @@ void Turbulent8 (espan_t *pspan)
 				else if (tnext < 16)
 					tnext = 16;	// guard against round-off error on <0 steps
 
-				r_turb_sstep = (snext - r_turb_s) >> 4;
-				r_turb_tstep = (tnext - r_turb_t) >> 4;
+				r_turb_sstep = (snext - r_turb_s) >> 5;
+				r_turb_tstep = (tnext - r_turb_t) >> 5;
 			}
 			else
 			{
@@ -307,8 +307,7 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 	ziNstepu = d_zistepu * 16;
 
 #if HW_SPAN_ACCEL
-	if (r_hwspan.value)
-		span_set_texture((unsigned int)pbase, cachewidth);
+	/* Texture is set per-span now (only for large spans) */
 #endif
 
 	do
@@ -317,6 +316,12 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 				(screenwidth * pspan->v) + pspan->u);
 
 		count = pspan->count;
+
+#if HW_SPAN_ACCEL
+		int use_hw = r_hwspan.value && (count >= 16);
+		if (use_hw)
+			span_set_texture((unsigned int)pbase, cachewidth);
+#endif
 
 	// calculate the initial s/z, t/z, 1/z, s, and t and clamp
 		du = (float)pspan->u;
@@ -413,7 +418,7 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 
 
 #if HW_SPAN_ACCEL
-			if (r_hwspan.value) {
+			if (use_hw) {
 				while (!span_can_accept())
 					;
 				span_draw_tex((unsigned int)pdest, s, t, sstep, tstep, spancount);

@@ -9,7 +9,7 @@
 
 /* Enable textured span offload on SDRAM-backed framebuffer path. */
 #define HW_SPAN_ACCEL 1
-#define HW_ZSPAN_ACCEL 1  /* Enabled: span rasterizer writes z-buffer via SRAM port */
+#define HW_ZSPAN_ACCEL 0  /* Disabled: z-buffer now in cacheable SDRAM, not SRAM */
 #define HW_TURB_ACCEL 1
 #define HW_SURFBLOCK_ACCEL 1
 

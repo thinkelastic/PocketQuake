@@ -6,7 +6,7 @@
 `default_nettype none
 
 module sram_controller #(
-    parameter WAIT_CYCLES = 5  // Wait cycles for SRAM access time (~55ns at 90MHz)
+    parameter WAIT_CYCLES = 5  // Wait cycles for SRAM access time (55ns chip, need ~6 cycles at 100MHz)
 )(
     input  wire        clk,
     input  wire        reset_n,

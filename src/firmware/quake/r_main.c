@@ -23,8 +23,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "r_local.h"
 #include "d_local.h"
 #include "libc.h"
-#include "dma_accel.h"
-#include "sram_fill_accel.h"
+
+#define SYS_DISPLAY_MODE (*(volatile unsigned int *)0x4000000C)
 
 //define	PASSAGES
 
@@ -127,11 +127,67 @@ static unsigned int pq_prof_alias_cycles_frame;
 static unsigned int pq_prof_edge_cycles_frame;
 static unsigned int pq_prof_frame_counter;
 
+/* Mode 2: per-frame cycle counters for additional functions */
+static unsigned int pq_prof_total_cycles_frame;
+static unsigned int pq_prof_setup_cycles_frame;
+static unsigned int pq_prof_markleaves_cycles_frame;
+static unsigned int pq_prof_zfill_wait_cycles_frame;
+static unsigned int pq_prof_entities_cycles_frame;
+static unsigned int pq_prof_viewmodel_cycles_frame;
+static unsigned int pq_prof_particles_cycles_frame;
+static unsigned int pq_prof_warp_cycles_frame;
+static unsigned int pq_prof_renderworld_cycles_frame;
+static unsigned int pq_prof_scanedges_cycles_frame;
+static unsigned int pq_prof_bentities_cycles_frame;
+
+/* Mode 2: 64-frame accumulators */
+static unsigned int pq_prof_total_accum;
+static unsigned int pq_prof_setup_accum;
+static unsigned int pq_prof_markleaves_accum;
+static unsigned int pq_prof_zfill_wait_accum;
+static unsigned int pq_prof_edge_accum;
+static unsigned int pq_prof_entities_accum;
+static unsigned int pq_prof_viewmodel_accum;
+static unsigned int pq_prof_particles_accum;
+static unsigned int pq_prof_warp_accum;
+static unsigned int pq_prof_spans8_accum;
+static unsigned int pq_prof_zspans_accum;
+static unsigned int pq_prof_alias_accum;
+static unsigned int pq_prof_spans8_calls_accum;
+static unsigned int pq_prof_zspans_calls_accum;
+static unsigned int pq_prof_renderworld_accum;
+static unsigned int pq_prof_scanedges_accum;
+static unsigned int pq_prof_bentities_accum;
+
+/* Mode 2: averaged values (updated every 64 frames) */
+static unsigned int pq_prof_avg_total;
+static unsigned int pq_prof_avg_setup;
+static unsigned int pq_prof_avg_markleaves;
+static unsigned int pq_prof_avg_zfill_wait;
+static unsigned int pq_prof_avg_edge;
+static unsigned int pq_prof_avg_entities;
+static unsigned int pq_prof_avg_viewmodel;
+static unsigned int pq_prof_avg_particles;
+static unsigned int pq_prof_avg_warp;
+static unsigned int pq_prof_avg_spans8;
+static unsigned int pq_prof_avg_zspans;
+static unsigned int pq_prof_avg_alias;
+static unsigned int pq_prof_avg_spans8_calls;
+static unsigned int pq_prof_avg_zspans_calls;
+static unsigned int pq_prof_avg_renderworld;
+static unsigned int pq_prof_avg_scanedges;
+static unsigned int pq_prof_avg_bentities;
+
+/* Mode tracking for display mode transitions */
+static int pq_prof_prev_mode;
+
 cvar_t	r_draworder = {"r_draworder","0"};
 cvar_t	r_speeds = {"r_speeds","0"};
 cvar_t	r_timegraph = {"r_timegraph","0"};
 cvar_t	r_graphheight = {"r_graphheight","10"};
 cvar_t	r_clearcolor = {"r_clearcolor","2"};
+cvar_t	r_fastsky = {"r_fastsky","0"};
+cvar_t	r_flatwater = {"r_flatwater","0"};
 cvar_t	r_waterwarp = {"r_waterwarp","0"};
 cvar_t	r_fullbright = {"r_fullbright","0"};
 cvar_t	r_dynamic = {"r_dynamic","0"};
@@ -217,6 +273,8 @@ void R_Init (void)
 	Cvar_RegisterVariable (&r_drawflat);
 	Cvar_RegisterVariable (&r_ambient);
 	Cvar_RegisterVariable (&r_clearcolor);
+	Cvar_RegisterVariable (&r_fastsky);
+	Cvar_RegisterVariable (&r_flatwater);
 	Cvar_RegisterVariable (&r_waterwarp);
 	Cvar_RegisterVariable (&r_fullbright);
 	Cvar_RegisterVariable (&r_dynamic);
@@ -912,6 +970,180 @@ void R_DrawBEntitiesOnList (void)
 
 /*
 ================
+PQ_Prof_DrawTerminal
+================
+*/
+static void PQ_Prof_DrawTerminal(void)
+{
+	char line[48];
+	int row = 0;
+
+	term_clear();
+
+	/* Header */
+	term_setpos(row++, 0);
+	term_puts("---- PocketQuake Profiler ----");
+
+	/* Column header */
+	term_setpos(row++, 0);
+	term_puts("Function           Cycles    ms");
+
+	/* Total frame */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "Total         %10u %5u.%u",
+		pq_prof_avg_total,
+		pq_prof_avg_total / 100000,
+		(pq_prof_avg_total / 10000) % 10);
+	term_puts(line);
+
+	/* R_EdgeDrawing */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "EdgeDrawing   %10u %5u.%u",
+		pq_prof_avg_edge,
+		pq_prof_avg_edge / 100000,
+		(pq_prof_avg_edge / 10000) % 10);
+	term_puts(line);
+
+	/* RenderWorld (BSP traversal + edge emit) */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "  RenderWorld %10u %5u.%u",
+		pq_prof_avg_renderworld,
+		pq_prof_avg_renderworld / 100000,
+		(pq_prof_avg_renderworld / 10000) % 10);
+	term_puts(line);
+
+	/* ScanEdges (includes Spans8+ZSpans) */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "  ScanEdges   %10u %5u.%u",
+		pq_prof_avg_scanedges,
+		pq_prof_avg_scanedges / 100000,
+		(pq_prof_avg_scanedges / 10000) % 10);
+	term_puts(line);
+
+	/* Spans8 */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "    Spans8    %10u %5u.%u",
+		pq_prof_avg_spans8,
+		pq_prof_avg_spans8 / 100000,
+		(pq_prof_avg_spans8 / 10000) % 10);
+	term_puts(line);
+
+	/* ZSpans */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "    ZSpans    %10u %5u.%u",
+		pq_prof_avg_zspans,
+		pq_prof_avg_zspans / 100000,
+		(pq_prof_avg_zspans / 10000) % 10);
+	term_puts(line);
+
+	/* BEntities */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "  BEntities   %10u %5u.%u",
+		pq_prof_avg_bentities,
+		pq_prof_avg_bentities / 100000,
+		(pq_prof_avg_bentities / 10000) % 10);
+	term_puts(line);
+
+	/* Alias */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "Alias         %10u %5u.%u",
+		pq_prof_avg_alias,
+		pq_prof_avg_alias / 100000,
+		(pq_prof_avg_alias / 10000) % 10);
+	term_puts(line);
+
+	/* R_DrawEntitiesOnList */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "Entities      %10u %5u.%u",
+		pq_prof_avg_entities,
+		pq_prof_avg_entities / 100000,
+		(pq_prof_avg_entities / 10000) % 10);
+	term_puts(line);
+
+	/* R_DrawViewModel */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "ViewModel     %10u %5u.%u",
+		pq_prof_avg_viewmodel,
+		pq_prof_avg_viewmodel / 100000,
+		(pq_prof_avg_viewmodel / 10000) % 10);
+	term_puts(line);
+
+	/* R_SetupFrame */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "SetupFrame    %10u %5u.%u",
+		pq_prof_avg_setup,
+		pq_prof_avg_setup / 100000,
+		(pq_prof_avg_setup / 10000) % 10);
+	term_puts(line);
+
+	/* R_MarkLeaves */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "MarkLeaves    %10u %5u.%u",
+		pq_prof_avg_markleaves,
+		pq_prof_avg_markleaves / 100000,
+		(pq_prof_avg_markleaves / 10000) % 10);
+	term_puts(line);
+
+	/* Z-clear wait */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "Z-clear wait  %10u %5u.%u",
+		pq_prof_avg_zfill_wait,
+		pq_prof_avg_zfill_wait / 100000,
+		(pq_prof_avg_zfill_wait / 10000) % 10);
+	term_puts(line);
+
+	/* Particles */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "Particles     %10u %5u.%u",
+		pq_prof_avg_particles,
+		pq_prof_avg_particles / 100000,
+		(pq_prof_avg_particles / 10000) % 10);
+	term_puts(line);
+
+	/* D_WarpScreen */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "WarpScreen    %10u %5u.%u",
+		pq_prof_avg_warp,
+		pq_prof_avg_warp / 100000,
+		(pq_prof_avg_warp / 10000) % 10);
+	term_puts(line);
+
+	/* Other/overhead */
+	unsigned int accounted = pq_prof_avg_edge + pq_prof_avg_entities +
+		pq_prof_avg_viewmodel + pq_prof_avg_setup +
+		pq_prof_avg_markleaves + pq_prof_avg_zfill_wait +
+		pq_prof_avg_particles + pq_prof_avg_warp;
+	unsigned int other = (pq_prof_avg_total > accounted) ?
+		pq_prof_avg_total - accounted : 0;
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "Other         %10u %5u.%u",
+		other, other / 100000, (other / 10000) % 10);
+	term_puts(line);
+
+	/* Blank separator */
+	row++;
+
+	/* Call counts */
+	term_setpos(row++, 0);
+	snprintf(line, sizeof(line), "Span calls: %u  Zspan: %u",
+		pq_prof_avg_spans8_calls,
+		pq_prof_avg_zspans_calls);
+	term_puts(line);
+
+	/* FPS estimate */
+	unsigned int total_ms = pq_prof_avg_total / 100000;
+	term_setpos(row++, 0);
+	if (total_ms > 0)
+		snprintf(line, sizeof(line), "~%u FPS (%u.%u ms/frame)",
+			1000 / total_ms, total_ms,
+			(pq_prof_avg_total / 10000) % 10);
+	else
+		snprintf(line, sizeof(line), "~999+ FPS");
+	term_puts(line);
+}
+
+/*
+================
 R_EdgeDrawing
 ================
 */
@@ -925,6 +1157,8 @@ static surf_t pq_lsurf_scratch[NUMSTACKSURFACES +
 PQ_FASTTEXT void R_EdgeDrawing (void)
 {
 	extern volatile unsigned int pq_dbg_stage;
+	unsigned int prof_sub;
+	int profiling = (int)pq_cycleprof.value;
 
 	if (auxedges)
 	{
@@ -956,7 +1190,11 @@ PQ_FASTTEXT void R_EdgeDrawing (void)
 		rw_time1 = Sys_FloatTime ();
 	}
 
+	if (profiling)
+		prof_sub = SYS_CYCLE_LO;
 	R_RenderWorld ();
+	if (profiling)
+		pq_prof_renderworld_cycles_frame = SYS_CYCLE_LO - prof_sub;
 	pq_dbg_stage = 0x3252;
 
 	if (r_drawculledpolys)
@@ -974,7 +1212,11 @@ PQ_FASTTEXT void R_EdgeDrawing (void)
 		db_time1 = rw_time2;
 	}
 
+	if (profiling)
+		prof_sub = SYS_CYCLE_LO;
 	R_DrawBEntitiesOnList ();
+	if (profiling)
+		pq_prof_bentities_cycles_frame = SYS_CYCLE_LO - prof_sub;
 	pq_dbg_stage = 0x3255;
 
 	if (r_dspeeds.value)
@@ -988,9 +1230,13 @@ PQ_FASTTEXT void R_EdgeDrawing (void)
 		/* PocketQuake: skip mid-render audio extra update for stability. */
 	}
 	pq_dbg_stage = 0x3256;
-	
+
+	if (profiling)
+		prof_sub = SYS_CYCLE_LO;
 	if (!(r_drawpolys | r_drawculledpolys))
 		R_ScanEdges ();
+	if (profiling)
+		pq_prof_scanedges_cycles_frame = SYS_CYCLE_LO - prof_sub;
 	pq_dbg_stage = 0x3257;
 }
 
@@ -1006,34 +1252,54 @@ void R_RenderView_ (void)
 {
 	extern volatile unsigned int pq_dbg_stage;
 	byte	warpbuffer[WARP_WIDTH * WARP_HEIGHT];
-	unsigned int edge_start = 0;
+	unsigned int prof_start;
+	int profiling = (int)pq_cycleprof.value;
 
 	r_warpbuffer = warpbuffer;
 
-	// Start z-buffer clear via SRAM fill engine (runs in background)
-	sram_fill_start((unsigned int)d_pzbuffer,
-	                d_zwidth * vid.height * sizeof(short), 0);
+	// Clear z-buffer (cacheable SDRAM — memset goes through D-cache)
+	memset(d_pzbuffer, 0, d_zwidth * vid.height * sizeof(short));
 
-	if (pq_cycleprof.value) {
+	if (profiling) {
 		pq_prof_spans8_cycles_frame = 0;
 		pq_prof_spans8_calls_frame = 0;
 		pq_prof_zspans_cycles_frame = 0;
 		pq_prof_zspans_calls_frame = 0;
 		pq_prof_alias_cycles_frame = 0;
 		pq_prof_edge_cycles_frame = 0;
+		pq_prof_total_cycles_frame = 0;
+		pq_prof_setup_cycles_frame = 0;
+		pq_prof_markleaves_cycles_frame = 0;
+		pq_prof_zfill_wait_cycles_frame = 0;
+		pq_prof_entities_cycles_frame = 0;
+		pq_prof_viewmodel_cycles_frame = 0;
+		pq_prof_particles_cycles_frame = 0;
+		pq_prof_warp_cycles_frame = 0;
+		pq_prof_renderworld_cycles_frame = 0;
+		pq_prof_scanedges_cycles_frame = 0;
+		pq_prof_bentities_cycles_frame = 0;
+		pq_prof_total_cycles_frame = SYS_CYCLE_LO; /* start of frame */
 	}
 
 	if (r_timegraph.value || r_speeds.value || r_dspeeds.value)
 		r_time1 = Sys_FloatTime ();
 
+	if (profiling)
+		prof_start = SYS_CYCLE_LO;
 	R_SetupFrame ();
+	if (profiling)
+		pq_prof_setup_cycles_frame = SYS_CYCLE_LO - prof_start;
 	pq_dbg_stage = 0x3201;
 
 #ifdef PASSAGES
 SetVisibilityByPassages ();
 #else
 	pq_dbg_stage = 0x3202;
+	if (profiling)
+		prof_start = SYS_CYCLE_LO;
 	R_MarkLeaves ();	// done here so we know if we're in water
+	if (profiling)
+		pq_prof_markleaves_cycles_frame = SYS_CYCLE_LO - prof_start;
 	pq_dbg_stage = 0x3203;
 #endif
 
@@ -1047,20 +1313,21 @@ SetVisibilityByPassages ();
 	if (!cl_entities[0].model || !cl.worldmodel)
 		Sys_Error ("R_RenderView: NULL worldmodel");
 	pq_dbg_stage = 0x3205;
-		
+
 	if (!r_dspeeds.value)
 	{
 		S_ExtraUpdate ();
 	}
 	pq_dbg_stage = 0x3206;
 
-	sram_fill_wait();  // ensure z-buffer clear is done before edge drawing
+	/* z-buffer clear is synchronous (memset), no wait needed */
+	pq_prof_zfill_wait_cycles_frame = 0;
 
-	if (pq_cycleprof.value)
-		edge_start = SYS_CYCLE_LO;
+	if (profiling)
+		prof_start = SYS_CYCLE_LO;
 	R_EdgeDrawing ();
-	if (pq_cycleprof.value)
-		pq_prof_edge_cycles_frame += (SYS_CYCLE_LO - edge_start);
+	if (profiling)
+		pq_prof_edge_cycles_frame = SYS_CYCLE_LO - prof_start;
 	pq_dbg_stage = 0x3207;
 
 	if (!r_dspeeds.value)
@@ -1068,7 +1335,7 @@ SetVisibilityByPassages ();
 		S_ExtraUpdate ();
 	}
 	pq_dbg_stage = 0x3208;
-	
+
 	if (r_dspeeds.value)
 	{
 		se_time2 = Sys_FloatTime ();
@@ -1076,7 +1343,11 @@ SetVisibilityByPassages ();
 	}
 	pq_dbg_stage = 0x3209;
 
+	if (profiling)
+		prof_start = SYS_CYCLE_LO;
 	R_DrawEntitiesOnList ();
+	if (profiling)
+		pq_prof_entities_cycles_frame = SYS_CYCLE_LO - prof_start;
 	pq_dbg_stage = 0x320A;
 
 	if (r_dspeeds.value)
@@ -1086,7 +1357,11 @@ SetVisibilityByPassages ();
 	}
 	pq_dbg_stage = 0x320B;
 
+	if (profiling)
+		prof_start = SYS_CYCLE_LO;
 	R_DrawViewModel ();
+	if (profiling)
+		pq_prof_viewmodel_cycles_frame = SYS_CYCLE_LO - prof_start;
 	pq_dbg_stage = 0x320C;
 
 	if (r_dspeeds.value)
@@ -1096,16 +1371,27 @@ SetVisibilityByPassages ();
 	}
 	pq_dbg_stage = 0x320D;
 
+	if (profiling)
+		prof_start = SYS_CYCLE_LO;
 	if (r_drawparticles.value)
 		R_DrawParticles ();
+	if (profiling)
+		pq_prof_particles_cycles_frame = SYS_CYCLE_LO - prof_start;
 	pq_dbg_stage = 0x320E;
 
 	if (r_dspeeds.value)
 		dp_time2 = Sys_FloatTime ();
 
+	if (profiling)
+		prof_start = SYS_CYCLE_LO;
 	if (r_dowarp)
 		D_WarpScreen ();
+	if (profiling)
+		pq_prof_warp_cycles_frame = SYS_CYCLE_LO - prof_start;
 	pq_dbg_stage = 0x320F;
+
+	if (profiling)
+		pq_prof_total_cycles_frame = SYS_CYCLE_LO - pq_prof_total_cycles_frame;
 
 	V_SetContentsColor (r_viewleaf->contents);
 
@@ -1114,7 +1400,7 @@ SetVisibilityByPassages ();
 
 	if (r_aliasstats.value)
 		R_PrintAliasStats ();
-		
+
 	if (r_speeds.value)
 		R_PrintTimes ();
 
@@ -1127,18 +1413,110 @@ SetVisibilityByPassages ();
 	if (r_reportedgeout.value && r_outofedges)
 		Con_Printf ("Short roughly %d edges\n", r_outofedges * 2 / 3);
 
-	if (pq_cycleprof.value) {
+	if (profiling) {
 		pq_prof_frame_counter++;
-		if ((pq_prof_frame_counter % 30) == 0) {
-			Con_Printf ("pq_prof cyc edge:%u spans:%u z:%u alias:%u calls s:%u z:%u\n",
-				pq_prof_edge_cycles_frame,
-				pq_prof_spans8_cycles_frame,
-				pq_prof_zspans_cycles_frame,
-				pq_prof_alias_cycles_frame,
-				pq_prof_spans8_calls_frame,
-				pq_prof_zspans_calls_frame);
+
+		if (profiling == 1) {
+			/* Mode 1: existing Con_Printf every 30 frames */
+			if ((pq_prof_frame_counter % 30) == 0) {
+				Con_Printf ("pq_prof cyc edge:%u spans:%u z:%u alias:%u calls s:%u z:%u\n",
+					pq_prof_edge_cycles_frame,
+					pq_prof_spans8_cycles_frame,
+					pq_prof_zspans_cycles_frame,
+					pq_prof_alias_cycles_frame,
+					pq_prof_spans8_calls_frame,
+					pq_prof_zspans_calls_frame);
+			}
+		} else if (profiling == 2) {
+			/* Mode 2: accumulate, average every 64 frames, draw terminal */
+			pq_prof_total_accum += pq_prof_total_cycles_frame;
+			pq_prof_setup_accum += pq_prof_setup_cycles_frame;
+			pq_prof_markleaves_accum += pq_prof_markleaves_cycles_frame;
+			pq_prof_zfill_wait_accum += pq_prof_zfill_wait_cycles_frame;
+			pq_prof_edge_accum += pq_prof_edge_cycles_frame;
+			pq_prof_entities_accum += pq_prof_entities_cycles_frame;
+			pq_prof_viewmodel_accum += pq_prof_viewmodel_cycles_frame;
+			pq_prof_particles_accum += pq_prof_particles_cycles_frame;
+			pq_prof_warp_accum += pq_prof_warp_cycles_frame;
+			pq_prof_spans8_accum += pq_prof_spans8_cycles_frame;
+			pq_prof_zspans_accum += pq_prof_zspans_cycles_frame;
+			pq_prof_alias_accum += pq_prof_alias_cycles_frame;
+			pq_prof_spans8_calls_accum += pq_prof_spans8_calls_frame;
+			pq_prof_zspans_calls_accum += pq_prof_zspans_calls_frame;
+			pq_prof_renderworld_accum += pq_prof_renderworld_cycles_frame;
+			pq_prof_scanedges_accum += pq_prof_scanedges_cycles_frame;
+			pq_prof_bentities_accum += pq_prof_bentities_cycles_frame;
+
+			if ((pq_prof_frame_counter & 63) == 0) {
+				pq_prof_avg_total = pq_prof_total_accum >> 6;
+				pq_prof_avg_setup = pq_prof_setup_accum >> 6;
+				pq_prof_avg_markleaves = pq_prof_markleaves_accum >> 6;
+				pq_prof_avg_zfill_wait = pq_prof_zfill_wait_accum >> 6;
+				pq_prof_avg_edge = pq_prof_edge_accum >> 6;
+				pq_prof_avg_entities = pq_prof_entities_accum >> 6;
+				pq_prof_avg_viewmodel = pq_prof_viewmodel_accum >> 6;
+				pq_prof_avg_particles = pq_prof_particles_accum >> 6;
+				pq_prof_avg_warp = pq_prof_warp_accum >> 6;
+				pq_prof_avg_spans8 = pq_prof_spans8_accum >> 6;
+				pq_prof_avg_zspans = pq_prof_zspans_accum >> 6;
+				pq_prof_avg_alias = pq_prof_alias_accum >> 6;
+				pq_prof_avg_spans8_calls = pq_prof_spans8_calls_accum >> 6;
+				pq_prof_avg_zspans_calls = pq_prof_zspans_calls_accum >> 6;
+				pq_prof_avg_renderworld = pq_prof_renderworld_accum >> 6;
+				pq_prof_avg_scanedges = pq_prof_scanedges_accum >> 6;
+				pq_prof_avg_bentities = pq_prof_bentities_accum >> 6;
+
+				pq_prof_total_accum = 0;
+				pq_prof_setup_accum = 0;
+				pq_prof_markleaves_accum = 0;
+				pq_prof_zfill_wait_accum = 0;
+				pq_prof_edge_accum = 0;
+				pq_prof_entities_accum = 0;
+				pq_prof_viewmodel_accum = 0;
+				pq_prof_particles_accum = 0;
+				pq_prof_warp_accum = 0;
+				pq_prof_spans8_accum = 0;
+				pq_prof_zspans_accum = 0;
+				pq_prof_alias_accum = 0;
+				pq_prof_spans8_calls_accum = 0;
+				pq_prof_zspans_calls_accum = 0;
+				pq_prof_renderworld_accum = 0;
+				pq_prof_scanedges_accum = 0;
+				pq_prof_bentities_accum = 0;
+
+				PQ_Prof_DrawTerminal();
+			}
 		}
 	}
+
+	/* Display mode transitions for profiling mode 2 */
+	if (profiling == 2 && pq_prof_prev_mode != 2) {
+		/* Entering mode 2: switch to terminal display */
+		SYS_DISPLAY_MODE = 0;
+		term_clear();
+		pq_prof_frame_counter = 0;
+		pq_prof_total_accum = 0;
+		pq_prof_setup_accum = 0;
+		pq_prof_markleaves_accum = 0;
+		pq_prof_zfill_wait_accum = 0;
+		pq_prof_edge_accum = 0;
+		pq_prof_entities_accum = 0;
+		pq_prof_viewmodel_accum = 0;
+		pq_prof_particles_accum = 0;
+		pq_prof_warp_accum = 0;
+		pq_prof_spans8_accum = 0;
+		pq_prof_zspans_accum = 0;
+		pq_prof_alias_accum = 0;
+		pq_prof_spans8_calls_accum = 0;
+		pq_prof_zspans_calls_accum = 0;
+		pq_prof_renderworld_accum = 0;
+		pq_prof_scanedges_accum = 0;
+		pq_prof_bentities_accum = 0;
+	} else if (profiling != 2 && pq_prof_prev_mode == 2) {
+		/* Leaving mode 2: switch back to framebuffer */
+		SYS_DISPLAY_MODE = 1;
+	}
+	pq_prof_prev_mode = profiling;
 
 // back to high floating-point precision
 	pq_dbg_stage = 0x3210;

@@ -113,10 +113,10 @@ SRCS_S = start.S
 
 # All sources
 ALL_C_SRCS = $(BOOT_SRCS_C) $(LIBC_SRCS) $(QUAKE_SRCS)
-OBJS = $(ALL_C_SRCS:.c=.o) $(SRCS_S:.S=.o) $(LIBC_ASM_SRCS:.S=.o) libgcc_norvc.o
+OBJS = $(ALL_C_SRCS:.c=.o) $(SRCS_S:.S=.o) $(LIBC_ASM_SRCS:.S=.o)
 
-# Compiler flags for RV32IMAF (hardware single-precision FPU, no compressed ISA for higher Fmax)
-ARCH = rv32imaf
+# Compiler flags for RV32IMAFC (hardware single-precision FPU + compressed ISA)
+ARCH = rv32imafc
 ABI = ilp32f
 CFLAGS = -march=$(ARCH) -mabi=$(ABI) -Os -Wall -Wextra
 CFLAGS += -ffreestanding -nostdlib -nostartfiles
@@ -155,10 +155,8 @@ LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -Wl,-Map=$(TARGET).map
 LDFLAGS += -flto
 
-# Use rv32im/ilp32 libgcc with patched ELF flags (no compressed instructions) since
-# VexRiscv has RVC disabled for higher Fmax.  ABI-incompatible float wrappers
-# (__extendsfdf2, __truncdfsf2) are provided by libgcc_norvc.o (ilp32f ABI).
-LIBGCC = libgcc_norvc.a
+# Standard libgcc for rv32imafc/ilp32f (includes compressed instructions)
+LIBGCC = $(shell $(CC) -march=$(ARCH) -mabi=$(ABI) -print-libgcc-file-name)
 LIBS = $(LIBGCC)
 
 # RAM size for MIF generation (64KB = 16384 words)

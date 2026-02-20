@@ -5,7 +5,6 @@
 // - Memory-mapped terminal at 0x20000000
 // - SDRAM access at 0x10000000 (64MB) - includes framebuffer
 // - PSRAM access at 0x30000000 (16MB) - cram0 only
-// - SRAM access at 0x38000000 (256KB) - async SRAM
 // - System registers at 0x40000000
 //
 
@@ -55,16 +54,6 @@ module cpu_system (
     input wire         psram_busy,
     input wire         psram_rdata_valid,  // Pulses when read data is valid
 
-    // SRAM word interface (to sram_controller via core_top)
-    output reg         sram_rd,
-    output reg         sram_wr,
-    output reg  [21:0] sram_addr,          // 22-bit word address (256KB addressable)
-    output reg  [31:0] sram_wdata,
-    output reg  [3:0]  sram_wstrb,         // Byte enables for SRAM writes
-    input wire  [31:0] sram_rdata,
-    input wire         sram_busy,
-    input wire         sram_q_valid,       // Pulses when read data is valid
-
     // Display control outputs
     output wire        display_mode,       // 0=terminal overlay, 1=framebuffer only
     output wire [24:0] fb_display_addr,    // SDRAM word address for video scanout
@@ -109,12 +98,6 @@ module cpu_system (
     output reg  [8:0]  atm_norm_addr,
     output reg  [31:0] atm_norm_wdata,
     input wire         atm_busy,
-
-    // SRAM fill register interface (directly to sram_fill)
-    output reg         sramfill_reg_wr,
-    output reg  [4:0]  sramfill_reg_addr,
-    output reg  [31:0] sramfill_reg_wdata,
-    input wire  [31:0] sramfill_reg_rdata,
 
     // Audio output interface (directly to audio_output)
     output reg         audio_sample_wr,
@@ -235,14 +218,12 @@ wire        live_mem_write = live_dbus_grant & dbus_we;
 // 0x50000000 - 0x53FFFFFF : SDRAM uncached alias (64MB, same physical SDRAM window)
 // 0x20000000 - 0x20001FFF : Terminal VRAM
 // 0x30000000 - 0x30FFFFFF : PSRAM (16MB) - cram0 only
-// 0x38000000 - 0x3803FFFF : SRAM (256KB) - async SRAM
 // 0x40000000 - 0x400000FF : System registers
 // 0x44000000 - 0x44FFFFFF : DMA Clear/Blit peripheral
 // 0x48000000 - 0x48FFFFFF : Span Rasterizer
 // 0x4D000000 - 0x4DFFFFFF : Link MMIO peripheral
 // 0x54000000 - 0x54003FFF : Colormap BRAM (16KB)
 // 0x58000000 - 0x58001FFF : Alias Transform MAC (registers + normal table)
-// 0x5C000000 - 0x5C025FFF : Z-buffer BRAM (153,600 bytes)
 // Pre-decode address regions from each bus independently.
 // This runs address decode in PARALLEL with grant arbitration, removing
 // the 32-bit address mux + comparator chain from the critical path.
@@ -256,7 +237,6 @@ wire dbus_sdram_select     = (dbus_byte_addr[31:26] == 6'b000100);
 wire dbus_sdram_uc_select  = (dbus_byte_addr[31:26] == 6'b010100);
 wire dbus_term_select      = (dbus_byte_addr[31:13] == 19'h10000);
 wire dbus_psram_select     = (dbus_byte_addr[31:24] == 8'h30);  // 0x30 only (16MB, CRAM0)
-wire dbus_sram_select      = (dbus_byte_addr[31:18] == 14'h0E00);
 wire dbus_sysreg_select    = (dbus_byte_addr[31:8]  == 24'h400000);
 wire dbus_dma_select       = (dbus_byte_addr[31:24] == 8'h44);
 wire dbus_span_select      = (dbus_byte_addr[31:24] == 8'h48);
@@ -264,7 +244,6 @@ wire dbus_link_select      = (dbus_byte_addr[31:24] == 8'h4D);
 wire dbus_cmap_select      = (dbus_byte_addr[31:14] == 18'h15000);
 wire dbus_atm_select       = (dbus_byte_addr[31:13] == 19'h2C000);
 wire dbus_audio_select     = (dbus_byte_addr[31:24] == 8'h4C);
-wire dbus_sramfill_select  = (dbus_byte_addr[31:24] == 8'h5C);
 
 // I-bus pre-decode
 wire ibus_ram_select       = (ibus_byte_addr[31:16] == 16'b0);
@@ -272,7 +251,6 @@ wire ibus_sdram_select     = (ibus_byte_addr[31:26] == 6'b000100);
 wire ibus_sdram_uc_select  = (ibus_byte_addr[31:26] == 6'b010100);
 wire ibus_term_select      = (ibus_byte_addr[31:13] == 19'h10000);
 wire ibus_psram_select     = (ibus_byte_addr[31:24] == 8'h30);  // 0x30 only (16MB, CRAM0)
-wire ibus_sram_select      = (ibus_byte_addr[31:18] == 14'h0E00);
 wire ibus_sysreg_select    = (ibus_byte_addr[31:8]  == 24'h400000);
 wire ibus_dma_select       = (ibus_byte_addr[31:24] == 8'h44);
 wire ibus_span_select      = (ibus_byte_addr[31:24] == 8'h48);
@@ -280,7 +258,6 @@ wire ibus_link_select      = (ibus_byte_addr[31:24] == 8'h4D);
 wire ibus_cmap_select      = (ibus_byte_addr[31:14] == 18'h15000);
 wire ibus_atm_select       = (ibus_byte_addr[31:13] == 19'h2C000);
 wire ibus_audio_select     = (ibus_byte_addr[31:24] == 8'h4C);
-wire ibus_sramfill_select  = (ibus_byte_addr[31:24] == 8'h5C);
 
 // Mux decoded results based on grant (1-bit mux vs 32-bit address mux + decode)
 wire live_ram_select       = live_dbus_grant ? dbus_ram_select       : ibus_ram_select;       // 0x00000000-0x0000FFFF (64KB)
@@ -288,7 +265,6 @@ wire live_sdram_select     = live_dbus_grant ? dbus_sdram_select     : ibus_sdra
 wire live_sdram_uc_select  = live_dbus_grant ? dbus_sdram_uc_select  : ibus_sdram_uc_select;  // 0x50000000-0x53FFFFFF (64MB uncached alias)
 wire live_term_select      = live_dbus_grant ? dbus_term_select      : ibus_term_select;      // 0x20000000-0x20001FFF
 wire live_psram_select     = live_dbus_grant ? dbus_psram_select     : ibus_psram_select;     // 0x30000000-0x30FFFFFF (16MB)
-wire live_sram_select      = live_dbus_grant ? dbus_sram_select      : ibus_sram_select;      // 0x38000000-0x3803FFFF (256KB)
 wire live_sysreg_select    = live_dbus_grant ? dbus_sysreg_select    : ibus_sysreg_select;    // 0x40000000-0x400000FF
 wire live_dma_select       = live_dbus_grant ? dbus_dma_select       : ibus_dma_select;       // 0x44000000-0x44FFFFFF
 wire live_span_select      = live_dbus_grant ? dbus_span_select      : ibus_span_select;      // 0x48000000-0x48FFFFFF
@@ -296,7 +272,6 @@ wire live_link_select      = live_dbus_grant ? dbus_link_select      : ibus_link
 wire live_cmap_select      = live_dbus_grant ? dbus_cmap_select      : ibus_cmap_select;      // 0x54000000-0x54003FFF (colormap BRAM, 16KB)
 wire live_atm_select       = live_dbus_grant ? dbus_atm_select       : ibus_atm_select;       // 0x58000000-0x58001FFF (ATM regs + norm table)
 wire live_audio_select     = live_dbus_grant ? dbus_audio_select     : ibus_audio_select;     // 0x4C000000-0x4CFFFFFF (audio output)
-wire live_sramfill_select  = live_dbus_grant ? dbus_sramfill_select  : ibus_sramfill_select;  // 0x5C000000-0x5CFFFFFF (SRAM fill)
 wire accept_access         = !mem_pending && live_mem_valid;
 
 // ============================================
@@ -709,12 +684,6 @@ reg psram_write_pending;
 reg psram_read_started;
 reg psram_write_started;
 reg psram_cmd_issued;
-reg sram_read_pending;
-reg sram_write_pending;
-reg sram_read_started;
-reg sram_write_started;
-reg sram_cmd_issued;
-reg [7:0] sram_issue_wait;
 reg [7:0] sdram_issue_wait;
 reg [7:0] psram_issue_wait;
 reg sysreg_pending;
@@ -725,7 +694,6 @@ reg atm_pending;
 reg atm_is_write;
 reg audio_pending;
 reg link_pending;
-reg sramfill_pending;
 reg [31:0] pending_rdata;
 reg sdram_read_is_prefetch;
 reg sdram_prefetch_primary_done;
@@ -797,12 +765,6 @@ always @(posedge clk or posedge reset) begin
         psram_read_started <= 0;
         psram_write_started <= 0;
         psram_cmd_issued <= 0;
-        sram_read_pending <= 0;
-        sram_write_pending <= 0;
-        sram_read_started <= 0;
-        sram_write_started <= 0;
-        sram_cmd_issued <= 0;
-        sram_issue_wait <= 0;
         sdram_issue_wait <= 0;
         sdram_burst_len <= 0;
         psram_issue_wait <= 0;
@@ -817,10 +779,6 @@ always @(posedge clk or posedge reset) begin
         atm_is_write <= 0;
         audio_pending <= 0;
         link_pending <= 0;
-        sramfill_pending <= 0;
-        sramfill_reg_wr <= 0;
-        sramfill_reg_addr <= 0;
-        sramfill_reg_wdata <= 0;
         link_reg_wr <= 0;
         link_reg_rd <= 0;
         link_reg_addr <= 0;
@@ -845,11 +803,6 @@ always @(posedge clk or posedge reset) begin
         psram_addr <= 0;
         psram_wdata <= 0;
         psram_wstrb <= 0;
-        sram_rd <= 0;
-        sram_wr <= 0;
-        sram_addr <= 0;
-        sram_wdata <= 0;
-        sram_wstrb <= 0;
         pending_rdata <= 0;
     end else begin
         // Default: deassert ACKs and single-cycle signals
@@ -860,11 +813,8 @@ always @(posedge clk or posedge reset) begin
         sdram_burst_len <= 3'd0;
         psram_rd <= 0;
         psram_wr <= 0;
-        sram_rd <= 0;
-        sram_wr <= 0;
         dma_reg_wr <= 0;
         span_reg_wr <= 0;
-        sramfill_reg_wr <= 0;
         atm_reg_wr <= 0;
         atm_norm_wr <= 0;
         audio_sample_wr <= 0;
@@ -944,25 +894,6 @@ always @(posedge clk or posedge reset) begin
                         psram_cmd_issued <= 0;
                         psram_issue_wait <= 0;
                     end
-                end else if (live_sram_select) begin
-                    sram_addr <= live_mem_addr[23:2];  // 22-bit word address (256KB)
-                    sram_wdata <= live_mem_wdata;
-                    sram_wstrb <= live_mem_wstrb;
-                    if (live_mem_write) begin
-                        mem_pending <= 1;
-                        sram_write_pending <= 1;
-                        sram_read_started <= 0;
-                        sram_write_started <= 0;
-                        sram_cmd_issued <= 0;
-                        sram_issue_wait <= 0;
-                    end else begin
-                        mem_pending <= 1;
-                        sram_read_pending <= 1;
-                        sram_read_started <= 0;
-                        sram_write_started <= 0;
-                        sram_cmd_issued <= 0;
-                        sram_issue_wait <= 0;
-                    end
                 end else if (live_term_select) begin
                     mem_pending <= 1;
                     term_pending <= 1;
@@ -1010,14 +941,6 @@ always @(posedge clk or posedge reset) begin
                             atm_reg_wr <= 1;
                             atm_reg_wdata <= live_mem_wdata;
                         end
-                    end
-                end else if (live_sramfill_select) begin
-                    mem_pending <= 1;
-                    sramfill_pending <= 1;
-                    sramfill_reg_addr <= live_mem_addr[6:2];
-                    if (|live_mem_wstrb) begin
-                        sramfill_reg_wr <= 1;
-                        sramfill_reg_wdata <= live_mem_wdata;
                     end
                 end else if (live_audio_select) begin
                     mem_pending <= 1;
@@ -1284,80 +1207,6 @@ always @(posedge clk or posedge reset) begin
                         pending_bus <= BUS_NONE;
                     end
                 end
-            end else if (sram_read_pending) begin
-                if (!sram_cmd_issued) begin
-                    if (!sram_busy) begin
-                        sram_rd <= 1;
-                        sram_cmd_issued <= 1;
-                        sram_read_started <= 0;
-                        sram_issue_wait <= 0;
-                    end
-                end else begin
-                    if (!sram_read_started) begin
-                        if (sram_busy) begin
-                            sram_read_started <= 1;
-                            sram_issue_wait <= 0;
-                        end else begin
-                            sram_issue_wait <= sram_issue_wait + 1'b1;
-                            if (&sram_issue_wait) begin
-                                sram_cmd_issued <= 0;
-                                sram_issue_wait <= 0;
-                            end
-                        end
-                    end
-                    if (sram_q_valid) begin
-                        pending_rdata <= sram_rdata;
-                        if (pending_bus == BUS_DBUS) begin
-                            dbus_ack <= 1;
-                            dbus_dat_miso <= sram_rdata;
-                        end else begin
-                            ibus_ack <= 1;
-                            ibus_dat_miso <= sram_rdata;
-                        end
-                        mem_pending <= 0;
-                        sram_read_pending <= 0;
-                        sram_read_started <= 0;
-                        sram_write_started <= 0;
-                        sram_cmd_issued <= 0;
-                        sram_issue_wait <= 0;
-                        pending_bus <= BUS_NONE;
-                    end
-                end
-            end else if (sram_write_pending) begin
-                if (!sram_cmd_issued) begin
-                    if (!sram_busy) begin
-                        sram_wr <= 1;
-                        sram_cmd_issued <= 1;
-                        sram_write_started <= 0;
-                        sram_issue_wait <= 0;
-                    end
-                end else begin
-                    if (!sram_write_started && sram_busy) begin
-                        sram_write_started <= 1;
-                        sram_issue_wait <= 0;
-                    end else if (!sram_write_started) begin
-                        sram_issue_wait <= sram_issue_wait + 1'b1;
-                        if (&sram_issue_wait) begin
-                            sram_cmd_issued <= 0;
-                            sram_issue_wait <= 0;
-                        end
-                    end else if (sram_write_started && !sram_busy) begin
-                        if (pending_bus == BUS_DBUS) begin
-                            dbus_ack <= 1;
-                            dbus_dat_miso <= 32'h0;
-                        end else begin
-                            ibus_ack <= 1;
-                            ibus_dat_miso <= 32'h0;
-                        end
-                        mem_pending <= 0;
-                        sram_write_pending <= 0;
-                        sram_read_started <= 0;
-                        sram_write_started <= 0;
-                        sram_cmd_issued <= 0;
-                        sram_issue_wait <= 0;
-                        pending_bus <= BUS_NONE;
-                    end
-                end
             end else if (term_pending && term_mem_ready) begin
                 if (pending_bus == BUS_DBUS) begin
                     dbus_ack <= 1;
@@ -1431,18 +1280,6 @@ always @(posedge clk or posedge reset) begin
                     atm_pending <= 0;
                     pending_bus <= BUS_NONE;
                 end
-            end else if (sramfill_pending) begin
-                // SRAM fill registers respond in 1 cycle
-                if (pending_bus == BUS_DBUS) begin
-                    dbus_ack <= 1;
-                    dbus_dat_miso <= sramfill_reg_rdata;
-                end else begin
-                    ibus_ack <= 1;
-                    ibus_dat_miso <= sramfill_reg_rdata;
-                end
-                mem_pending <= 0;
-                sramfill_pending <= 0;
-                pending_bus <= BUS_NONE;
             end else if (audio_pending) begin
                 // Audio registers respond in 1 cycle
                 // Read from 0x4C000004: return FIFO status

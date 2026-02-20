@@ -27,7 +27,7 @@ object GenPocketQuake extends App {
     plugins = List(
       new IBusCachedPlugin(
         resetVector = null,           // creates externalResetVector input
-        compressedGen = false,        // RVC disabled for higher Fmax
+        compressedGen = true,         // RVC enabled for smaller code / better I$ hit rate
         injectorStage = true,         // extra pipeline stage for timing
         relaxedPcCalculation = true,
         prediction = DYNAMIC,

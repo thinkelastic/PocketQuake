@@ -365,20 +365,6 @@ wire [31:0] dma_sdram_wdata;
 wire [3:0]  dma_sdram_wstrb;
 wire        dma_active;
 
-// SRAM fill register interface (between cpu_system and sram_fill)
-wire        sramfill_reg_wr;
-wire [4:0]  sramfill_reg_addr;
-wire [31:0] sramfill_reg_wdata;
-wire [31:0] sramfill_reg_rdata;
-
-// SRAM fill write interface (to SRAM mux)
-wire        sramfill_sram_wr;
-wire [15:0] sramfill_sram_addr;
-wire [31:0] sramfill_sram_wdata;
-wire [3:0]  sramfill_sram_wstrb;
-wire        sramfill_sram_busy;
-wire        sramfill_active;
-
 // Span rasterizer register interface (between cpu_system and span_rasterizer)
 wire        span_reg_wr;
 wire [4:0]  span_reg_addr;
@@ -419,6 +405,7 @@ wire        link_sck_oe;
 wire        link_sd_out;
 wire        link_sd_oe;
 
+
 // Span rasterizer colormap BRAM interface (port B, through cpu_system)
 wire [11:0] span_cmap_addr;
 wire [31:0] span_cmap_rdata;
@@ -432,13 +419,6 @@ wire [3:0]  span_sdram_wstrb;
 wire [2:0]  span_sdram_burst_len;
 wire        span_active;
 
-// Span rasterizer SRAM interface (for z-span writes to SRAM z-buffer)
-wire        span_sram_wr;
-wire [21:0] span_sram_addr;
-wire [31:0] span_sram_wdata;
-wire [3:0]  span_sram_wstrb;
-wire        span_sram_busy;
-
 // Peripheral SDRAM mux output (to SDRAM arbiter)
 wire        periph_sdram_rd;
 wire        periph_sdram_wr;
@@ -448,69 +428,13 @@ wire [3:0]  periph_sdram_wstrb;
 wire [2:0]  periph_sdram_burst_len;
 wire        periph_active;
 
-// CPU to SRAM interface
-wire        cpu_sram_rd;
-wire        cpu_sram_wr;
-wire [21:0] cpu_sram_addr;
-wire [31:0] cpu_sram_wdata;
-wire [3:0]  cpu_sram_wstrb;
-wire [31:0] cpu_sram_rdata;
-wire        cpu_sram_busy;
-wire        cpu_sram_q_valid;
-
-// SRAM Controller (256KB async SRAM)
-// Tristate handled here at top level to avoid synthesis issues through hierarchy
-wire [15:0] sram_dq_out_w;
-wire [15:0] sram_dq_in_w = sram_dq;
-wire        sram_dq_oe_w;
-wire        sram_ctrl_busy;  // Raw busy from controller
-
-assign sram_dq = sram_dq_oe_w ? sram_dq_out_w : 16'hZZZZ;
-
-// SRAM arbitration: CPU > span rasterizer > sram_fill
-wire cpu_sram_active = cpu_sram_rd | cpu_sram_wr;
-wire span_or_fill    = span_sram_wr | sramfill_sram_wr;
-wire        mux_sram_rd    = cpu_sram_rd;
-wire        mux_sram_wr    = cpu_sram_active ? cpu_sram_wr      :
-                             span_sram_wr    ? 1'b1              :
-                                               sramfill_sram_wr;
-wire [21:0] mux_sram_addr  = cpu_sram_active ? cpu_sram_addr                      :
-                             span_sram_wr    ? span_sram_addr                      :
-                                               {6'd0, sramfill_sram_addr};
-wire [31:0] mux_sram_wdata = cpu_sram_active ? cpu_sram_wdata   :
-                             span_sram_wr    ? span_sram_wdata   :
-                                               sramfill_sram_wdata;
-wire [3:0]  mux_sram_wstrb = cpu_sram_active ? cpu_sram_wstrb   :
-                             span_sram_wr    ? span_sram_wstrb   :
-                                               sramfill_sram_wstrb;
-
-// CPU busy comes from controller (CPU has priority, never blocked by mux)
-assign cpu_sram_busy = sram_ctrl_busy;
-// Span sees busy when CPU is accessing or controller is busy
-assign span_sram_busy = cpu_sram_active | sram_ctrl_busy;
-// Fill sees busy when CPU or span is accessing or controller is busy
-assign sramfill_sram_busy = cpu_sram_active | span_sram_wr | sram_ctrl_busy;
-
-sram_controller sram0 (
-    .clk(clk_ram_controller),
-    .reset_n(reset_n),
-    .word_rd(mux_sram_rd),
-    .word_wr(mux_sram_wr),
-    .word_addr(mux_sram_addr),
-    .word_data(mux_sram_wdata),
-    .word_wstrb(mux_sram_wstrb),
-    .word_q(cpu_sram_rdata),
-    .word_busy(sram_ctrl_busy),
-    .word_q_valid(cpu_sram_q_valid),
-    .sram_a(sram_a),
-    .sram_dq_out(sram_dq_out_w),
-    .sram_dq_in(sram_dq_in_w),
-    .sram_dq_oe(sram_dq_oe_w),
-    .sram_oe_n(sram_oe_n),
-    .sram_we_n(sram_we_n),
-    .sram_ub_n(sram_ub_n),
-    .sram_lb_n(sram_lb_n)
-);
+// SRAM pins - tie off (SRAM no longer used, z-buffer moved to SDRAM)
+assign sram_dq   = 16'hZZZZ;
+assign sram_a    = 17'h0;
+assign sram_oe_n = 1'b1;
+assign sram_we_n = 1'b1;
+assign sram_ub_n = 1'b1;
+assign sram_lb_n = 1'b1;
 
 assign dbg_tx = 1'bZ;
 assign user1 = 1'bZ;
@@ -1129,15 +1053,6 @@ assign video_hs = vidout_hs;
         .psram_rdata(cpu_psram_rdata),
         .psram_busy(cpu_psram_busy),
         .psram_rdata_valid(cpu_psram_rdata_valid),
-        // SRAM interface (to sram_controller)
-        .sram_rd(cpu_sram_rd),
-        .sram_wr(cpu_sram_wr),
-        .sram_addr(cpu_sram_addr),
-        .sram_wdata(cpu_sram_wdata),
-        .sram_wstrb(cpu_sram_wstrb),
-        .sram_rdata(cpu_sram_rdata),
-        .sram_busy(cpu_sram_busy),
-        .sram_q_valid(cpu_sram_q_valid),
         // Display control
         .display_mode(display_mode),
         .fb_display_addr(fb_display_addr),
@@ -1163,11 +1078,6 @@ assign video_hs = vidout_hs;
         .dma_reg_addr(dma_reg_addr),
         .dma_reg_wdata(dma_reg_wdata),
         .dma_reg_rdata(dma_reg_rdata),
-        // SRAM fill register interface
-        .sramfill_reg_wr(sramfill_reg_wr),
-        .sramfill_reg_addr(sramfill_reg_addr),
-        .sramfill_reg_wdata(sramfill_reg_wdata),
-        .sramfill_reg_rdata(sramfill_reg_rdata),
         // Span rasterizer register interface
         .span_reg_wr(span_reg_wr),
         .span_reg_addr(span_reg_addr),
@@ -1220,22 +1130,6 @@ assign video_hs = vidout_hs;
         .active(dma_active)
     );
 
-    // SRAM Fill Engine (z-buffer clear via SRAM)
-    sram_fill sramfill0 (
-        .clk(clk_cpu),
-        .reset_n(reset_n),
-        .reg_wr(sramfill_reg_wr),
-        .reg_addr(sramfill_reg_addr),
-        .reg_wdata(sramfill_reg_wdata),
-        .reg_rdata(sramfill_reg_rdata),
-        .word_wr(sramfill_sram_wr),
-        .word_addr(sramfill_sram_addr),
-        .word_data(sramfill_sram_wdata),
-        .word_wstrb(sramfill_sram_wstrb),
-        .word_busy(sramfill_sram_busy),
-        .active(sramfill_active)
-    );
-
     // Span Rasterizer peripheral
     span_rasterizer span (
         .clk(clk_cpu),
@@ -1255,12 +1149,12 @@ assign video_hs = vidout_hs;
         .sdram_rdata(ram1_word_q),
         .sdram_busy(ram1_word_busy | bridge_wr_active | bridge_rd_active),
         .sdram_rdata_valid(ram1_word_q_valid),
-        // SRAM write interface (for z-span writes to SRAM z-buffer)
-        .sram_wr(span_sram_wr),
-        .sram_addr(span_sram_addr),
-        .sram_wdata(span_sram_wdata),
-        .sram_wstrb(span_sram_wstrb),
-        .sram_busy(span_sram_busy),
+        // SRAM write interface (disconnected - z-buffer moved to SDRAM)
+        .sram_wr(),
+        .sram_addr(),
+        .sram_wdata(),
+        .sram_wstrb(),
+        .sram_busy(1'b0),
         // Status
         .active(span_active),
         // Colormap BRAM interface (port B, read-only)

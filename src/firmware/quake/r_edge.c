@@ -677,7 +677,7 @@ PQ_FASTTEXT void R_GenerateSpansBackward (void)
 ==============
 R_ScanEdges
 
-Input: 
+Input:
 newedges[] array
 	this has links to edges, which have links to surfaces
 
@@ -685,6 +685,7 @@ Output:
 Each surface has a linked list of its visible spans
 ==============
 */
+
 PQ_FASTTEXT void R_ScanEdges (void)
 {
 	int		iv, bottom;
@@ -707,7 +708,7 @@ PQ_FASTTEXT void R_ScanEdges (void)
 	edge_head.next = &edge_tail;
 	edge_head.surfs[0] = 0;
 	edge_head.surfs[1] = 1;
-	
+
 	edge_tail.u = (r_refdef.vrectright << 20) + 0xFFFFF;
 	edge_tail_u_shift20 = edge_tail.u >> 20;
 	edge_tail.u_step = 0;
@@ -715,7 +716,7 @@ PQ_FASTTEXT void R_ScanEdges (void)
 	edge_tail.next = &edge_aftertail;
 	edge_tail.surfs[0] = 1;
 	edge_tail.surfs[1] = 0;
-	
+
 	edge_aftertail.u = -1;		// force a move
 	edge_aftertail.u_step = 0;
 	edge_aftertail.next = &edge_sentinel;
@@ -725,7 +726,7 @@ PQ_FASTTEXT void R_ScanEdges (void)
 	edge_sentinel.u = 2000 << 24;		// make sure nothing sorts past this
 	edge_sentinel.prev = &edge_aftertail;
 
-//	
+//
 // process all scan lines
 //
 	bottom = r_refdef.vrectbottom - 1;
@@ -750,7 +751,7 @@ PQ_FASTTEXT void R_ScanEdges (void)
 			if (span_p >= max_span_p)
 			{
 				/* PocketQuake: skip mid-render audio extra update for stability. */
-			
+
 				if (r_drawculledpolys)
 				{
 				R_DrawCulledPolys ();

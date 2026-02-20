@@ -52,7 +52,7 @@ void D_DrawPoly (void)
 D_MipLevelForScale
 =============
 */
-int D_MipLevelForScale (float scale)
+PQ_FASTTEXT int D_MipLevelForScale (float scale)
 {
 	int		lmiplevel;
 
@@ -171,7 +171,7 @@ PQ_FASTTEXT void D_CalcGradients (msurface_t *pface)
 D_DrawSurfaces
 ==============
 */
-void D_DrawSurfaces (void)
+PQ_FASTTEXT void D_DrawSurfaces (void)
 {
 	surf_t			*s;
 	msurface_t		*pface;

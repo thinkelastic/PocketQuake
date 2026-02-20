@@ -25,8 +25,9 @@ extern viddef_t vid;
 #define VID_PIXELS          (BASEWIDTH * BASEHEIGHT)
 #define SURFCACHE_SIZE      (1024 * 1024)
 
-/* Surface cache stays in BSS (SDRAM); z-buffer moved to SRAM */
+/* Surface cache and z-buffer in BSS (cacheable SDRAM) */
 static byte surfcache_storage[SURFCACHE_SIZE];
+static short zbuffer_storage[BASEWIDTH * BASEHEIGHT];
 
 unsigned short d_8to16table[256];
 unsigned d_8to24table[256];
@@ -83,8 +84,8 @@ void VID_Init(unsigned char *palette)
 
     Sys_Printf("VID_Init: buffer=%x\n", (unsigned)vid.buffer);
 
-    /* Z-buffer in SRAM: dedicated 256KB chip, no SDRAM contention */
-    d_pzbuffer = (short *)0x38000000u;
+    /* Z-buffer in cacheable SDRAM (BSS) for fast D-cache access */
+    d_pzbuffer = zbuffer_storage;
     D_InitCaches(surfcache_storage, SURFCACHE_SIZE);
 
     VID_SetPalette(palette);
