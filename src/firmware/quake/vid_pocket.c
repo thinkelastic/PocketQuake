@@ -23,7 +23,7 @@ extern viddef_t vid;
 #define SDRAM_UC_BASE       0x50000000u
 
 #define VID_PIXELS          (BASEWIDTH * BASEHEIGHT)
-#define SURFCACHE_SIZE      (1024 * 1024)
+#define SURFCACHE_SIZE      (2 * 1024 * 1024)
 
 /* Surface cache and z-buffer in BSS (cacheable SDRAM) */
 static byte surfcache_storage[SURFCACHE_SIZE];

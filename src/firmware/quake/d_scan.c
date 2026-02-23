@@ -302,9 +302,9 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 
 	pbase = (unsigned char *)cacheblock;
 
-	sdivzNstepu = d_sdivzstepu * 16;
-	tdivzNstepu = d_tdivzstepu * 16;
-	ziNstepu = d_zistepu * 16;
+	sdivzNstepu = d_sdivzstepu * 8;
+	tdivzNstepu = d_tdivzstepu * 8;
+	ziNstepu = d_zistepu * 8;
 
 #if HW_SPAN_ACCEL
 	/* Texture is set per-span now (only for large spans) */
@@ -318,7 +318,7 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 		count = pspan->count;
 
 #if HW_SPAN_ACCEL
-		int use_hw = r_hwspan.value && (count >= 16);
+		int use_hw = r_hwspan.value;
 		if (use_hw)
 			span_set_texture((unsigned int)pbase, cachewidth);
 #endif
@@ -347,8 +347,8 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 		do
 		{
 		// calculate s and t at the far end of the span
-			if (count >= 16)
-				spancount = 16;
+			if (count >= 8)
+				spancount = 8;
 			else
 				spancount = count;
 
@@ -366,19 +366,19 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 				snext = (int)(sdivz * z) + sadjust;
 				if (snext > bbextents)
 					snext = bbextents;
-				else if (snext < 16)
-					snext = 16;	// prevent round-off error on <0 steps from
+				else if (snext < 8)
+					snext = 8;	// prevent round-off error on <0 steps from
 								//  from causing overstepping & running off the
 								//  edge of the texture
 
 				tnext = (int)(tdivz * z) + tadjust;
 				if (tnext > bbextentt)
 					tnext = bbextentt;
-				else if (tnext < 16)
-					tnext = 16;	// guard against round-off error on <0 steps
+				else if (tnext < 8)
+					tnext = 8;	// guard against round-off error on <0 steps
 
-				sstep = (snext - s) >> 4;
-				tstep = (tnext - t) >> 4;
+				sstep = (snext - s) >> 3;
+				tstep = (tnext - t) >> 3;
 			}
 			else
 			{
@@ -394,16 +394,16 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 				snext = (int)(sdivz * z) + sadjust;
 				if (snext > bbextents)
 					snext = bbextents;
-				else if (snext < 16)
-					snext = 16;	// prevent round-off error on <0 steps from
+				else if (snext < 8)
+					snext = 8;	// prevent round-off error on <0 steps from
 								//  from causing overstepping & running off the
 								//  edge of the texture
 
 				tnext = (int)(tdivz * z) + tadjust;
 				if (tnext > bbextentt)
 					tnext = bbextentt;
-				else if (tnext < 16)
-					tnext = 16;	// guard against round-off error on <0 steps
+				else if (tnext < 8)
+					tnext = 8;	// guard against round-off error on <0 steps
 
 				if (spancount > 1)
 				{

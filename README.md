@@ -169,7 +169,7 @@ Three-way priority mux for SRAM access: CPU > span rasterizer > fill engine.
 |---|---|
 | **PQ_FASTTEXT** | ~40 hot rendering functions pinned to 64 KB BRAM for single-cycle access |
 | **LTO** | Link-time optimization across all Quake source files (saves ~12 KB code) |
-| **16-pixel spans** | `D_DrawSpans8` processes 16 pixels per perspective-correct step (was 8) |
+| **8-pixel spans** | `D_DrawSpans8` processes 8 pixels per perspective-correct step |
 | **HW span accel** | Textured spans offloaded to FPGA rasterizer |
 | **HW z-span accel** | Z-buffer writes offloaded to FPGA via SRAM port |
 | **HW z-clear** | SRAM fill engine clears z-buffer while CPU does frame setup |
@@ -177,6 +177,9 @@ Three-way priority mux for SRAM access: CPU > span rasterizer > fill engine.
 | **Write-behind** | Rasterizer overlaps SDRAM writes with next pixel computation |
 | **Texture prefetch** | Non-blocking background SDRAM reads predict next cache line |
 | **M10K cache** | Texture cache data in M10K block RAM eliminates 16:1 combinational mux |
+| **Size culling** | BSP subtrees culled when projected bounding box smaller than `r_cullsize` pixels |
+| **Surface cache 2 MB** | Large surface cache reduces texture re-rasterization thrashing |
+| **Scanline alias models** | Alias models use faster scanline path instead of recursive subdivision |
 
 ## FPGA Resource Usage
 

@@ -48,7 +48,7 @@ output  reg             word_q_valid  // Pulses high for one cycle when word_q d
 );
 
     // tristate for DQ
-    reg             phy_dq_oe;      
+    reg             phy_dq_oe;
     assign          phy_dq = phy_dq_oe ? phy_dq_out : 16'bZZZZZZZZZZZZZZZZ;
     reg     [15:0]  phy_dq_out;
 
@@ -75,7 +75,7 @@ assign {phy_ras, phy_cas, phy_we} = cmd;
     localparam      TIMING_WRITE        =   4'd2;   // tWR = 2ck
 
     reg     [5:0]   state;
-    
+
     localparam      ST_RESET            = 'd0;
     localparam      ST_BOOT_0           = 'd1;
     localparam      ST_BOOT_1           = 'd2;
@@ -84,7 +84,11 @@ assign {phy_ras, phy_cas, phy_we} = cmd;
     localparam      ST_BOOT_4           = 'd5;
     localparam      ST_BOOT_5           = 'd6;
     localparam      ST_IDLE             = 'd7;
-    
+
+    // Open-page row-hit optimization states
+    localparam      ST_PRECHG_WAIT      = 'd8;   // Wait tRP after precharge (then refresh or ACT)
+    localparam      ST_WRITE_HIT        = 'd9;   // DQ setup for row-hit writes
+
     localparam      ST_WRITE_0          = 'd20;
     localparam      ST_WRITE_1          = 'd21;
     localparam      ST_WRITE_2          = 'd22;
@@ -92,7 +96,7 @@ assign {phy_ras, phy_cas, phy_we} = cmd;
     localparam      ST_WRITE_4          = 'd24;
     localparam      ST_WRITE_5          = 'd25;
     localparam      ST_WRITE_6          = 'd26;
-    
+
     localparam      ST_READ_0           = 'd30;
     localparam      ST_READ_1           = 'd31;
     localparam      ST_READ_2           = 'd32;
@@ -103,7 +107,7 @@ assign {phy_ras, phy_cas, phy_we} = cmd;
     localparam      ST_READ_7           = 'd37;
     localparam      ST_READ_8           = 'd38;
     localparam      ST_READ_9           = 'd39;
-    
+
     localparam      ST_BURSTWR_0        = 'd46;
     localparam      ST_BURSTWR_1        = 'd47;
     localparam      ST_BURSTWR_2        = 'd48;
@@ -112,17 +116,17 @@ assign {phy_ras, phy_cas, phy_we} = cmd;
     localparam      ST_BURSTWR_5        = 'd51;
     localparam      ST_BURSTWR_6        = 'd52;
     localparam      ST_BURSTWR_7        = 'd53;
-    
+
     localparam      ST_REFRESH_0        = 'd60;
     localparam      ST_REFRESH_1        = 'd61;
-    
-    
+
+
     reg     [23:0]  delay_boot;
     reg     [15:0]  dc;
     // Refresh every ~5.69us at 90MHz (512 cycles) to satisfy 8K-row SDRAM timing.
     reg     [8:0]   refresh_count;
     reg             issue_autorefresh;
-    
+
     wire reset_n_s;
 synch_3 s1(reset_n, reset_n_s, controller_clk);
 
@@ -141,30 +145,45 @@ synch_3 s1(reset_n, reset_n_s, controller_clk);
 
     reg burst_rd_queue;
     reg burstwr_queue;
-    
+
     reg             word_op;
     reg             bram_op;
     reg     [24:0]  addr;
     wire    [9:0]   addr_col9_next_1 = addr[9:0] + 'h1;
-    
+
     reg     [10:0]  length;
     wire    [10:0]  length_next = length - 'h1;
     reg             enable_dq_read, enable_dq_read_1, enable_dq_read_2, enable_dq_read_3, enable_dq_read_4, enable_dq_read_5;
     reg             enable_dq_read_toggle;
-    
+
     reg             enable_data_done, enable_data_done_1, enable_data_done_2, enable_data_done_3, enable_data_done_4;
 
     reg             read_newrow;
     reg             read_cmd_issued;    // Full-page burst: track if READ issued for current row
     reg             burstwr_newrow;
-    
-    
+
+    // Open-page: single-bank tracking (only one bank open at a time)
+    reg     [1:0]   open_bank;          // Which bank is currently open
+    reg     [12:0]  open_row;           // Which row is open in that bank
+    reg             row_open;           // Whether any row is currently open
+    reg     [3:0]   open_timer;         // Saturating tRAS counter
+    reg     [1:0]   prechg_return;      // After precharge: 0=READ_0, 1=WRITE_0, 2=BURSTWR_0, 3=REFRESH_0
+
+    // Open-page row-hit detection (combinational)
+    wire    [24:0]  pending_addr      = word_addr_captured << 1;
+    wire    [1:0]   pending_bank      = pending_addr[24:23];
+    wire    [12:0]  pending_row       = pending_addr[22:10];
+    wire            pending_row_hit   = row_open && (pending_bank == open_bank) &&
+                                        (pending_row == open_row);
+    wire            pending_need_prechg = row_open && ((pending_bank != open_bank) ||
+                                          (pending_row != open_row));
+
     reg     [15:0]  phy_dq_latched;
 always @(posedge controller_clk) begin
     phy_dq_latched <= phy_dq;
 end
 
-    
+
 always @(*) begin
     burst_data_done <= enable_data_done_4;
 end
@@ -182,20 +201,24 @@ always @(posedge controller_clk) begin
     burst_data_valid <= 0;
     burstwr_ready <= 0;
     word_q_valid <= 0;  // Clear each cycle, set when read data is captured
-    
+
     enable_dq_read_5 <= enable_dq_read_4;
     enable_dq_read_4 <= enable_dq_read_3;
     enable_dq_read_3 <= enable_dq_read_2;
     enable_dq_read_2 <= enable_dq_read_1;
     enable_dq_read_1 <= enable_dq_read;
     enable_dq_read <= 0;
-    
+
     enable_data_done_4 <= enable_data_done_3;
     enable_data_done_3 <= enable_data_done_2;
     enable_data_done_2 <= enable_data_done_1;
     enable_data_done_1 <= enable_data_done;
     enable_data_done <= 0;
-    
+
+    // Open-page tRAS timer: saturating increment each cycle
+    if (row_open && open_timer < TIMING_ACT_PRECHG)
+        open_timer <= open_timer + 4'd1;
+
     // delayed by CAS latency for reads
     // CAS=3 means data appears 3 cycles after READ command
     // enable_dq_read_4 = CAS + 1 (for input register latency)
@@ -230,8 +253,8 @@ always @(posedge controller_clk) begin
             end
         end
     end
-    
-    
+
+
     case(state)
     ST_RESET: begin
         phy_cke <= 0;
@@ -250,11 +273,11 @@ always @(posedge controller_clk) begin
         if(delay_boot == 30000) begin
             // >=200us power-up delay (30000 cycles @90MHz ~= 333us)
             dc <= 0;
-            
+
             // precharge all
             cmd <= CMD_PRECHG;
             phy_a[10] = 1'b1;
-    
+
             state <= ST_BOOT_1;
         end
     end
@@ -262,7 +285,7 @@ always @(posedge controller_clk) begin
         if(dc == TIMING_PRECHARGE-1) begin
             dc <= 0;
             cmd <= CMD_AUTOREF;
-            
+
             state <= ST_BOOT_2;
         end
     end
@@ -270,7 +293,7 @@ always @(posedge controller_clk) begin
         if(dc == TIMING_AUTOREFRESH-1) begin
             dc <= 0;
             cmd <= CMD_AUTOREF;
-    
+
             state <= ST_BOOT_3;
         end
     end
@@ -280,7 +303,7 @@ always @(posedge controller_clk) begin
             cmd <= CMD_LMR;
             phy_ba <= 'b00;
             phy_a <= 13'b000000_011_0_001; // CAS 3, burst length 2, sequential
-    
+
             state <= ST_BOOT_4;
         end
     end
@@ -289,20 +312,20 @@ always @(posedge controller_clk) begin
             dc <= 0;
             cmd <= CMD_LMR;
             phy_ba <= 'b10; // Extended mode register
-            phy_a <= 13'b00000_010_00_000; // Self refresh coverage: All banks, 
-            // drive strength = 3'b010 (alliance, 50%) 
+            phy_a <= 13'b00000_010_00_000; // Self refresh coverage: All banks,
+            // drive strength = 3'b010 (alliance, 50%)
             state <= ST_BOOT_5;
         end
     end
     ST_BOOT_5: begin
         if(dc == TIMING_LMR-1) begin
             phy_dqm <= 2'b00;
-            
+
             state <= ST_IDLE;
         end
     end
 
-    
+
     ST_IDLE: begin
 
         read_newrow <= 0;
@@ -310,52 +333,142 @@ always @(posedge controller_clk) begin
         word_op <= 0;
 
         if(issue_autorefresh) begin
-            state <= ST_REFRESH_0;
-            word_busy <= 1;  // Busy during refresh
+            word_busy <= 1;
+            if(row_open) begin
+                // Precharge open bank before refresh
+                dc <= 0;
+                cmd <= CMD_PRECHG;
+                phy_ba <= open_bank;
+                phy_a[10] <= 1'b0;
+                row_open <= 0;
+                prechg_return <= 2'd3;  // 3 = refresh
+                state <= ST_PRECHG_WAIT;
+            end else begin
+                state <= ST_REFRESH_0;
+            end
         end else
         if(word_rd_queue) begin
             word_rd_queue <= 0;
             word_op <= 1;
-            addr <= word_addr_captured << 1;  // Use captured address
-            word_busy <= 1;  // Busy during word read
+            addr <= pending_addr;
+            word_busy <= 1;
+            length <= {8'd0, word_burst_len_captured} + 11'd1;
 
-            length <= {8'd0, word_burst_len_captured} + 11'd1;  // 0=1 word, 7=8 words (cache line)
-            state <= ST_READ_0;
+            if(pending_row_hit) begin
+                // ROW HIT: skip ACT+tRCD, go directly to READ
+                phy_ba <= pending_bank;
+                enable_dq_read_toggle <= 0;
+                state <= ST_READ_2;
+            end else if(pending_need_prechg) begin
+                // ROW MISS or DIFFERENT BANK: precharge, then ACT
+                dc <= 0;
+                cmd <= CMD_PRECHG;
+                phy_ba <= open_bank;
+                phy_a[10] <= 1'b0;
+                row_open <= 0;
+                prechg_return <= 2'd0;
+                state <= ST_PRECHG_WAIT;
+            end else begin
+                // NO ROW OPEN: normal ACT path
+                state <= ST_READ_0;
+            end
         end else
         if(word_wr_queue) begin
             word_wr_queue <= 0;
             word_op <= 1;
-            addr <= word_addr_captured << 1;  // Use captured address
-            word_busy <= 1;  // Busy during word write
+            addr <= pending_addr;
+            word_busy <= 1;
 
-            state <= ST_WRITE_0;
+            if(pending_row_hit) begin
+                // ROW HIT: 1-cycle DQ setup, then WRITE
+                phy_ba <= pending_bank;
+                state <= ST_WRITE_HIT;
+            end else if(pending_need_prechg) begin
+                // ROW MISS or DIFFERENT BANK: precharge, then ACT
+                dc <= 0;
+                cmd <= CMD_PRECHG;
+                phy_ba <= open_bank;
+                phy_a[10] <= 1'b0;
+                row_open <= 0;
+                prechg_return <= 2'd1;
+                state <= ST_PRECHG_WAIT;
+            end else begin
+                // NO ROW OPEN: normal ACT path
+                state <= ST_WRITE_0;
+            end
         end else
         if(burst_rd_queue) begin
             burst_rd_queue <= 0;
             addr <= burst_addr;
             length <= burst_len;
-            word_busy <= 1;  // Busy during burst read
-            state <= ST_READ_0;
+            word_busy <= 1;
+            if(row_open) begin
+                // Precharge open bank before burst ACT
+                dc <= 0;
+                cmd <= CMD_PRECHG;
+                phy_ba <= open_bank;
+                phy_a[10] <= 1'b0;
+                row_open <= 0;
+                prechg_return <= 2'd0;
+                state <= ST_PRECHG_WAIT;
+            end else begin
+                state <= ST_READ_0;
+            end
         end else
         if(burstwr_queue) begin
             burstwr_queue <= 0;
             addr <= burstwr_addr;
-            word_busy <= 1;  // Busy during burst write
-            state <= ST_BURSTWR_0;
-        end 
-        
-    
+            word_busy <= 1;
+            if(row_open) begin
+                // Precharge open bank before burst ACT
+                dc <= 0;
+                cmd <= CMD_PRECHG;
+                phy_ba <= open_bank;
+                phy_a[10] <= 1'b0;
+                row_open <= 0;
+                prechg_return <= 2'd2;
+                state <= ST_PRECHG_WAIT;
+            end else begin
+                state <= ST_BURSTWR_0;
+            end
+        end
+
     end
-    
-    
-    
+
+
+    // Open-page: wait tRP after precharge, then dispatch
+    ST_PRECHG_WAIT: begin
+        if(dc == TIMING_PRECHARGE-1) begin
+            case(prechg_return)
+                2'd0: state <= ST_READ_0;
+                2'd1: state <= ST_WRITE_0;
+                2'd2: state <= ST_BURSTWR_0;
+                2'd3: state <= ST_REFRESH_0;
+            endcase
+        end
+    end
+
+    // Open-page: row-hit write DQ setup (1 cycle for tristate turn-on)
+    ST_WRITE_HIT: begin
+        phy_a[10] <= 1'b0;
+        phy_dq_oe <= 1;
+        state <= ST_WRITE_2;
+    end
+
+
     ST_WRITE_0: begin
         dc <= 0;
-        
+
         phy_ba <= addr[24:23];
-        phy_a <= addr[22:10]; // A0-A12 column address
+        phy_a <= addr[22:10]; // A0-A12 row address
         cmd <= CMD_ACT;
-        
+
+        // Track open row
+        row_open <= 1;
+        open_bank <= addr[24:23];
+        open_row <= addr[22:10];
+        open_timer <= 4'd0;
+
         state <= ST_WRITE_1;
     end
     ST_WRITE_1: begin
@@ -364,7 +477,7 @@ always @(posedge controller_clk) begin
             dc <= 0;
             phy_dq_oe <= 1;
             state <= ST_WRITE_2;
-        end 
+        end
     end
     ST_WRITE_2: begin
         dc <= 0;
@@ -390,26 +503,25 @@ always @(posedge controller_clk) begin
     ST_WRITE_4: begin
         phy_dqm <= 2'b00;  // Clear byte masks
         if(dc == TIMING_WRITE-1+1) begin
-            dc <= 0;
-            cmd <= CMD_PRECHG;
-            phy_a[10] <= 0; // only precharge current bank
-            state <= ST_WRITE_5;
+            // Leave row open: skip precharge, return to IDLE
+            state <= ST_IDLE;
         end
     end
-    ST_WRITE_5: begin
-        if(dc == TIMING_PRECHARGE-1) begin // was -3
-            state <= ST_IDLE;
-        end 
-    end
-    
-    
+
+
     ST_READ_0: begin
         dc <= 0;
-        
+
         phy_ba <= addr[24:23];
-        phy_a <= addr[22:10]; // A0-A12 column address
+        phy_a <= addr[22:10]; // A0-A12 row address
         cmd <= CMD_ACT;
-        
+
+        // Track open row
+        row_open <= 1;
+        open_bank <= addr[24:23];
+        open_row <= addr[22:10];
+        open_timer <= 4'd0;
+
         state <= ST_READ_1;
     end
     ST_READ_1: begin
@@ -461,19 +573,27 @@ always @(posedge controller_clk) begin
     ST_READ_6: begin
         if(!read_newrow && !word_op) enable_data_done <= 1;
         dc <= 0;
-        cmd <= CMD_PRECHG;
-        phy_a[10] <= 0; // only precharge current bank
-        state <= ST_READ_7; 
+
+        if(word_op && !read_newrow) begin
+            // Word operation complete: leave row open, return to IDLE
+            state <= ST_IDLE;
+        end else begin
+            // Burst read or row-crossing: precharge as before
+            cmd <= CMD_PRECHG;
+            phy_a[10] <= 0; // only precharge current bank
+            row_open <= 0;
+            state <= ST_READ_7;
+        end
     end
     ST_READ_7: begin
         if(dc == TIMING_PRECHARGE-1) begin
-            if(read_newrow) 
+            if(read_newrow)
                 state <= ST_READ_0;
             else
                 state <= ST_IDLE;
-        end 
+        end
     end
-    
+
     ST_BURSTWR_0: begin
         phy_ba <= addr[24:23];
         phy_a <= addr[22:10]; // A0-A12 column address
@@ -491,14 +611,14 @@ always @(posedge controller_clk) begin
     ST_BURSTWR_3: begin
         burstwr_ready <= 1;
         burstwr_newrow <= 0;
-        
+
         if(burstwr_strobe) begin
-        
+
             phy_a <= addr[9:0]; // A0-A9 row address
             cmd <= CMD_WRITE;
             phy_dq_oe <= 1;
             phy_dq_out <= burstwr_data;
-            
+
             addr <= addr + 1'b1;
             /*if(addr_col9_next_1 == 9'h0) begin
                 burstwr_ready <= 0;
@@ -520,15 +640,16 @@ always @(posedge controller_clk) begin
         cmd <= CMD_PRECHG;
         phy_a[10] <= 0; // only precharge current bank
         phy_dqm <= 2'b00;  // Restore DQM for future operations
+        row_open <= 0;  // Track bank close
         state <= ST_BURSTWR_6;
     end
     ST_BURSTWR_6: begin
         cmd <= CMD_NOP;
-        state <= ST_BURSTWR_7;  
+        state <= ST_BURSTWR_7;
     end
     ST_BURSTWR_7: begin
         cmd <= CMD_NOP;
-        state <= ST_IDLE;   
+        state <= ST_IDLE;
         if(burstwr_newrow) begin
             state <= ST_BURSTWR_0;
             if(issue_autorefresh) begin
@@ -536,12 +657,12 @@ always @(posedge controller_clk) begin
             end
         end
     end
-    
-    
+
+
     ST_REFRESH_0: begin
-        // autorefresh 
+        // autorefresh
         issue_autorefresh <= 0;
-        
+
         cmd <= CMD_AUTOREF;
         dc <= 0;
         state <= ST_REFRESH_1;
@@ -554,10 +675,10 @@ always @(posedge controller_clk) begin
             end
         end
     end
-    
+
     endcase
-    
-    
+
+
     // catch incoming events if fsm is busy
     // Same clock domain - capture directly on pulse
     if(word_wr) begin
@@ -576,18 +697,18 @@ always @(posedge controller_clk) begin
     if(burstwr) begin
         burstwr_queue <= 1;
     end
-    
+
     // autorefresh generator
     refresh_count <= refresh_count + 1'b1;
-    if(&refresh_count) begin 
+    if(&refresh_count) begin
         // every 5.689us @90MHz (512 cycles)
         // 8192 refreshes / 64ms requires <=7.8125us average interval
         refresh_count <= 0;
         issue_autorefresh <= 1;
-    
+
     end
-    
-    if(~reset_n_s) begin    
+
+    if(~reset_n_s) begin
         // reset
         state <= ST_RESET;
         refresh_count <= 0;
@@ -603,6 +724,8 @@ always @(posedge controller_clk) begin
         word_busy <= 0;
         word_q_valid <= 0;
         enable_dq_read_toggle <= 0;
+        row_open <= 0;
+        prechg_return <= 2'd0;
     end
 end
 

@@ -266,7 +266,7 @@ assign link_sd_i = port_tran_sd;
 // PSRAM Controller for CRAM0 (16MB)
 // Uses muxed signals for bridge/CPU arbitration
 psram_controller #(
-    .CLOCK_SPEED(100.0)
+    .CLOCK_SPEED(110.0)
 ) psram0 (
     .clk(clk_ram_controller),
     .reset_n(reset_n),
@@ -626,7 +626,7 @@ end
 wire bridge_wr_active = bridge_wr_sync3 | bridge_wr_sync4 | bridge_wr_pending | bridge_wr_done;
 wire bridge_rd_active = bridge_rd_sync3 | bridge_rd_sync4 | bridge_rd_pending | bridge_rd_done;
 
-// SDRAM access arbiter - runs at SDRAM controller clock (95 MHz)
+// SDRAM access arbiter - runs at SDRAM controller clock (110 MHz)
 // Priority: Bridge > Peripheral DMA > CPU
 // CPU runs at same clock as SDRAM controller (no CDC needed)
 reg cpu_sdram_accepted;  // Pulses when arbiter actually forwards a CPU command
@@ -1013,9 +1013,9 @@ assign video_hs = vidout_hs;
     wire display_mode;
     wire [24:0] fb_display_addr;
 
-    // VexRiscv CPU system - running at 95 MHz (CPU + memory)
+    // VexRiscv CPU system - running at 110 MHz (CPU + memory)
     cpu_system cpu (
-        .clk(clk_cpu),  // 95 MHz
+        .clk(clk_cpu),  // 110 MHz
         .clk_74a(clk_74a),
         .reset_n(reset_n),
         .dataslot_allcomplete(dataslot_allcomplete),
@@ -1209,7 +1209,7 @@ assign video_hs = vidout_hs;
 
     text_terminal terminal (
         .clk(clk_core_12288),
-        .clk_cpu(clk_cpu),  // CPU clock for memory interface (95 MHz)
+        .clk_cpu(clk_cpu),  // CPU clock for memory interface (110 MHz)
         .reset_n(reset_n),
         .pixel_x(visible_x),
         .pixel_y(visible_y),
@@ -1344,7 +1344,7 @@ end
 // Link MMIO peripheral (FIFO + synchronous SCK/SO/SI PHY)
 //
 link_mmio #(
-    .CLK_HZ(100000000),
+    .CLK_HZ(110000000),
     .SCK_HZ(256000),
     .POLL_HZ(3000),
     .FIFO_DEPTH(256)
@@ -1394,9 +1394,9 @@ audio_output audio_out (
 
     wire    clk_core_12288;
     wire    clk_core_12288_90deg;
-    wire    clk_cpu;            // CPU clock (95 MHz)
-    wire    clk_ram_controller; // 95 MHz SDRAM controller clock
-    wire    clk_ram_chip;       // 95 MHz SDRAM chip clock (phase shifted)
+    wire    clk_cpu;            // CPU clock (110 MHz)
+    wire    clk_ram_controller; // 110 MHz SDRAM controller clock
+    wire    clk_ram_chip;       // 110 MHz SDRAM chip clock (phase shifted)
 
     wire    pll_core_locked;
     wire    pll_ram_locked;
@@ -1421,8 +1421,8 @@ mf_pllbase mp1 (
 mf_pllram_133 mp_ram (
     .refclk         ( clk_74a ),
     .rst            ( 0 ),
-    .outclk_0       ( clk_ram_controller ), // 95 MHz for SDRAM controller
-    .outclk_1       ( clk_ram_chip ),       // 95 MHz for SDRAM chip (phase shifted)
+    .outclk_0       ( clk_ram_controller ), // 110 MHz for SDRAM controller
+    .outclk_1       ( clk_ram_chip ),       // 110 MHz for SDRAM chip (phase shifted)
     .locked         ( pll_ram_locked )
 );
 

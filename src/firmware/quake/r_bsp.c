@@ -460,6 +460,47 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 	if (node->visframe != r_visframecount)
 		return;
 
+// size cull: skip subtree if its bounding box projects smaller than r_cullsize pixels
+	if (r_cullsize.value > 0)
+	{
+		float dx, dy, dz, dist_sq;
+
+		// squared distance from camera to nearest point on node AABB
+		dx = 0; dy = 0; dz = 0;
+		if (modelorg[0] < node->minmaxs[0])
+			dx = modelorg[0] - node->minmaxs[0];
+		else if (modelorg[0] > node->minmaxs[3])
+			dx = modelorg[0] - node->minmaxs[3];
+		if (modelorg[1] < node->minmaxs[1])
+			dy = modelorg[1] - node->minmaxs[1];
+		else if (modelorg[1] > node->minmaxs[4])
+			dy = modelorg[1] - node->minmaxs[4];
+		if (modelorg[2] < node->minmaxs[2])
+			dz = modelorg[2] - node->minmaxs[2];
+		else if (modelorg[2] > node->minmaxs[5])
+			dz = modelorg[2] - node->minmaxs[5];
+		dist_sq = dx*dx + dy*dy + dz*dz;
+
+		if (dist_sq > 1.0f)
+		{
+			// largest AABB extent = projected screen size metric
+			float ex = node->minmaxs[3] - node->minmaxs[0];
+			float ey = node->minmaxs[4] - node->minmaxs[1];
+			float ez = node->minmaxs[5] - node->minmaxs[2];
+			float max_extent = ex;
+			if (ey > max_extent) max_extent = ey;
+			if (ez > max_extent) max_extent = ez;
+
+			// projected_pixels = max_extent * xscale / dist
+			// cull when projected_pixels < threshold, i.e.:
+			// max_extent^2 * xscale^2 < threshold^2 * dist_sq
+			float threshold = r_cullsize.value;
+			if (max_extent * max_extent * xscale * xscale <
+			    threshold * threshold * dist_sq)
+				return;
+		}
+	}
+
 // cull the clipping planes if not trivial accept
 // FIXME: the compiler is doing a lousy job of optimizing here; it could be
 //  twice as fast in ASM

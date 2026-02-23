@@ -11,7 +11,7 @@
 `default_nettype none
 
 module cpu_system (
-    input wire clk,           // CPU clock (currently 66 MHz, same as SDRAM controller)
+    input wire clk,           // CPU clock (110 MHz, same as SDRAM controller)
     input wire clk_74a,       // Bridge clock (74.25 MHz) - for APF interface
     input wire reset_n,
     input wire dataslot_allcomplete,  // All data slots loaded by APF
@@ -32,7 +32,7 @@ module cpu_system (
     input wire         term_mem_ready,
 
     // SDRAM word interface (directly to io_sdram via core_top)
-    // CPU and SDRAM controller run at same clock (currently 66 MHz)
+    // CPU and SDRAM controller run at same clock (110 MHz)
     output reg         sdram_rd,
     output reg         sdram_wr,
     output reg  [23:0] sdram_addr,

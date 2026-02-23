@@ -66,6 +66,7 @@ extern cvar_t	r_drawentities;
 extern cvar_t	r_aliasstats;
 extern cvar_t	r_dspeeds;
 extern cvar_t	r_drawflat;
+extern cvar_t	r_cullsize;
 extern cvar_t	r_ambient;
 extern cvar_t	r_reportsurfout;
 extern cvar_t	r_maxsurfs;
@@ -242,8 +243,8 @@ qboolean R_AliasCheckBBox (void);
 //=========================================================
 // turbulence stuff
 
-#define	AMP		8*0x10000
-#define	AMP2	3
+#define	AMP		0
+#define	AMP2	0
 #define	SPEED	20
 
 //=========================================================

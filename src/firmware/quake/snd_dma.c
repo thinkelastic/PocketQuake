@@ -53,7 +53,7 @@ cvar_t bgmvolume = {"bgmvolume", "1", true};
 cvar_t volume = {"volume", "0.7", true};
 cvar_t nosound = {"nosound", "0"};
 cvar_t precache = {"precache", "1"};
-cvar_t ambient_level = {"ambient_level", "0.3"};
+cvar_t ambient_level = {"ambient_level", "0"};
 cvar_t ambient_fade = {"ambient_fade", "100"};
 
 // ====================================================================
@@ -103,9 +103,8 @@ sfx_t *S_FindName(char *name)
 
 void SND_Spatialize(channel_t *ch)
 {
-    vec_t dot;
     vec_t dist;
-    vec_t lscale, rscale, scale;
+    vec_t scale;
     vec3_t source_vec;
 
     // Anything coming from the view entity will always be full volume
@@ -115,24 +114,14 @@ void SND_Spatialize(channel_t *ch)
         return;
     }
 
-    // Calculate stereo separation and distance attenuation
+    // Distance-only attenuation (mono output, no stereo panning)
     VectorSubtract(ch->origin, listener_origin, source_vec);
 
     dist = VectorNormalize(source_vec) * ch->dist_mult;
 
-    dot = DotProduct(listener_right, source_vec);
-
-    rscale = 1.0 + dot;
-    lscale = 1.0 - dot;
-
-    // Add in distance effect
-    scale = (1.0 - dist) * rscale;
-    ch->rightvol = (int)(ch->master_vol * scale);
-    scale = (1.0 - dist) * lscale;
-    ch->leftvol = (int)(ch->master_vol * scale);
-
-    if (ch->rightvol < 0) ch->rightvol = 0;
-    if (ch->leftvol < 0) ch->leftvol = 0;
+    scale = 1.0 - dist;
+    if (scale < 0) scale = 0;
+    ch->leftvol = ch->rightvol = (int)(ch->master_vol * scale);
 }
 
 // ====================================================================
