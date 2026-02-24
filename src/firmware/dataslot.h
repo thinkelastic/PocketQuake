@@ -56,6 +56,12 @@
  * written by DMA (bridge) without cache coherency issues. */
 #define SDRAM_UNCACHED(addr) ((void *)((uint32_t)(addr) + 0x40000000))
 
+/* Shared DMA bounce buffer for dataslot_read callers.
+ * After DMA, data must be read through SDRAM_UNCACHED(DMA_BUFFER) to
+ * bypass stale D-cache lines, then memcpy'd to the final destination. */
+#define DMA_BUFFER       0x13F00000          /* Fixed SDRAM address for DMA */
+#define DMA_CHUNK_SIZE   (512 * 1024)        /* Max bytes per DMA transfer */
+
 /* Open file parameter structure (256 + 4 + 4 = 264 bytes) */
 typedef struct __attribute__((packed)) {
     char     filename[256];   /* Null-terminated path */

@@ -65,13 +65,13 @@ assign {phy_ras, phy_cas, phy_we} = cmd;
     localparam      CMD_SELFENTER       = 3'b001;
     localparam      CMD_SELFEXIT        = 3'b111;
 
-    localparam      CAS                 =   4'd3;   // timings are for 110MHz (9.1ns)
+    localparam      CAS                 =   4'd3;   // timings are for 100MHz (10.00ns)
     localparam      TIMING_LMR          =   4'd2;   // tLMR = 2ck
-    localparam      TIMING_AUTOREFRESH  =   4'd9;   // tRFC = 80ns @ 110MHz = 9 cycles (81.8ns)
-    localparam      TIMING_PRECHARGE    =   4'd2;   // tRP = 15ns @ 110MHz = 2 cycles (18.2ns)
-    localparam      TIMING_ACT_ACT      =   4'd7;   // tRC = 60ns @ 110MHz = 7 cycles (63.6ns)
-    localparam      TIMING_ACT_RW       =   4'd2;   // tRCD = 15ns @ 110MHz = 2 cycles (18.2ns)
-    localparam      TIMING_ACT_PRECHG   =   4'd5;   // tRAS = 42ns @ 110MHz = 5 cycles (45.5ns)
+    localparam      TIMING_AUTOREFRESH  =   4'd8;   // tRFC = 80ns @ 100MHz = 8 cycles (80.0ns)
+    localparam      TIMING_PRECHARGE    =   4'd2;   // tRP = 15ns @ 100MHz = 2 cycles (20.0ns)
+    localparam      TIMING_ACT_ACT      =   4'd6;   // tRC = 60ns @ 100MHz = 6 cycles (60.0ns)
+    localparam      TIMING_ACT_RW       =   4'd2;   // tRCD = 15ns @ 100MHz = 2 cycles (20.0ns)
+    localparam      TIMING_ACT_PRECHG   =   4'd5;   // tRAS = 42ns @ 100MHz = 5 cycles (50.0ns)
     localparam      TIMING_WRITE        =   4'd2;   // tWR = 2ck
 
     reg     [5:0]   state;
@@ -271,7 +271,7 @@ always @(posedge controller_clk) begin
 
         if(delay_boot == 30000-16) phy_cke <= 1;
         if(delay_boot == 30000) begin
-            // >=200us power-up delay (30000 cycles @90MHz ~= 333us)
+            // >=200us power-up delay (30000 cycles @85MHz ~= 333us)
             dc <= 0;
 
             // precharge all
@@ -701,7 +701,7 @@ always @(posedge controller_clk) begin
     // autorefresh generator
     refresh_count <= refresh_count + 1'b1;
     if(&refresh_count) begin
-        // every 5.689us @90MHz (512 cycles)
+        // every 5.689us @85MHz (512 cycles)
         // 8192 refreshes / 64ms requires <=7.8125us average interval
         refresh_count <= 0;
         issue_autorefresh <= 1;

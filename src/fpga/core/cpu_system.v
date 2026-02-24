@@ -894,25 +894,6 @@ always @(posedge clk or posedge reset) begin
                         psram_cmd_issued <= 0;
                         psram_issue_wait <= 0;
                     end
-                end else if (live_sram_select) begin
-                    sram_addr <= live_mem_addr[23:2];  // 22-bit word address (256KB)
-                    sram_wdata <= live_mem_wdata;
-                    sram_wstrb <= live_mem_wstrb;
-                    if (live_mem_write) begin
-                        mem_pending <= 1;
-                        sram_write_pending <= 1;
-                        sram_read_started <= 0;
-                        sram_write_started <= 0;
-                        sram_cmd_issued <= 0;
-                        sram_issue_wait <= 0;
-                    end else begin
-                        mem_pending <= 1;
-                        sram_read_pending <= 1;
-                        sram_read_started <= 0;
-                        sram_write_started <= 0;
-                        sram_cmd_issued <= 0;
-                        sram_issue_wait <= 0;
-                    end
                 end else if (live_term_select) begin
                     mem_pending <= 1;
                     term_pending <= 1;
@@ -961,14 +942,6 @@ always @(posedge clk or posedge reset) begin
                             atm_reg_wdata <= live_mem_wdata;
                         end
                     end
-                end else if (live_sramfill_select) begin
-                    mem_pending <= 1;
-                    sramfill_pending <= 1;
-                    sramfill_reg_addr <= live_mem_addr[6:2];
-                    if (|live_mem_wstrb) begin
-                        sramfill_reg_wr <= 1;
-                        sramfill_reg_wdata <= live_mem_wdata;
-                    end
                 end else if (live_audio_select) begin
                     mem_pending <= 1;
                     audio_pending <= 1;
@@ -1014,9 +987,10 @@ always @(posedge clk or posedge reset) begin
                 ram_pending <= 0;
                 pending_bus <= BUS_NONE;
             end else if (sdram_read_pending) begin
-                // While draining an instruction prefetch burst, allow hits on already
-                // captured words so instruction fetch can advance within the same line.
-                if (sdram_read_is_prefetch && sdram_prefetch_primary_done && live_ibus_prefetch_hit) begin
+                // In-burst prefetch hit: while filling the prefetch line,
+                // subsequent I-cache requests can hit already-filled words.
+                if (sdram_read_is_prefetch && sdram_prefetch_primary_done &&
+                    live_ibus_prefetch_hit) begin
                     ibus_ack <= 1;
                     ibus_dat_miso <= prefetch_hit_rdata;
                 end
@@ -1033,19 +1007,18 @@ always @(posedge clk or posedge reset) begin
                     end
                 end else begin
                     if (!sdram_read_started) begin
+                        // Hold request signals until arbiter accepts.
+                        // Default sdram_rd<=0 fires first; this NBA overrides it.
+                        sdram_rd <= 1;
+                        if (sdram_read_is_prefetch)
+                            sdram_burst_len <= SDRAM_PREFETCH_BURST_LEN;
                         if (sdram_accepted) begin
                             sdram_read_started <= 1;
-                            sdram_issue_wait <= 0;
-                        end else begin
-                            sdram_issue_wait <= sdram_issue_wait + 1'b1;
-                            if (&sdram_issue_wait) begin
-                                // Command likely not accepted; retry.
-                                sdram_cmd_issued <= 0;
-                                sdram_issue_wait <= 0;
-                            end
                         end
                     end
-                    if (sdram_rdata_valid) begin
+                    // CRITICAL: gate with sdram_read_started to prevent capturing
+                    // peripheral read data when CPU's command hasn't been accepted yet.
+                    if (sdram_read_started && sdram_rdata_valid) begin
                         if (sdram_read_is_prefetch) begin
                             // Capture each word from the 8-word burst into the line buffer.
                             case (sdram_prefetch_fill_idx)
@@ -1127,20 +1100,15 @@ always @(posedge clk or posedge reset) begin
                         sdram_issue_wait <= 0;
                     end
                 end else begin
-                    // Write completion: wait for busy HIGH then LOW after command issue.
-                    // Note: using sdram_busy (not sdram_accepted) here because write
-                    // completion is detected by !sdram_busy, and we need word_busy to
-                    // have risen in io_sdram before we check for its fall.
-                    if (!sdram_write_started && sdram_busy) begin
-                        sdram_write_started <= 1;
-                        sdram_issue_wait <= 0;
-                    end else if (!sdram_write_started) begin
-                        sdram_issue_wait <= sdram_issue_wait + 1'b1;
-                        if (&sdram_issue_wait) begin
-                            sdram_cmd_issued <= 0;
-                            sdram_issue_wait <= 0;
+                    // Write completion: hold write request until arbiter accepts,
+                    // then wait for !sdram_busy for completion.
+                    if (!sdram_write_started) begin
+                        // Hold write request until arbiter accepts.
+                        sdram_wr <= 1;
+                        if (sdram_accepted) begin
+                            sdram_write_started <= 1;
                         end
-                    end else if (sdram_write_started && !sdram_busy) begin
+                    end else if (!sdram_busy) begin
                         if (pending_bus == BUS_DBUS) begin
                             dbus_ack <= 1;
                             dbus_dat_miso <= 32'h0;

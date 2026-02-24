@@ -115,8 +115,8 @@ SRCS_S = start.S
 ALL_C_SRCS = $(BOOT_SRCS_C) $(LIBC_SRCS) $(QUAKE_SRCS)
 OBJS = $(ALL_C_SRCS:.c=.o) $(SRCS_S:.S=.o) $(LIBC_ASM_SRCS:.S=.o)
 
-# Compiler flags for RV32IMAFC (hardware single-precision FPU + compressed ISA)
-ARCH = rv32imafc
+# Compiler flags for RV32IMAF (hardware single-precision FPU, no compressed ISA)
+ARCH = rv32imaf
 ABI = ilp32f
 CFLAGS = -march=$(ARCH) -mabi=$(ABI) -Os -Wall -Wextra
 CFLAGS += -ffreestanding -nostdlib -nostartfiles
@@ -155,8 +155,8 @@ LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -Wl,-Map=$(TARGET).map
 LDFLAGS += -flto
 
-# Standard libgcc for rv32imafc/ilp32f (includes compressed instructions)
-LIBGCC = $(shell $(CC) -march=$(ARCH) -mabi=$(ABI) -print-libgcc-file-name)
+# Custom libgcc without compressed instructions (RVC disabled for Fmax)
+LIBGCC = libgcc_norvc.a
 LIBS = $(LIBGCC)
 
 # RAM size for MIF generation (64KB = 16384 words)

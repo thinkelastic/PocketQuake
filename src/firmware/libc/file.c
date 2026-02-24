@@ -151,13 +151,20 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
         return nmemb;
     }
 
-    /* Otherwise, load directly from data slot to provided buffer */
-    /* This is slower but works for non-mmap usage */
-    if (dataslot_read(stream->slot_id, stream->offset, ptr, total_bytes) != 0) {
-        return 0;
+    /* DMA to bounce buffer, then copy via uncacheable alias to avoid
+     * stale D-cache lines at the destination address. */
+    uint8_t *dest = (uint8_t *)ptr;
+    size_t remaining = total_bytes;
+    while (remaining > 0) {
+        size_t chunk = remaining > DMA_CHUNK_SIZE ? DMA_CHUNK_SIZE : remaining;
+        if (dataslot_read(stream->slot_id, stream->offset, (void *)DMA_BUFFER, chunk) != 0) {
+            return 0;
+        }
+        memcpy(dest, SDRAM_UNCACHED(DMA_BUFFER), chunk);
+        dest += chunk;
+        stream->offset += chunk;
+        remaining -= chunk;
     }
-
-    stream->offset += total_bytes;
     return nmemb;
 }
 
@@ -593,8 +600,19 @@ ssize_t read(int fd, void *buf, size_t count) {
         return 0;
     }
 
-    if (dataslot_read(slot_id, fd_offset[slot_id], buf, count) != 0) {
-        return -1;
+    /* DMA to bounce buffer, copy via uncacheable alias */
+    uint8_t *dest = (uint8_t *)buf;
+    size_t remaining = count;
+    uint32_t off = fd_offset[slot_id];
+    while (remaining > 0) {
+        size_t chunk = remaining > DMA_CHUNK_SIZE ? DMA_CHUNK_SIZE : remaining;
+        if (dataslot_read(slot_id, off, (void *)DMA_BUFFER, chunk) != 0) {
+            return -1;
+        }
+        memcpy(dest, SDRAM_UNCACHED(DMA_BUFFER), chunk);
+        dest += chunk;
+        off += chunk;
+        remaining -= chunk;
     }
 
     fd_offset[slot_id] += count;
@@ -745,10 +763,21 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
         return MAP_FAILED;
     }
 
-    /* Load data from data slot */
-    if (dataslot_read(slot_id, offset, ptr, length) != 0) {
-        free(ptr);
-        return MAP_FAILED;
+    /* DMA to bounce buffer in chunks, copy via uncacheable alias to
+     * avoid stale D-cache lines at the malloc'd destination. */
+    uint8_t *dest = (uint8_t *)ptr;
+    size_t remaining = length;
+    uint32_t slot_off = (uint32_t)offset;
+    while (remaining > 0) {
+        size_t chunk = remaining > DMA_CHUNK_SIZE ? DMA_CHUNK_SIZE : remaining;
+        if (dataslot_read(slot_id, slot_off, (void *)DMA_BUFFER, chunk) != 0) {
+            free(ptr);
+            return MAP_FAILED;
+        }
+        memcpy(dest, SDRAM_UNCACHED(DMA_BUFFER), chunk);
+        dest += chunk;
+        slot_off += chunk;
+        remaining -= chunk;
     }
 
     return ptr;

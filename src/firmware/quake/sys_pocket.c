@@ -22,8 +22,7 @@ volatile unsigned int pq_dbg_info = 0;
 /* On-demand PAK reading via APF dataslot */
 #define PAK_SLOT_ID      0      /* data.json slot id for pak0.pak */
 #define PAK_MAX_SIZE     (48 * 1024 * 1024)  /* 48MB max */
-#define DMA_BUFFER       0x13F00000          /* Fixed SDRAM address for DMA */
-#define DMA_CHUNK_SIZE   (512 * 1024)        /* Max bytes per DMA transfer */
+/* DMA_BUFFER and DMA_CHUNK_SIZE defined in dataslot.h */
 
 /* PAK file structure */
 #define PAK_HEADER_MAGIC  (('P') | ('A' << 8) | ('C' << 16) | ('K' << 24))
@@ -64,14 +63,39 @@ static void Pak_Init(void)
     /* DMA PAK header into SDRAM, then read via uncacheable alias to
      * bypass D-cache (bridge DMA writes bypass cache). */
     {
-        rc = dataslot_read(PAK_SLOT_ID, 0, (void *)DMA_BUFFER, sizeof(pakheader_t));
+        /* Write sentinels to DMA buffer (cached), then fence to flush to SDRAM */
+        volatile unsigned int *buf = (volatile unsigned int *)DMA_BUFFER;
+        for (int i = 0; i < 16; i++)
+            buf[i] = 0xBAAD0000 | i;
+        __asm__ volatile("fence");
+
+        /* Verify sentinels via uncached alias */
+        volatile unsigned int *uc = (volatile unsigned int *)SDRAM_UNCACHED(DMA_BUFFER);
+        term_printf("Pre: %x %x %x %x\n", uc[0], uc[1], uc[2], uc[3]);
+
+        /* DMA 64 bytes (not just 12) to check full word writes */
+        rc = dataslot_read(PAK_SLOT_ID, 0, (void *)DMA_BUFFER, 64);
+        term_printf("DMA rc=%d\n", rc);
+
+        /* Read back all 16 words via uncached alias */
+        term_printf("UC: %x %x %x %x\n", uc[0], uc[1], uc[2], uc[3]);
+        term_printf("    %x %x %x %x\n", uc[4], uc[5], uc[6], uc[7]);
+
+        /* Also read via cached alias to see if D-cache has stale data */
+        volatile unsigned int *ca = (volatile unsigned int *)DMA_BUFFER;
+        term_printf("CA: %x %x %x %x\n", ca[0], ca[1], ca[2], ca[3]);
+
+        /* Try a second DMA to the same buffer and compare */
+        rc = dataslot_read(PAK_SLOT_ID, 0, (void *)DMA_BUFFER, 64);
+        term_printf("DMA2 rc=%d\n", rc);
+        term_printf("UC2: %x %x %x %x\n", uc[0], uc[1], uc[2], uc[3]);
+
         if (rc != 0) {
             term_printf("Pak_Init: dataslot_read header failed (%d)\n", rc);
             pak_numfiles = 0;
             pak_initialized = 1;
             return;
         }
-        volatile unsigned int *uc = (volatile unsigned int *)SDRAM_UNCACHED(DMA_BUFFER);
         hdr.ident = uc[0];
         hdr.dirofs = uc[1];
         hdr.dirlen = uc[2];

@@ -32,8 +32,26 @@ int dataslot_wait_complete(void) {
 
     DS_LOG("wait: initial status=%x\n", DS_STATUS);
 
+    /* DONE is level-sticky in hardware until the next command starts.
+     * If we immediately wait for DONE after seeing ACK, we can
+     * accidentally observe the previous command's DONE=1 and return
+     * early. Force synchronization to the new command by waiting for
+     * stale DONE to clear first. */
+    status = DS_STATUS;
+    if (status & DS_STATUS_DONE) {
+        DS_LOG("wait: DONE high, waiting to clear\n");
+        while (DS_STATUS & DS_STATUS_DONE) {
+            if (--timeout <= 0) {
+                DS_LOG("wait: timeout at done-clear, t=%d s=%x\n", timeout, DS_STATUS);
+                return -4;
+            }
+        }
+        DS_LOG("wait: DONE cleared\n");
+    }
+
     /* First, if ACK is already high from previous command, wait for it to clear.
      * This proves the bridge received our new command and cleared old status. */
+    timeout = TIMEOUT_LOOPS;
     status = DS_STATUS;
     if (status & DS_STATUS_ACK) {
         DS_LOG("wait: ACK high, waiting to clear\n");
@@ -129,12 +147,9 @@ int dataslot_read(uint32_t slot_id, uint32_t offset, void *dest, uint32_t length
     /* Wait for completion */
     int result = dataslot_wait_complete();
 
-    /* The bridge sets DONE when it finishes sending data, but the last
-     * few bridge writes may still be in the CDC pipeline (4-stage sync
-     * from clk_74a to clk_ram + SDRAM write latency ≈ 15-20 cycles).
-     * Spin-wait to ensure all writes have landed in SDRAM before the
-     * caller reads the data. */
-    for (volatile int i = 0; i < 32; i++) {}
+    /* DS_STATUS DONE is gated by bridge_wr_fifo_empty in hardware,
+     * so when dataslot_wait_complete() returns, all writes have
+     * landed in SDRAM. No spin-wait needed. */
 
     /* NOTE: After DMA, the D-cache may still hold stale data for dest.
      * Callers MUST read DMA'd data through the uncacheable SDRAM alias:
@@ -177,15 +192,17 @@ int32_t dataslot_load(uint16_t slot_id, void *dest, uint32_t max_length) {
 __attribute__((section(".text.boot")))
 int dataslot_get_size(uint16_t slot_id, uint32_t *size_out) {
     /* TODO: Implement proper slot size query via APF protocol */
-    /* For now, return a large fixed size based on slot ID */
+    /* For now, return a fixed size based on data.json slot IDs:
+     *   slot 0 = pak0.pak (deferload)
+     *   slot 1 = quake.bin */
     if (size_out == NULL) return -1;
 
     switch (slot_id) {
-        case 0:  /* Quake binary */
-            *size_out = 4 * 1024 * 1024;   /* 4 MB */
-            break;
-        case 1:  /* PAK data */
+        case 0:  /* PAK data (deferload) */
             *size_out = 20 * 1024 * 1024;  /* 20 MB */
+            break;
+        case 1:  /* Quake binary */
+            *size_out = 4 * 1024 * 1024;   /* 4 MB */
             break;
         default:
             *size_out = 1 * 1024 * 1024;   /* 1 MB default */

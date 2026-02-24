@@ -19,7 +19,7 @@ fi
 cp "$SCRIPT_DIR/GenPocketQuake.scala" "$VEXRISCV_DIR/src/main/scala/vexriscv/demo/"
 
 # Generate
-echo "Generating VexRiscv (32KB I$ + 128KB D$)..."
+echo "Generating VexRiscv (16KB I$ + 128KB D$, no RVC)..."
 cd "$VEXRISCV_DIR"
 sbt "runMain vexriscv.demo.GenPocketQuake"
 

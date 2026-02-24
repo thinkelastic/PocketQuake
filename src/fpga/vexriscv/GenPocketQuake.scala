@@ -1,8 +1,8 @@
 /*
  * VexRiscv generation for PocketQuake
  *
- * RV32IMAFC with Wishbone bus, no MMU, no debug.
- *   I-cache: 32KB (2-way, 32B lines)
+ * RV32IMAF with Wishbone bus, no MMU, no debug.
+ *   I-cache: 16KB (2-way, 32B lines)
  *   D-cache: 128KB (2-way, 32B lines)
  *
  * Usage:
@@ -27,12 +27,12 @@ object GenPocketQuake extends App {
     plugins = List(
       new IBusCachedPlugin(
         resetVector = null,           // creates externalResetVector input
-        compressedGen = true,         // RVC enabled for smaller code / better I$ hit rate
+        compressedGen = false,        // RVC disabled for higher Fmax
         injectorStage = true,         // extra pipeline stage for timing
         relaxedPcCalculation = true,
         prediction = DYNAMIC,
         config = InstructionCacheConfig(
-          cacheSize = 32768,          // 32 KB
+          cacheSize = 16384,          // 16 KB
           bytePerLine = 32,
           wayCount = 2,
           addressWidth = 32,
@@ -59,11 +59,12 @@ object GenPocketQuake extends App {
         ),
         dBusCmdMasterPipe = true      // required for Wishbone
       ),
-      // IO range: only 0x3 (PSRAM+SRAM) is cacheable for now.
-      // SDRAM (0x1) is uncacheable to avoid DMA coherency issues with bridge.
-      // This is temporary — re-enable SDRAM caching once DMA path is verified.
+      // Cacheable: 0x1X (SDRAM), 0x30-0x37 (PSRAM)
+      // Uncacheable: 0x0X (BRAM — already fast), 0x38-0x3F (SRAM — HW writes bypass cache), all IO
+      // Note: DMA coherency for dataslot_read handled by fence + SDRAM_UNCACHED() alias
       new StaticMemoryTranslatorPlugin(
-        ioRange = addr => addr(31 downto 28) =/= 0x3
+        ioRange = addr => addr(31 downto 28) =/= 0x1 &&
+                          !(addr(31 downto 28) === 0x3 && !addr(27))
       ),
       new DecoderSimplePlugin(
         catchIllegalInstruction = true
