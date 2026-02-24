@@ -448,7 +448,7 @@ void R_ViewChanged (vrect_t *pvrect, int lineadj, float aspect)
 
 	R_SetVrect (pvrect, &r_refdef.vrect, lineadj);
 
-	r_refdef.horizontalFieldOfView = 2.0 * tan (r_refdef.fov_x/360*M_PI);
+	r_refdef.horizontalFieldOfView = 2.0 * tanf (r_refdef.fov_x/360*M_PI);
 	r_refdef.fvrectx = (float)r_refdef.vrect.x;
 	r_refdef.fvrectx_adj = (float)r_refdef.vrect.x - 0.5;
 	r_refdef.vrect_x_adj_shift20 = (r_refdef.vrect.x<<20) + (1<<19) - 1;
@@ -1559,7 +1559,7 @@ void R_InitTurb (void)
 	
 	for (i=0 ; i<(SIN_BUFFER_SIZE) ; i++)
 	{
-		sintable[i] = AMP + sin(i*3.14159*2/CYCLE)*AMP;
-		intsintable[i] = AMP2 + sin(i*3.14159*2/CYCLE)*AMP2;	// AMP2, not 20
+		sintable[i] = AMP + sinf(i*3.14159*2/CYCLE)*AMP;
+		intsintable[i] = AMP2 + sinf(i*3.14159*2/CYCLE)*AMP2;	// AMP2, not 20
 	}
 }

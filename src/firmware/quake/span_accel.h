@@ -47,14 +47,15 @@
 
 /* Start a textured span draw (non-blocking).
  * fb_addr/tex_addr are CPU byte addresses (0x10xxxxxx or 0x50xxxxxx SDRAM alias).
- * s, t, sstep, tstep are 16.16 fixed-point. */
+ * s, t, sstep, tstep are 16.16 fixed-point.
+ * tex_width/tex_height are texture dimensions in pixels (hardware clamps s/t). */
 static inline void span_draw(unsigned int fb_addr, unsigned int tex_addr,
-                              int tex_width, int s, int t,
+                              int tex_width, int tex_height, int s, int t,
                               int sstep, int tstep, int count)
 {
     SPAN_FB_ADDR   = fb_addr;
     SPAN_TEX_ADDR  = tex_addr;
-    SPAN_TEX_WIDTH = (unsigned int)tex_width;
+    SPAN_TEX_WIDTH = (unsigned int)tex_width | ((unsigned int)tex_height << 16);
     SPAN_S         = (unsigned int)s;
     SPAN_T         = (unsigned int)t;
     SPAN_SSTEP     = (unsigned int)sstep;
@@ -62,11 +63,12 @@ static inline void span_draw(unsigned int fb_addr, unsigned int tex_addr,
     SPAN_CONTROL   = (unsigned int)count;  /* triggers start */
 }
 
-/* Program texture source for subsequent textured span commands. */
-static inline void span_set_texture(unsigned int tex_addr, int tex_width)
+/* Program texture source for subsequent textured span commands.
+ * tex_width/tex_height are texture dimensions in pixels (hardware clamps s/t). */
+static inline void span_set_texture(unsigned int tex_addr, int tex_width, int tex_height)
 {
     SPAN_TEX_ADDR  = tex_addr;
-    SPAN_TEX_WIDTH = (unsigned int)tex_width;
+    SPAN_TEX_WIDTH = (unsigned int)tex_width | ((unsigned int)tex_height << 16);
 }
 
 /* Start a textured span draw using already programmed texture source. */
@@ -82,15 +84,16 @@ static inline void span_draw_tex(unsigned int fb_addr, int s, int t,
 }
 
 /* Start a textured span with hardware colormap/lighting lookup.
- * light is the pre-shifted light level (light & 0xFF00). */
+ * light is the pre-shifted light level (light & 0xFF00).
+ * tex_width/tex_height are texture dimensions in pixels (hardware clamps s/t). */
 static inline void span_draw_lit(unsigned int fb_addr, unsigned int tex_addr,
-                                  int tex_width, int s, int t,
+                                  int tex_width, int tex_height, int s, int t,
                                   int sstep, int tstep, int count,
                                   unsigned int light)
 {
     SPAN_FB_ADDR   = fb_addr;
     SPAN_TEX_ADDR  = tex_addr;
-    SPAN_TEX_WIDTH = (unsigned int)tex_width;
+    SPAN_TEX_WIDTH = (unsigned int)tex_width | ((unsigned int)tex_height << 16);
     SPAN_S         = (unsigned int)s;
     SPAN_T         = (unsigned int)t;
     SPAN_SSTEP     = (unsigned int)sstep;
@@ -120,10 +123,10 @@ static inline void span_draw_tex_lit(unsigned int fb_addr, int s, int t,
 }
 
 /* Set up constant parameters for surface cache building (call once per block).
- * blocksize is the mip block width (16, 8, 4, or 2). */
+ * blocksize is the mip block width/height (16, 8, 4, or 2). */
 static inline void span_setup_surface(int blocksize)
 {
-    SPAN_TEX_WIDTH = (unsigned int)blocksize;
+    SPAN_TEX_WIDTH = (unsigned int)blocksize | ((unsigned int)blocksize << 16);
     SPAN_S         = 0;
     SPAN_SSTEP     = (1 << 16);  /* 1 texel per pixel */
     SPAN_T         = 0;

@@ -290,7 +290,7 @@ void Sys_Quit(void)
     while (1) {}
 }
 
-double Sys_FloatTime(void)
+float Sys_FloatTime(void)
 {
     static unsigned int initialized = 0;
     static unsigned int last_lo = 0;
@@ -306,7 +306,7 @@ double Sys_FloatTime(void)
     /* 32-bit cycle delta naturally handles wrap-around without 64-bit math. */
     accum_seconds += (float)(lo - last_lo) * (1.0f / (float)CPU_FREQ);
     last_lo = lo;
-    return (double)accum_seconds;
+    return accum_seconds;
 }
 
 char *Sys_ConsoleInput(void)
@@ -348,7 +348,7 @@ static char *quake_argv[] = { "quake", NULL };
 void quake_main(void)
 {
     static quakeparms_t parms;
-    double time, oldtime, newtime;
+    float time, oldtime, newtime;
 
     pq_dbg_stage = 0x1000;
 

@@ -140,9 +140,9 @@ unsigned long strtoul(const char *nptr, char **endptr, int base) {
 
 /* Software floating-point atof implementation */
 double atof(const char *nptr) {
-    double result = 0.0;
-    double fraction = 0.0;
-    double divisor = 1.0;
+    float result = 0.0f;
+    float fraction = 0.0f;
+    float divisor = 1.0f;
     int sign = 1;
     int exp_sign = 1;
     int exponent = 0;
@@ -168,10 +168,10 @@ double atof(const char *nptr) {
             if (in_exponent) {
                 exponent = exponent * 10 + (*nptr - '0');
             } else if (in_fraction) {
-                divisor *= 10.0;
+                divisor *= 10.0f;
                 fraction += (*nptr - '0') / divisor;
             } else {
-                result = result * 10.0 + (*nptr - '0');
+                result = result * 10.0f + (*nptr - '0');
             }
         } else if (*nptr == '.' && !in_fraction && !in_exponent) {
             in_fraction = 1;
@@ -195,9 +195,9 @@ double atof(const char *nptr) {
 
     /* Apply exponent */
     if (exponent != 0) {
-        double exp_mult = 1.0;
+        float exp_mult = 1.0f;
         while (exponent > 0) {
-            exp_mult *= 10.0;
+            exp_mult *= 10.0f;
             exponent--;
         }
         if (exp_sign < 0) {
@@ -207,7 +207,7 @@ double atof(const char *nptr) {
         }
     }
 
-    return result;
+    return (double)result;
 }
 
 void exit(int status) {

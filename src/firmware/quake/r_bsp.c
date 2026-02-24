@@ -28,6 +28,10 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 qboolean		insubmodel;
 entity_t		*currententity;
 vec3_t			modelorg, base_modelorg;
+
+// Per-frame cached values for size culling (set in R_RenderWorld)
+static float	cull_threshold_sq;
+static float	cull_xscale_sq;
 								// modelorg is the viewpoint reletive to
 								// the currently rendering entity
 vec3_t			r_entorigin;	// the currently rendering entity in world
@@ -88,8 +92,8 @@ void R_RotateBmodel (void)
 // yaw
 	angle = currententity->angles[YAW];		
 	angle = angle * M_PI*2 / 360;
-	s = sin(angle);
-	c = cos(angle);
+	s = sinf(angle);
+	c = cosf(angle);
 
 	temp1[0][0] = c;
 	temp1[0][1] = s;
@@ -105,8 +109,8 @@ void R_RotateBmodel (void)
 // pitch
 	angle = currententity->angles[PITCH];		
 	angle = angle * M_PI*2 / 360;
-	s = sin(angle);
-	c = cos(angle);
+	s = sinf(angle);
+	c = cosf(angle);
 
 	temp2[0][0] = c;
 	temp2[0][1] = 0;
@@ -123,8 +127,8 @@ void R_RotateBmodel (void)
 // roll
 	angle = currententity->angles[ROLL];		
 	angle = angle * M_PI*2 / 360;
-	s = sin(angle);
-	c = cos(angle);
+	s = sinf(angle);
+	c = cosf(angle);
 
 	temp1[0][0] = 1;
 	temp1[0][1] = 0;
@@ -434,7 +438,7 @@ void R_DrawSubmodelPolygons (model_t *pmodel, int clipflags)
 			r_currentkey = ((mleaf_t *)currententity->topnode)->key;
 
 		// FIXME: use bounding-box-based frustum clipping info?
-			R_RenderFace (psurf, clipflags);
+			R_RenderFace (psurf, clipflags, dot);
 		}
 	}
 }
@@ -448,7 +452,6 @@ R_RecursiveWorldNode
 PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 {
 	int			i, c, side, *pindex;
-	vec3_t		acceptpt, rejectpt;
 	mplane_t	*plane;
 	msurface_t	*surf, **mark;
 	mleaf_t		*pleaf;
@@ -461,11 +464,10 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 		return;
 
 // size cull: skip subtree if its bounding box projects smaller than r_cullsize pixels
-	if (r_cullsize.value > 0)
+	if (cull_threshold_sq > 0)
 	{
 		float dx, dy, dz, dist_sq;
 
-		// squared distance from camera to nearest point on node AABB
 		dx = 0; dy = 0; dz = 0;
 		if (modelorg[0] < node->minmaxs[0])
 			dx = modelorg[0] - node->minmaxs[0];
@@ -481,9 +483,8 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 			dz = modelorg[2] - node->minmaxs[5];
 		dist_sq = dx*dx + dy*dy + dz*dz;
 
-		if (dist_sq > 1.0f)
+		if (dist_sq > 40000.0f)
 		{
-			// largest AABB extent = projected screen size metric
 			float ex = node->minmaxs[3] - node->minmaxs[0];
 			float ey = node->minmaxs[4] - node->minmaxs[1];
 			float ez = node->minmaxs[5] - node->minmaxs[2];
@@ -491,12 +492,8 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 			if (ey > max_extent) max_extent = ey;
 			if (ez > max_extent) max_extent = ez;
 
-			// projected_pixels = max_extent * xscale / dist
-			// cull when projected_pixels < threshold, i.e.:
-			// max_extent^2 * xscale^2 < threshold^2 * dist_sq
-			float threshold = r_cullsize.value;
-			if (max_extent * max_extent * xscale * xscale <
-			    threshold * threshold * dist_sq)
+			if (max_extent * max_extent * cull_xscale_sq <
+			    cull_threshold_sq * dist_sq)
 				return;
 		}
 	}
@@ -508,34 +505,29 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 	{
 		for (i=0 ; i<4 ; i++)
 		{
-			if (! (clipflags & (1<<i)) )
-				continue;	// don't need to clip against it
+			float *n;
+			float dist;
 
-		// generate accept and reject points
-		// FIXME: do with fast look-ups or integer tests based on the sign bit
-		// of the floating point values
+			if (! (clipflags & (1<<i)) )
+				continue;
 
 			pindex = pfrustum_indexes[i];
+			n = view_clipplanes[i].normal;
+			dist = view_clipplanes[i].dist;
 
-			rejectpt[0] = (float)node->minmaxs[pindex[0]];
-			rejectpt[1] = (float)node->minmaxs[pindex[1]];
-			rejectpt[2] = (float)node->minmaxs[pindex[2]];
-			
-			d = DotProduct (rejectpt, view_clipplanes[i].normal);
-			d -= view_clipplanes[i].dist;
+			d = (float)node->minmaxs[pindex[0]] * n[0] +
+			    (float)node->minmaxs[pindex[1]] * n[1] +
+			    (float)node->minmaxs[pindex[2]] * n[2] - dist;
 
 			if (d <= 0)
 				return;
 
-			acceptpt[0] = (float)node->minmaxs[pindex[3+0]];
-			acceptpt[1] = (float)node->minmaxs[pindex[3+1]];
-			acceptpt[2] = (float)node->minmaxs[pindex[3+2]];
-
-			d = DotProduct (acceptpt, view_clipplanes[i].normal);
-			d -= view_clipplanes[i].dist;
+			d = (float)node->minmaxs[pindex[3]] * n[0] +
+			    (float)node->minmaxs[pindex[4]] * n[1] +
+			    (float)node->minmaxs[pindex[5]] * n[2] - dist;
 
 			if (d >= 0)
-				clipflags &= ~(1<<i);	// node is entirely on screen
+				clipflags &= ~(1<<i);
 		}
 	}
 	
@@ -610,29 +602,8 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 					if ((surf->flags & SURF_PLANEBACK) &&
 						(surf->visframe == r_framecount))
 					{
-						if (r_drawpolys)
-						{
-							if (r_worldpolysbacktofront)
-							{
-								if (numbtofpolys < MAX_BTOFPOLYS)
-								{
-									pbtofpolys[numbtofpolys].clipflags =
-											clipflags;
-									pbtofpolys[numbtofpolys].psurf = surf;
-									numbtofpolys++;
-								}
-							}
-							else
-							{
-								R_RenderPoly (surf, clipflags);
-							}
-						}
-						else
-						{
-							R_RenderFace (surf, clipflags);
-						}
+						R_RenderFace (surf, clipflags, dot);
 					}
-
 					surf++;
 				} while (--c);
 			}
@@ -643,29 +614,8 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 					if (!(surf->flags & SURF_PLANEBACK) &&
 						(surf->visframe == r_framecount))
 					{
-						if (r_drawpolys)
-						{
-							if (r_worldpolysbacktofront)
-							{
-								if (numbtofpolys < MAX_BTOFPOLYS)
-								{
-									pbtofpolys[numbtofpolys].clipflags =
-											clipflags;
-									pbtofpolys[numbtofpolys].psurf = surf;
-									numbtofpolys++;
-								}
-							}
-							else
-							{
-								R_RenderPoly (surf, clipflags);
-							}
-						}
-						else
-						{
-							R_RenderFace (surf, clipflags);
-						}
+						R_RenderFace (surf, clipflags, dot);
 					}
-
 					surf++;
 				} while (--c);
 			}
@@ -698,6 +648,9 @@ void R_RenderWorld (void)
 	VectorCopy (r_origin, modelorg);
 	clmodel = currententity->model;
 	r_pcurrentvertbase = clmodel->vertexes;
+
+	cull_threshold_sq = r_cullsize.value * r_cullsize.value;
+	cull_xscale_sq = xscale * xscale;
 
 	R_RecursiveWorldNode (clmodel->nodes, 15);
 

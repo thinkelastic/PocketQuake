@@ -28,7 +28,7 @@ typedef	int	fixed8_t;
 typedef	int	fixed16_t;
 
 #ifndef M_PI
-#define M_PI		3.14159265358979323846	// matches value in gcc v2 math.h
+#define M_PI		3.14159265358979323846f	// matches value in gcc v2 math.h
 #endif
 
 struct mplane_s;
@@ -61,7 +61,7 @@ int Q_log2(int val);
 void R_ConcatRotations (float in1[3][3], float in2[3][3], float out[3][3]);
 void R_ConcatTransforms (float in1[3][4], float in2[3][4], float out[3][4]);
 
-void FloorDivMod (double numer, double denom, int *quotient,
+void FloorDivMod (float numer, float denom, int *quotient,
 		int *rem);
 fixed16_t Invert24To16(fixed16_t val);
 int GreatestCommonDivisor (int i1, int i2);

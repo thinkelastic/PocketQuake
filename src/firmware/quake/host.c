@@ -37,10 +37,10 @@ quakeparms_t host_parms;
 
 qboolean	host_initialized;		// true if into command execution
 
-double		host_frametime;
-double		host_time;
-double		realtime;				// without any filtering or bounding
-double		oldrealtime;			// last frame run
+float		host_frametime;
+float		host_time;
+float		realtime;				// without any filtering or bounding
+float		oldrealtime;			// last frame run
 int			host_framecount;
 
 int			host_hunklevel;
@@ -409,7 +409,7 @@ void Host_ShutdownServer(qboolean crash)
 	int		count;
 	sizebuf_t	buf;
 	char		message[4];
-	double	start;
+	float	start;
 
 	if (!sv.active)
 		return;
@@ -635,9 +635,9 @@ void _Host_Frame (float time)
 {
 	extern volatile unsigned int pq_dbg_stage;
 	extern volatile unsigned int pq_dbg_info;
-	static double		time1 = 0;
-	static double		time2 = 0;
-	static double		time3 = 0;
+	static float		time1 = 0;
+	static float		time2 = 0;
+	static float		time3 = 0;
 	int			pass1, pass2, pass3;
 #ifdef POCKET_QUAKE
 	static int          hb_logs = 0;
@@ -802,8 +802,8 @@ void _Host_Frame (float time)
 
 void Host_Frame (float time)
 {
-	double	time1, time2;
-	static double	timetotal;
+	float	time1, time2;
+	static float	timetotal;
 	static int		timecount;
 	int		i, c, m;
 
@@ -1012,7 +1012,6 @@ void Host_Init (quakeparms_t *parms)
 	// Queue PocketQuake defaults AFTER quake.rc/default.cfg.
 	// Cbuf_InsertText puts quake.rc at the front; Cbuf_AddText appends
 	// these after it, so they override default.cfg's values.
-	Cbuf_AddText ("viewsize 80\n");
 	Cbuf_AddText ("gamma 0.7\n");
 
 	Hunk_AllocName (0, "-HOST_HUNKLEVEL-");

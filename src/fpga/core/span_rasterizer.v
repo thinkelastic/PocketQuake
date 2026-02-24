@@ -5,7 +5,7 @@
 // Register map (reg_addr = byte_offset[6:2]):
 //   0x00: SPAN_FB_ADDR    (RW) - Framebuffer dest CPU byte address
 //   0x04: SPAN_TEX_ADDR   (RW) - Texture base CPU byte address
-//   0x08: SPAN_TEX_WIDTH  (RW) - Texture/cache width in pixels
+//   0x08: SPAN_TEX_WIDTH  (RW) - [15:0]=width, [31:16]=height in pixels
 //   0x0C: SPAN_S          (RW) - Initial S (16.16 fixed-point)
 //   0x10: SPAN_T          (RW) - Initial T (16.16 fixed-point)
 //   0x14: SPAN_SSTEP      (RW) - S step per pixel (16.16 fixed-point)
@@ -74,6 +74,7 @@ module span_rasterizer (
 reg [31:0] fb_addr_reg;
 reg [31:0] tex_addr_reg;
 reg [15:0] tex_width_reg;
+reg [15:0] tex_height_reg;
 reg [31:0] s_reg;
 reg [31:0] t_reg;
 reg [31:0] sstep_reg;
@@ -97,6 +98,7 @@ reg [31:0] surf_dest_step_reg;
 reg [31:0] cur_fb;
 reg [31:0] cur_tex_addr;
 reg [15:0] cur_tex_width;
+reg [15:0] cur_tex_height;
 reg [31:0] cur_s;
 reg [31:0] cur_t;
 reg [31:0] cur_sstep;
@@ -136,7 +138,7 @@ reg        fifo_is_z      [0:1];
 reg        fifo_is_surf   [0:1];
 reg [31:0] fifo_fb        [0:1];
 reg [31:0] fifo_tex_addr  [0:1];
-reg [15:0] fifo_tex_width [0:1];
+(* ramstyle = "logic" *) reg [31:0] fifo_tex_wh    [0:1]; // packed: {height[31:16], width[15:0]}
 reg [31:0] fifo_s         [0:1];
 reg [31:0] fifo_t         [0:1];
 reg [31:0] fifo_sstep     [0:1];
@@ -324,6 +326,8 @@ assign active = busy_status;
 // Textured address computation
 // Treat S/T as signed fixed-point high words and clamp negative values to 0.
 // This avoids catastrophic address wrap if S/T briefly go slightly negative.
+// Upper-bound clamping is handled at step time (when cur_s/cur_t are updated)
+// to avoid adding logic to the critical tex_byte_addr → cache_hit path.
 wire signed [15:0] s_int_signed = cur_s[31:16];
 wire signed [15:0] t_int_signed = cur_t[31:16];
 wire [15:0] s_int = s_int_signed[15] ? 16'd0 : s_int_signed[15:0];
@@ -343,6 +347,18 @@ wire [1:0]  tex_byte_sel  = tex_byte_addr_r[1:0];
 
 wire [23:0] fb_word_addr = cur_fb[25:2];
 wire [1:0]  fb_byte_sel  = cur_fb[1:0];
+
+// Step-time S/T clamping: prevent linear stepping within a chunk from
+// overshooting texture bounds (close surfaces with strong perspective).
+// Clamping at step time avoids adding logic to the critical
+// tex_byte_addr → cache_hit path. Only upper bound is checked here;
+// the address computation above already handles negative clamping.
+wire [31:0] next_s = cur_s + cur_sstep;
+wire [31:0] next_t = cur_t + cur_tstep;
+wire next_s_over = !next_s[31] && (next_s[31:16] >= cur_tex_width);
+wire next_t_over = !next_t[31] && (next_t[31:16] >= cur_tex_height);
+wire [31:0] next_s_clamped = next_s_over ? {cur_tex_width  - 16'd1, 16'hFFFF} : next_s;
+wire [31:0] next_t_clamped = next_t_over ? {cur_tex_height - 16'd1, 16'hFFFF} : next_t;
 
 // ST_TEX_ADDR routing flag: 0->ST_PIXEL, 1->ST_TURB_FETCH
 reg tex_addr_for_turb;
@@ -428,7 +444,7 @@ always @(*) begin
     case (reg_addr)
         5'd0:  reg_rdata = fb_addr_reg;
         5'd1:  reg_rdata = tex_addr_reg;
-        5'd2:  reg_rdata = {16'd0, tex_width_reg};
+        5'd2:  reg_rdata = {tex_height_reg, tex_width_reg};
         5'd3:  reg_rdata = s_reg;
         5'd4:  reg_rdata = t_reg;
         5'd5:  reg_rdata = sstep_reg;
@@ -458,6 +474,7 @@ always @(posedge clk or negedge reset_n) begin
         fb_addr_reg      <= 32'd0;
         tex_addr_reg     <= 32'd0;
         tex_width_reg    <= 16'd0;
+        tex_height_reg   <= 16'd0;
         s_reg            <= 32'd0;
         t_reg            <= 32'd0;
         sstep_reg        <= 32'd0;
@@ -472,6 +489,7 @@ always @(posedge clk or negedge reset_n) begin
         cur_fb           <= 32'd0;
         cur_tex_addr     <= 32'd0;
         cur_tex_width    <= 16'd0;
+        cur_tex_height   <= 16'd0;
         cur_s            <= 32'd0;
         cur_t            <= 32'd0;
         cur_sstep        <= 32'd0;
@@ -601,7 +619,7 @@ always @(posedge clk or negedge reset_n) begin
             case (reg_addr)
                 5'd0: fb_addr_reg   <= reg_wdata;
                 5'd1: tex_addr_reg  <= reg_wdata;
-                5'd2: tex_width_reg <= reg_wdata[15:0];
+                5'd2: begin tex_width_reg <= reg_wdata[15:0]; tex_height_reg <= reg_wdata[31:16]; end
                 5'd3: s_reg         <= reg_wdata;
                 5'd4: t_reg         <= reg_wdata;
                 5'd5: sstep_reg     <= reg_wdata;
@@ -615,6 +633,7 @@ always @(posedge clk or negedge reset_n) begin
                             cur_fb        <= fb_addr_reg;
                             cur_tex_addr  <= tex_addr_reg;
                             cur_tex_width <= tex_width_reg;
+                            cur_tex_height <= tex_height_reg;
                             cur_s         <= s_reg;
                             cur_t         <= t_reg;
                             cur_sstep     <= sstep_reg;
@@ -633,7 +652,7 @@ always @(posedge clk or negedge reset_n) begin
                             fifo_is_surf[fifo_wr_ptr]   <= 1'b0;
                             fifo_fb[fifo_wr_ptr]        <= fb_addr_reg;
                             fifo_tex_addr[fifo_wr_ptr]  <= tex_addr_reg;
-                            fifo_tex_width[fifo_wr_ptr] <= tex_width_reg;
+                            fifo_tex_wh[fifo_wr_ptr] <= {tex_height_reg, tex_width_reg};
                             fifo_s[fifo_wr_ptr]         <= s_reg;
                             fifo_t[fifo_wr_ptr]         <= t_reg;
                             fifo_sstep[fifo_wr_ptr]     <= sstep_reg;
@@ -763,7 +782,8 @@ always @(posedge clk or negedge reset_n) begin
                     end else begin
                         cur_fb        <= fifo_fb[fifo_rd_ptr];
                         cur_tex_addr  <= fifo_tex_addr[fifo_rd_ptr];
-                        cur_tex_width <= fifo_tex_width[fifo_rd_ptr];
+                        cur_tex_width <= fifo_tex_wh[fifo_rd_ptr][15:0];
+                        cur_tex_height <= fifo_tex_wh[fifo_rd_ptr][31:16];
                         cur_s         <= fifo_s[fifo_rd_ptr];
                         cur_t         <= fifo_t[fifo_rd_ptr];
                         cur_sstep     <= fifo_sstep[fifo_rd_ptr];
@@ -838,8 +858,8 @@ always @(posedge clk or negedge reset_n) begin
                         if (acc_strb == 4'b0000)
                             acc_addr <= fb_word_addr;
                         cur_fb    <= cur_fb + 32'd1;
-                        cur_s     <= cur_s + cur_sstep;
-                        cur_t     <= cur_t + cur_tstep;
+                        cur_s     <= next_s_clamped;
+                        cur_t     <= next_t_clamped;
                         remaining <= remaining - 16'd1;
                         if (fb_byte_sel == 2'd3 || remaining == 16'd1) begin
                             cmd_issued <= 1'b0;
@@ -909,8 +929,8 @@ always @(posedge clk or negedge reset_n) begin
                 if (acc_strb == 4'b0000)
                     acc_addr <= fb_word_addr;
                 cur_fb    <= cur_fb + 32'd1;
-                cur_s     <= cur_s + cur_sstep;
-                cur_t     <= cur_t + cur_tstep;
+                cur_s     <= next_s_clamped;
+                cur_t     <= next_t_clamped;
                 cur_light <= cur_light + cur_lightstep;
                 remaining <= remaining - 16'd1;
                 if (fb_byte_sel == 2'd3 || remaining == 16'd1) begin
@@ -952,8 +972,8 @@ always @(posedge clk or negedge reset_n) begin
                         if (acc_strb == 4'b0000)
                             acc_addr <= fb_word_addr;
                         cur_fb    <= cur_fb + 32'd1;
-                        cur_s     <= cur_s + cur_sstep;
-                        cur_t     <= cur_t + cur_tstep;
+                        cur_s     <= next_s_clamped;
+                        cur_t     <= next_t_clamped;
                         remaining <= remaining - 16'd1;
                         if (fb_byte_sel == 2'd3 || remaining == 16'd1) begin
                             cmd_issued <= 1'b0;
@@ -1027,7 +1047,8 @@ always @(posedge clk or negedge reset_n) begin
                                 end else begin
                                     cur_fb        <= fifo_fb[fifo_rd_ptr];
                                     cur_tex_addr  <= fifo_tex_addr[fifo_rd_ptr];
-                                    cur_tex_width <= fifo_tex_width[fifo_rd_ptr];
+                                    cur_tex_width <= fifo_tex_wh[fifo_rd_ptr][15:0];
+                                    cur_tex_height <= fifo_tex_wh[fifo_rd_ptr][31:16];
                                     cur_s         <= fifo_s[fifo_rd_ptr];
                                     cur_t         <= fifo_t[fifo_rd_ptr];
                                     cur_sstep     <= fifo_sstep[fifo_rd_ptr];
@@ -1112,7 +1133,8 @@ always @(posedge clk or negedge reset_n) begin
                                 end else begin
                                     cur_fb        <= fifo_fb[fifo_rd_ptr];
                                     cur_tex_addr  <= fifo_tex_addr[fifo_rd_ptr];
-                                    cur_tex_width <= fifo_tex_width[fifo_rd_ptr];
+                                    cur_tex_width <= fifo_tex_wh[fifo_rd_ptr][15:0];
+                                    cur_tex_height <= fifo_tex_wh[fifo_rd_ptr][31:16];
                                     cur_s         <= fifo_s[fifo_rd_ptr];
                                     cur_t         <= fifo_t[fifo_rd_ptr];
                                     cur_sstep     <= fifo_sstep[fifo_rd_ptr];
@@ -1165,7 +1187,8 @@ always @(posedge clk or negedge reset_n) begin
                                 end else begin
                                     cur_fb        <= fifo_fb[fifo_rd_ptr];
                                     cur_tex_addr  <= fifo_tex_addr[fifo_rd_ptr];
-                                    cur_tex_width <= fifo_tex_width[fifo_rd_ptr];
+                                    cur_tex_width <= fifo_tex_wh[fifo_rd_ptr][15:0];
+                                    cur_tex_height <= fifo_tex_wh[fifo_rd_ptr][31:16];
                                     cur_s         <= fifo_s[fifo_rd_ptr];
                                     cur_t         <= fifo_t[fifo_rd_ptr];
                                     cur_sstep     <= fifo_sstep[fifo_rd_ptr];
@@ -1216,6 +1239,7 @@ always @(posedge clk or negedge reset_n) begin
                 cur_fb        <= surf_fb_base;
                 cur_tex_addr  <= surf_tex_base;
                 cur_tex_width <= surf_blocksize;
+                cur_tex_height <= surf_blocksize;
                 cur_s         <= 32'd0;
                 cur_t         <= 32'd0;
                 cur_sstep     <= 32'h00010000;  // 1.0 in 16.16

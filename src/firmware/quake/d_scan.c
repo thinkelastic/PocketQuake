@@ -146,7 +146,7 @@ void Turbulent8 (espan_t *pspan)
 #if HW_TURB_ACCEL
 	span_set_turb_phase((int)(cl.time * SPEED));
 	SPAN_TEX_ADDR  = (unsigned int)r_turb_pbase;
-	SPAN_TEX_WIDTH = 64;
+	SPAN_TEX_WIDTH = 64 | (64 << 16);
 #endif
 
 	sdivz16stepu = d_sdivzstepu * 32;
@@ -302,9 +302,9 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 
 	pbase = (unsigned char *)cacheblock;
 
-	sdivzNstepu = d_sdivzstepu * 8;
-	tdivzNstepu = d_tdivzstepu * 8;
-	ziNstepu = d_zistepu * 8;
+	sdivzNstepu = d_sdivzstepu * 16;
+	tdivzNstepu = d_tdivzstepu * 16;
+	ziNstepu = d_zistepu * 16;
 
 #if HW_SPAN_ACCEL
 	/* Texture is set per-span now (only for large spans) */
@@ -320,7 +320,7 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 #if HW_SPAN_ACCEL
 		int use_hw = r_hwspan.value;
 		if (use_hw)
-			span_set_texture((unsigned int)pbase, cachewidth);
+			span_set_texture((unsigned int)pbase, cachewidth, (bbextentt >> 16) + 1);
 #endif
 
 	// calculate the initial s/z, t/z, 1/z, s, and t and clamp
@@ -347,8 +347,8 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 		do
 		{
 		// calculate s and t at the far end of the span
-			if (count >= 8)
-				spancount = 8;
+			if (count >= 16)
+				spancount = 16;
 			else
 				spancount = count;
 
@@ -366,19 +366,19 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 				snext = (int)(sdivz * z) + sadjust;
 				if (snext > bbextents)
 					snext = bbextents;
-				else if (snext < 8)
-					snext = 8;	// prevent round-off error on <0 steps from
+				else if (snext < 16)
+					snext = 16;	// prevent round-off error on <0 steps from
 								//  from causing overstepping & running off the
 								//  edge of the texture
 
 				tnext = (int)(tdivz * z) + tadjust;
 				if (tnext > bbextentt)
 					tnext = bbextentt;
-				else if (tnext < 8)
-					tnext = 8;	// guard against round-off error on <0 steps
+				else if (tnext < 16)
+					tnext = 16;	// guard against round-off error on <0 steps
 
-				sstep = (snext - s) >> 3;
-				tstep = (tnext - t) >> 3;
+				sstep = (snext - s) >> 4;
+				tstep = (tnext - t) >> 4;
 			}
 			else
 			{

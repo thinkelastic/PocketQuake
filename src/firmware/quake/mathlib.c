@@ -65,10 +65,10 @@ void PerpendicularVector( vec3_t dst, const vec3_t src )
 	*/
 	for ( pos = 0, i = 0; i < 3; i++ )
 	{
-		if ( fabs( src[i] ) < minelem )
+		if ( fabsf( src[i] ) < minelem )
 		{
 			pos = i;
-			minelem = fabs( src[i] );
+			minelem = fabsf( src[i] );
 		}
 	}
 	tempvec[0] = tempvec[1] = tempvec[2] = 0.0F;
@@ -131,10 +131,10 @@ void RotatePointAroundVector( vec3_t dst, const vec3_t dir, const vec3_t point, 
 	memset( zrot, 0, sizeof( zrot ) );
 	zrot[0][0] = zrot[1][1] = zrot[2][2] = 1.0F;
 
-	zrot[0][0] = cos( DEG2RAD( degrees ) );
-	zrot[0][1] = sin( DEG2RAD( degrees ) );
-	zrot[1][0] = -sin( DEG2RAD( degrees ) );
-	zrot[1][1] = cos( DEG2RAD( degrees ) );
+	zrot[0][0] = cosf( DEG2RAD( degrees ) );
+	zrot[0][1] = sinf( DEG2RAD( degrees ) );
+	zrot[1][0] = -sinf( DEG2RAD( degrees ) );
+	zrot[1][1] = cosf( DEG2RAD( degrees ) );
 
 	R_ConcatRotations( m, zrot, tmpmat );
 	R_ConcatRotations( tmpmat, im, rot );
@@ -295,14 +295,14 @@ void AngleVectors (vec3_t angles, vec3_t forward, vec3_t right, vec3_t up)
 	float		sr, sp, sy, cr, cp, cy;
 	
 	angle = angles[YAW] * (M_PI*2 / 360);
-	sy = sin(angle);
-	cy = cos(angle);
+	sy = sinf(angle);
+	cy = cosf(angle);
 	angle = angles[PITCH] * (M_PI*2 / 360);
-	sp = sin(angle);
-	cp = cos(angle);
+	sp = sinf(angle);
+	cp = cosf(angle);
 	angle = angles[ROLL] * (M_PI*2 / 360);
-	sr = sin(angle);
-	cr = cos(angle);
+	sr = sinf(angle);
+	cr = cosf(angle);
 
 	forward[0] = cp*cy;
 	forward[1] = cp*sy;
@@ -367,8 +367,6 @@ void CrossProduct (vec3_t v1, vec3_t v2, vec3_t cross)
 	cross[2] = v1[0]*v2[1] - v1[1]*v2[0];
 }
 
-double sqrt(double x);
-
 vec_t Length(vec3_t v)
 {
 	int		i;
@@ -377,7 +375,7 @@ vec_t Length(vec3_t v)
 	length = 0;
 	for (i=0 ; i< 3 ; i++)
 		length += v[i]*v[i];
-	length = sqrt (length);		// FIXME
+	length = sqrtf (length);		// FIXME
 
 	return length;
 }
@@ -387,7 +385,7 @@ float VectorNormalize (vec3_t v)
 	float	length, ilength;
 
 	length = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
-	length = sqrt (length);		// FIXME
+	length = sqrtf (length);		// FIXME
 
 	if (length)
 	{
@@ -497,11 +495,11 @@ quotient must fit in 32 bits.
 ====================
 */
 
-void FloorDivMod (double numer, double denom, int *quotient,
+void FloorDivMod (float numer, float denom, int *quotient,
 		int *rem)
 {
 	int		q, r;
-	double	x;
+	float	x;
 
 #ifndef PARANOID
 	if (denom <= 0.0)
@@ -515,18 +513,18 @@ void FloorDivMod (double numer, double denom, int *quotient,
 	if (numer >= 0.0)
 	{
 
-		x = floor(numer / denom);
+		x = floorf(numer / denom);
 		q = (int)x;
-		r = (int)floor(numer - (x * denom));
+		r = (int)floorf(numer - (x * denom));
 	}
 	else
 	{
 	//
 	// perform operations with positive values, and fix mod to make floor-based
 	//
-		x = floor(-numer / denom);
+		x = floorf(-numer / denom);
 		q = -(int)x;
-		r = (int)floor(-numer - (x * denom));
+		r = (int)floorf(-numer - (x * denom));
 		if (r != 0)
 		{
 			q--;
@@ -579,7 +577,7 @@ fixed16_t Invert24To16(fixed16_t val)
 		return (0xFFFFFFFF);
 
 	return (fixed16_t)
-			(((double)0x10000 * (double)0x1000000 / (double)val) + 0.5);
+			((0x10000000000ULL + ((unsigned long long)(unsigned int)val >> 1)) / (unsigned long long)(unsigned int)val);
 }
 
 #endif

@@ -9,11 +9,11 @@
 #include "libc.h"
 
 /* Constants */
-#define M_PI        3.14159265358979323846
-#define M_PI_2      1.57079632679489661923
-#define M_E         2.71828182845904523536
-#define M_LN2       0.693147180559945309417
-#define M_LN10      2.302585092994045684017
+#define M_PI        3.14159265358979323846f
+#define M_PI_2      1.57079632679489661923f
+#define M_E         2.71828182845904523536f
+#define M_LN2       0.693147180559945309417f
+#define M_LN10      2.302585092994045684017f
 
 /* Floating point bit manipulation helpers */
 typedef union {
@@ -40,10 +40,7 @@ float fabsf(float x) {
 }
 
 double fabs(double x) {
-    double_bits db;
-    db.d = x;
-    db.u &= 0x7FFFFFFFFFFFFFFFULL;  /* Clear sign bit */
-    return db.d;
+    return (double)fabsf((float)x);
 }
 
 /* ============================================
@@ -74,21 +71,7 @@ float sqrtf(float x) {
 }
 
 double sqrt(double x) {
-    if (x < 0.0) {
-        return 0.0 / 0.0;  /* NaN */
-    }
-    if (x == 0.0 || x == 1.0) {
-        return x;
-    }
-
-    /* Newton-Raphson with better initial guess */
-    double y = x / 2.0;
-
-    for (int i = 0; i < 10; i++) {
-        y = 0.5 * (y + x / y);
-    }
-
-    return y;
+    return (double)sqrtf((float)x);
 }
 
 /* ============================================

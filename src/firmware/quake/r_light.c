@@ -76,6 +76,9 @@ PQ_FASTTEXT void R_MarkLights (dlight_t *light, int bit, mnode_t *node)
 	if (node->contents < 0)
 		return;
 
+	if (node->visframe != r_visframecount)
+		return;
+
 	splitplane = node->plane;
 	dist = DotProduct (light->origin, splitplane->normal) - splitplane->dist;
 	

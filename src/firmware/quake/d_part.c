@@ -72,9 +72,9 @@ PQ_FASTTEXT void D_DrawParticle (particle_t *pparticle)
 
 // project the point
 // FIXME: preadjust xcenter and ycenter
-	zi = 1.0 / transformed[2];
-	u = (int)(xcenter + zi * transformed[0] + 0.5);
-	v = (int)(ycenter - zi * transformed[1] + 0.5);
+	zi = 1.0f / transformed[2];
+	u = (int)(xcenter + zi * transformed[0] + 0.5f);
+	v = (int)(ycenter - zi * transformed[1] + 0.5f);
 
 	if ((v > d_vrectbottom_particle) || 
 		(u > d_vrectright_particle) ||

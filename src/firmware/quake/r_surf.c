@@ -98,7 +98,7 @@ void R_AddDynamicLights (void)
 		rad = cl_dlights[lnum].radius;
 		dist = DotProduct (cl_dlights[lnum].origin, surf->plane->normal) -
 				surf->plane->dist;
-		rad -= fabs(dist);
+		rad -= fabsf(dist);
 		minlight = cl_dlights[lnum].minlight;
 		if (rad < minlight)
 			continue;

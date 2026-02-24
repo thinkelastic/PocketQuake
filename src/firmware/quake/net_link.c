@@ -121,12 +121,12 @@ static qboolean	link_waiting_ack = false;
 static byte		link_pending_seq = 0;
 static byte		link_pending_data[LINK_MAX_PAYLOAD];
 static int		link_pending_len = 0;
-static double	link_pending_sent_at = 0.0;
+static float	link_pending_sent_at = 0.0f;
 static int		link_pending_retries = 0;
-static double	link_last_rx_time = 0.0;
-static double	link_last_tx_time = 0.0;
-static double	link_last_hello_time = 0.0;
-static double	link_handshake_start = 0.0;
+static float	link_last_rx_time = 0.0f;
+static float	link_last_tx_time = 0.0f;
+static float	link_last_hello_time = 0.0f;
+static float	link_handshake_start = 0.0f;
 
 static int		link_rx_state = LINK_RX_WAIT_MAGIC;
 static byte		link_rx_type = 0;
@@ -137,7 +137,7 @@ static int		link_rx_words_needed = 0;
 static int		link_rx_words_seen = 0;
 static byte		link_rx_payload[LINK_MAX_PAYLOAD];
 
-static double Link_TimeNow(void)
+static float Link_TimeNow(void)
 {
 	return Sys_FloatTime();
 }
@@ -366,7 +366,7 @@ static qboolean Link_SendFrame(byte type, byte seq, const byte *payload, int pay
 
 static void Link_OnHello(void)
 {
-	double now;
+	float now;
 
 	Con_Printf("Link: HELLO rx (listening=%d state=%d)\n", link_listening, link_state);
 
@@ -421,7 +421,7 @@ static void Link_OnHello(void)
 
 static void Link_OnHelloAck(void)
 {
-	double now;
+	float now;
 
 	Con_Printf("Link: HELLO_ACK rx\n");
 
@@ -634,7 +634,7 @@ static void Link_PumpRx(void)
 
 static void Link_PollTimers(void)
 {
-	double now;
+	float now;
 
 	now = Link_TimeNow();
 
@@ -776,7 +776,7 @@ void Link_SearchForHosts (qboolean xmit)
 
 qsocket_t *Link_Connect (char *host)
 {
-	double deadline, next_dump;
+	float deadline, next_dump;
 	qsocket_t *sock;
 
 	Con_Printf("Link_Connect(\"%s\") hw=%d\n", host, link_hw_present);

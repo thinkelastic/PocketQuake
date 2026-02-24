@@ -21,8 +21,6 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "r_local.h"
-extern volatile unsigned int pq_dbg_stage;
-extern volatile unsigned int pq_dbg_info;
 
 #if 0
 // FIXME
@@ -152,10 +150,10 @@ PQ_FASTTEXT void R_BeginEdgeFrame (void)
 		r_currentkey = 0;
 	}
 
-// FIXME: set with memset
-	for (v=r_refdef.vrect.y ; v<r_refdef.vrectbottom ; v++)
 	{
-		newedges[v] = removeedges[v] = NULL;
+		int height = r_refdef.vrectbottom - r_refdef.vrect.y;
+		memset (&newedges[r_refdef.vrect.y], 0, height * sizeof(edge_t *));
+		memset (&removeedges[r_refdef.vrect.y], 0, height * sizeof(edge_t *));
 	}
 }
 
@@ -175,19 +173,11 @@ edge_head.next).
 PQ_FASTTEXT void R_InsertNewEdges (edge_t *edgestoadd, edge_t *edgelist)
 {
 	edge_t	*next_edge;
-	unsigned int search_guard;
 
 	do
 	{
 		next_edge = edgestoadd->next;
-		search_guard = 0;
 	edgesearch:
-		if (++search_guard > 1000000u)
-		{
-			pq_dbg_stage = 0x3301;
-			pq_dbg_info = (unsigned int)edgestoadd;
-			Sys_Error ("R_InsertNewEdges: guard hit");
-		}
 		if (edgelist->u >= edgestoadd->u)
 			goto addedge;
 		edgelist=edgelist->next;
@@ -244,16 +234,9 @@ R_StepActiveU
 PQ_FASTTEXT void R_StepActiveU (edge_t *pedge)
 {
 	edge_t		*pnext_edge, *pwedge;
-	unsigned int outer_guard = 0;
 
 	while (1)
 	{
-		if (++outer_guard > 2000000u)
-		{
-			pq_dbg_stage = 0x3302;
-			pq_dbg_info = (unsigned int)pedge;
-			Sys_Error ("R_StepActiveU: guard hit");
-		}
 	nextedge:
 		pedge->u += pedge->u_step;
 		if (pedge->u < pedge->prev->u)
@@ -290,19 +273,8 @@ pushback:
 
 		// find out where the edge goes in the edge list
 		pwedge = pedge->prev->prev;
-		{
-			unsigned int back_guard = 0;
-			while (pwedge->u > pedge->u)
-			{
-				if (++back_guard > 2000000u)
-				{
-					pq_dbg_stage = 0x3303;
-					pq_dbg_info = (unsigned int)pwedge;
-					Sys_Error ("R_StepActiveU: backwalk guard hit");
-				}
-				pwedge = pwedge->prev;
-			}
-		}
+		while (pwedge->u > pedge->u)
+			pwedge = pwedge->prev;
 
 	// put the edge back into the edge list
 		pedge->next = pwedge->next;
@@ -744,7 +716,7 @@ PQ_FASTTEXT void R_ScanEdges (void)
 			R_InsertNewEdges (newedges[iv], edge_head.next);
 		}
 
-		(*pdrawfunc) ();
+		R_GenerateSpans ();
 
 	// flush the span list if we can't be sure we have enough spans left for
 	// the next scan

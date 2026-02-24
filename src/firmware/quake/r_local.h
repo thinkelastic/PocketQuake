@@ -133,7 +133,7 @@ extern	vec3_t			r_worldmodelorg;
 
 
 void R_DrawSprite (void);
-void R_RenderFace (msurface_t *fa, int clipflags);
+void R_RenderFace (msurface_t *fa, int clipflags, float planedot);
 void R_RenderPoly (msurface_t *fa, int clipflags);
 void R_RenderBmodelFace (bedge_t *pedges, msurface_t *psurf);
 void R_TransformPlane (mplane_t *p, float *normal, float *dist);

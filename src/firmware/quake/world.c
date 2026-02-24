@@ -394,10 +394,10 @@ void SV_LinkEdict (edict_t *ent, qboolean touch_triggers)
 		max = 0;
 		for (i=0 ; i<3 ; i++)
 		{
-			v =fabs( ent->v.mins[i]);
+			v =fabsf( ent->v.mins[i]);
 			if (v > max)
 				max = v;
-			v =fabs( ent->v.maxs[i]);
+			v =fabsf( ent->v.maxs[i]);
 			if (v > max)
 				max = v;
 		}
@@ -496,9 +496,6 @@ PQ_FASTTEXT int SV_HullPointContents (hull_t *hull, int num, vec3_t p)
 
 	while (num >= 0)
 	{
-		if (num < hull->firstclipnode || num > hull->lastclipnode)
-			Sys_Error ("SV_HullPointContents: bad node number");
-	
 		node = hull->clipnodes + num;
 		plane = hull->planes + node->planenum;
 		
