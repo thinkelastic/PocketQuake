@@ -73,7 +73,7 @@ realcheck:
 	stop[2] = start[2] - 2*STEPSIZE;
 	trace = SV_Move (start, vec3_origin, vec3_origin, stop, true, ent);
 
-	if (trace.fraction == 1.0)
+	if (trace.fraction == 1.0f)
 		return false;
 	mid = bottom = trace.endpos[2];
 	
@@ -86,9 +86,9 @@ realcheck:
 			
 			trace = SV_Move (start, vec3_origin, vec3_origin, stop, true, ent);
 			
-			if (trace.fraction != 1.0 && trace.endpos[2] > bottom)
+			if (trace.fraction != 1.0f && trace.endpos[2] > bottom)
 				bottom = trace.endpos[2];
-			if (trace.fraction == 1.0 || mid - trace.endpos[2] > STEPSIZE)
+			if (trace.fraction == 1.0f || mid - trace.endpos[2] > STEPSIZE)
 				return false;
 		}
 
@@ -137,7 +137,7 @@ qboolean SV_movestep (edict_t *ent, vec3_t move, qboolean relink)
 			}
 			trace = SV_Move (ent->v.origin, ent->v.mins, ent->v.maxs, neworg, false, ent);
 	
-			if (trace.fraction == 1)
+			if (trace.fraction == 1.0f)
 			{
 				if ( ((int)ent->v.flags & FL_SWIM) && SV_PointContents(trace.endpos) == CONTENTS_EMPTY )
 					return false;	// swim monster left water
@@ -172,7 +172,7 @@ qboolean SV_movestep (edict_t *ent, vec3_t move, qboolean relink)
 		if (trace.allsolid || trace.startsolid)
 			return false;
 	}
-	if (trace.fraction == 1)
+	if (trace.fraction == 1.0f)
 	{
 	// if monster had the ground pulled out, go ahead and fall
 		if ( (int)ent->v.flags & FL_PARTIALGROUND )
@@ -238,7 +238,7 @@ qboolean SV_StepDirection (edict_t *ent, float yaw, float dist)
 	ent->v.ideal_yaw = yaw;
 	PF_changeyaw();
 	
-	yaw = yaw*M_PI*2 / 360;
+	yaw = yaw * (float)(M_PI / 180.0);
 	move[0] = cosf(yaw)*dist;
 	move[1] = sinf(yaw)*dist;
 	move[2] = 0;

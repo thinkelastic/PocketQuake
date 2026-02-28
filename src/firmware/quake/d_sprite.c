@@ -22,16 +22,67 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "d_local.h"
+#include "span_accel.h"
 
 static int		sprite_height;
 static int		minindex, maxindex;
 static sspan_t	*sprite_spans;
 
-#if	!id386
+#if HW_SPRITE_ACCEL
 
 /*
 =====================
-D_SpriteDrawSpans
+D_SpriteDrawSpans — Hardware accelerated path
+=====================
+*/
+void D_SpriteDrawSpans (sspan_t *pspan)
+{
+	int		count, izistep;
+	int		izi;
+	byte	*pdest;
+	float	sdivz, tdivz, zi, du, dv;
+	short	*pz;
+
+	izistep = (int)(d_zistepu * 0x8000 * 0x10000);
+	SPAN_ZISTEP = (unsigned int)izistep;
+
+	span_set_perspective(d_sdivzstepu, d_tdivzstepu, d_zistepu,
+	                     sadjust, tadjust, bbextents, bbextentt);
+	span_set_texture((unsigned int)cacheblock, cachewidth, sprite_height);
+
+	do
+	{
+		pdest = (byte *)d_viewbuffer + (screenwidth * pspan->v) + pspan->u;
+		pz = d_pzbuffer + (d_zwidth * pspan->v) + pspan->u;
+
+		count = pspan->count;
+
+		if (count <= 0)
+			goto NextSpan;
+
+		du = (float)pspan->u;
+		dv = (float)pspan->v;
+
+		sdivz = d_sdivzorigin + dv*d_sdivzstepv + du*d_sdivzstepu;
+		tdivz = d_tdivzorigin + dv*d_tdivzstepv + du*d_tdivzstepu;
+		zi = d_ziorigin + dv*d_zistepv + du*d_zistepu;
+		izi = (int)(zi * 0x8000 * 0x10000);
+
+		while (!(SPAN_STATUS & SPAN_STATUS_CAN_ACCEPT)) ;
+		span_draw_sprite((unsigned int)pdest, sdivz, tdivz, zi,
+		                 (unsigned int)pz, izi, count);
+
+NextSpan:
+		pspan++;
+
+	} while (pspan->count != DS_SPAN_LIST_END);
+}
+
+#elif	!id386
+
+/*
+=====================
+D_SpriteDrawSpans — Software fallback
 =====================
 */
 void D_SpriteDrawSpans (sspan_t *pspan)

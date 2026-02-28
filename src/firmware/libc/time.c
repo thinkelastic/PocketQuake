@@ -5,11 +5,8 @@
 
 #include "libc.h"
 
-/* CPU clock frequency in Hz (12.288 MHz) */
-#define CPU_FREQ_HZ     12288000
-
-/* Nanoseconds per cycle (approximately 81.38 ns at 12.288 MHz) */
-#define NS_PER_CYCLE    (1000000000 / CPU_FREQ_HZ)
+/* CPU clock frequency in Hz (100 MHz) */
+#define CPU_FREQ_HZ     100000000
 
 /* Get 64-bit cycle counter */
 static uint64_t get_cycles(void) {

@@ -1,7 +1,10 @@
 //
-// VexRiscv CPU System — AXI4 bus routing
-// - VexRiscv RISC-V CPU with AXI4 interface
-// - iBus/dBus arbitration → address decode → {SDRAM, PSRAM, Local} AXI4 masters
+// VexiiRiscv CPU System — AXI4 bus routing
+// - VexiiRiscv RISC-V CPU with 3-bus architecture:
+//   FetchL1Axi4 (I-cache, read-only)
+//   LsuL1Axi4   (D-cache, read+write)
+//   LsuPlugin IO (uncached, single-beat cmd/rsp)
+// - Per-bus address decode → {SDRAM, PSRAM, Local} AXI4 masters
 //
 // All peripheral/local logic (BRAM, colormap, system registers, CDC, terminal,
 // DMA/Span/ATM/Audio/Link dispatch) lives in axi_periph_slave.v.
@@ -90,149 +93,184 @@ module cpu_system (
 );
 
 // ============================================
-// VexRiscv AXI4 signals
+// VexiiRiscv AXI4 signals
 // ============================================
 
-// iBus AXI4 (read-only): AR + R channels
-wire        ibus_ar_valid;
-reg         ibus_ar_ready;
-wire [31:0] ibus_ar_addr;
-wire [7:0]  ibus_ar_len;
-wire [1:0]  ibus_ar_burst;
-wire [3:0]  ibus_ar_cache;
-wire [2:0]  ibus_ar_prot;
-
-reg         ibus_r_valid;
-wire        ibus_r_ready;
-reg  [31:0] ibus_r_data;
-reg  [1:0]  ibus_r_resp;
-reg         ibus_r_last;
-
-// dBus AXI4 (full): AW + W + B + AR + R channels
-wire        dbus_aw_valid;
-reg         dbus_aw_ready;
-wire [31:0] dbus_aw_addr;
-wire [7:0]  dbus_aw_len;
-wire [2:0]  dbus_aw_size;
-wire [3:0]  dbus_aw_cache;
-wire [2:0]  dbus_aw_prot;
-
-wire        dbus_w_valid;
-reg         dbus_w_ready;
-wire [31:0] dbus_w_data;
-wire [3:0]  dbus_w_strb;
-wire        dbus_w_last;
-
-reg         dbus_b_valid;
-wire        dbus_b_ready;
-reg  [1:0]  dbus_b_resp;
-
-wire        dbus_ar_valid;
-reg         dbus_ar_ready;
-wire [31:0] dbus_ar_addr;
-wire [7:0]  dbus_ar_len;
-wire [2:0]  dbus_ar_size;
-wire [3:0]  dbus_ar_cache;
-wire [2:0]  dbus_ar_prot;
-
-reg         dbus_r_valid;
-wire        dbus_r_ready;
-reg  [31:0] dbus_r_data;
-reg  [1:0]  dbus_r_resp;
-reg         dbus_r_last;
-
-// Active-high reset for VexRiscv
+// Active-high reset for VexiiRiscv
 wire reset = ~reset_n;
 
-// Instantiate VexRiscv CPU
-VexRiscv cpu (
+// FetchL1Axi4 (I-cache, read-only): AR + R channels
+wire        fetch_ar_valid;
+reg         fetch_ar_ready;
+wire [31:0] fetch_ar_addr;
+wire [0:0]  fetch_ar_id;
+wire [7:0]  fetch_ar_len;
+
+reg         fetch_r_valid;
+wire        fetch_r_ready;
+reg  [31:0] fetch_r_data;
+reg  [0:0]  fetch_r_id;
+wire [1:0]  fetch_r_resp = 2'b00;
+reg         fetch_r_last;
+
+// LsuL1Axi4 (D-cache, full AXI4): AW + W + B + AR + R channels
+wire        lsu_aw_valid;
+reg         lsu_aw_ready;
+wire [31:0] lsu_aw_addr;
+wire [0:0]  lsu_aw_id;
+wire [7:0]  lsu_aw_len;
+
+wire        lsu_w_valid;
+reg         lsu_w_ready;
+wire [31:0] lsu_w_data;
+wire [3:0]  lsu_w_strb;
+wire        lsu_w_last;
+
+reg         lsu_b_valid;
+wire        lsu_b_ready;
+reg  [0:0]  lsu_b_id;
+wire [1:0]  lsu_b_resp = 2'b00;
+
+wire        lsu_ar_valid;
+reg         lsu_ar_ready;
+wire [31:0] lsu_ar_addr;
+wire [0:0]  lsu_ar_id;
+wire [7:0]  lsu_ar_len;
+
+reg         lsu_r_valid;
+wire        lsu_r_ready;
+reg  [31:0] lsu_r_data;
+reg  [0:0]  lsu_r_id;
+wire [1:0]  lsu_r_resp = 2'b00;
+reg         lsu_r_last;
+
+// LsuPlugin IO bus (simple cmd/rsp, uncached data)
+wire        io_cmd_valid;
+reg         io_cmd_ready;
+wire        io_cmd_write;
+wire [31:0] io_cmd_addr;
+wire [31:0] io_cmd_data;
+wire [3:0]  io_cmd_mask;
+
+reg         io_rsp_valid;
+reg         io_rsp_error;
+reg  [31:0] io_rsp_data;
+
+// 64-bit rdtime counter for PrivilegedPlugin
+reg [63:0] rdtime_counter;
+always @(posedge clk or posedge reset) begin
+    if (reset)
+        rdtime_counter <= 64'd0;
+    else
+        rdtime_counter <= rdtime_counter + 64'd1;
+end
+
+// ============================================
+// VexiiRiscv CPU instantiation
+// ============================================
+VexiiRiscv cpu (
     .clk(clk),
     .reset(reset),
 
-    .externalResetVector(32'h00000000),
-    .timerInterrupt(1'b0),
-    .softwareInterrupt(1'b0),
-    .externalInterrupt(1'b0),
+    .PrivilegedPlugin_logic_rdtime(rdtime_counter),
+    .PrivilegedPlugin_logic_harts_0_int_m_timer(1'b0),
+    .PrivilegedPlugin_logic_harts_0_int_m_software(1'b0),
+    .PrivilegedPlugin_logic_harts_0_int_m_external(1'b0),
 
-    // iBus AXI4 (read-only)
-    .iBusAxi_ar_valid(ibus_ar_valid),
-    .iBusAxi_ar_ready(ibus_ar_ready),
-    .iBusAxi_ar_payload_addr(ibus_ar_addr),
-    .iBusAxi_ar_payload_len(ibus_ar_len),
-    .iBusAxi_ar_payload_burst(ibus_ar_burst),
-    .iBusAxi_ar_payload_cache(ibus_ar_cache),
-    .iBusAxi_ar_payload_prot(ibus_ar_prot),
+    // LsuL1Axi4 (D-cache)
+    .LsuL1Axi4Plugin_logic_axi_aw_valid(lsu_aw_valid),
+    .LsuL1Axi4Plugin_logic_axi_aw_ready(lsu_aw_ready),
+    .LsuL1Axi4Plugin_logic_axi_aw_payload_addr(lsu_aw_addr),
+    .LsuL1Axi4Plugin_logic_axi_aw_payload_id(lsu_aw_id),
+    .LsuL1Axi4Plugin_logic_axi_aw_payload_len(lsu_aw_len),
+    .LsuL1Axi4Plugin_logic_axi_aw_payload_size(),
+    .LsuL1Axi4Plugin_logic_axi_aw_payload_burst(),
+    .LsuL1Axi4Plugin_logic_axi_aw_payload_cache(),
+    .LsuL1Axi4Plugin_logic_axi_aw_payload_prot(),
 
-    .iBusAxi_r_valid(ibus_r_valid),
-    .iBusAxi_r_ready(ibus_r_ready),
-    .iBusAxi_r_payload_data(ibus_r_data),
-    .iBusAxi_r_payload_resp(ibus_r_resp),
-    .iBusAxi_r_payload_last(ibus_r_last),
+    .LsuL1Axi4Plugin_logic_axi_w_valid(lsu_w_valid),
+    .LsuL1Axi4Plugin_logic_axi_w_ready(lsu_w_ready),
+    .LsuL1Axi4Plugin_logic_axi_w_payload_data(lsu_w_data),
+    .LsuL1Axi4Plugin_logic_axi_w_payload_strb(lsu_w_strb),
+    .LsuL1Axi4Plugin_logic_axi_w_payload_last(lsu_w_last),
 
-    // dBus AXI4 (full)
-    .dBusAxi_aw_valid(dbus_aw_valid),
-    .dBusAxi_aw_ready(dbus_aw_ready),
-    .dBusAxi_aw_payload_addr(dbus_aw_addr),
-    .dBusAxi_aw_payload_len(dbus_aw_len),
-    .dBusAxi_aw_payload_size(dbus_aw_size),
-    .dBusAxi_aw_payload_cache(dbus_aw_cache),
-    .dBusAxi_aw_payload_prot(dbus_aw_prot),
+    .LsuL1Axi4Plugin_logic_axi_b_valid(lsu_b_valid),
+    .LsuL1Axi4Plugin_logic_axi_b_ready(lsu_b_ready),
+    .LsuL1Axi4Plugin_logic_axi_b_payload_id(lsu_b_id),
+    .LsuL1Axi4Plugin_logic_axi_b_payload_resp(lsu_b_resp),
 
-    .dBusAxi_w_valid(dbus_w_valid),
-    .dBusAxi_w_ready(dbus_w_ready),
-    .dBusAxi_w_payload_data(dbus_w_data),
-    .dBusAxi_w_payload_strb(dbus_w_strb),
-    .dBusAxi_w_payload_last(dbus_w_last),
+    .LsuL1Axi4Plugin_logic_axi_ar_valid(lsu_ar_valid),
+    .LsuL1Axi4Plugin_logic_axi_ar_ready(lsu_ar_ready),
+    .LsuL1Axi4Plugin_logic_axi_ar_payload_addr(lsu_ar_addr),
+    .LsuL1Axi4Plugin_logic_axi_ar_payload_id(lsu_ar_id),
+    .LsuL1Axi4Plugin_logic_axi_ar_payload_len(lsu_ar_len),
+    .LsuL1Axi4Plugin_logic_axi_ar_payload_size(),
+    .LsuL1Axi4Plugin_logic_axi_ar_payload_burst(),
+    .LsuL1Axi4Plugin_logic_axi_ar_payload_cache(),
+    .LsuL1Axi4Plugin_logic_axi_ar_payload_prot(),
 
-    .dBusAxi_b_valid(dbus_b_valid),
-    .dBusAxi_b_ready(dbus_b_ready),
-    .dBusAxi_b_payload_resp(dbus_b_resp),
+    .LsuL1Axi4Plugin_logic_axi_r_valid(lsu_r_valid),
+    .LsuL1Axi4Plugin_logic_axi_r_ready(lsu_r_ready),
+    .LsuL1Axi4Plugin_logic_axi_r_payload_data(lsu_r_data),
+    .LsuL1Axi4Plugin_logic_axi_r_payload_id(lsu_r_id),
+    .LsuL1Axi4Plugin_logic_axi_r_payload_resp(lsu_r_resp),
+    .LsuL1Axi4Plugin_logic_axi_r_payload_last(lsu_r_last),
 
-    .dBusAxi_ar_valid(dbus_ar_valid),
-    .dBusAxi_ar_ready(dbus_ar_ready),
-    .dBusAxi_ar_payload_addr(dbus_ar_addr),
-    .dBusAxi_ar_payload_len(dbus_ar_len),
-    .dBusAxi_ar_payload_size(dbus_ar_size),
-    .dBusAxi_ar_payload_cache(dbus_ar_cache),
-    .dBusAxi_ar_payload_prot(dbus_ar_prot),
+    // FetchL1Axi4 (I-cache, read-only)
+    .FetchL1Axi4Plugin_logic_axi_ar_valid(fetch_ar_valid),
+    .FetchL1Axi4Plugin_logic_axi_ar_ready(fetch_ar_ready),
+    .FetchL1Axi4Plugin_logic_axi_ar_payload_addr(fetch_ar_addr),
+    .FetchL1Axi4Plugin_logic_axi_ar_payload_id(fetch_ar_id),
+    .FetchL1Axi4Plugin_logic_axi_ar_payload_len(fetch_ar_len),
+    .FetchL1Axi4Plugin_logic_axi_ar_payload_size(),
+    .FetchL1Axi4Plugin_logic_axi_ar_payload_burst(),
+    .FetchL1Axi4Plugin_logic_axi_ar_payload_cache(),
+    .FetchL1Axi4Plugin_logic_axi_ar_payload_prot(),
 
-    .dBusAxi_r_valid(dbus_r_valid),
-    .dBusAxi_r_ready(dbus_r_ready),
-    .dBusAxi_r_payload_data(dbus_r_data),
-    .dBusAxi_r_payload_resp(dbus_r_resp),
-    .dBusAxi_r_payload_last(dbus_r_last)
+    .FetchL1Axi4Plugin_logic_axi_r_valid(fetch_r_valid),
+    .FetchL1Axi4Plugin_logic_axi_r_ready(fetch_r_ready),
+    .FetchL1Axi4Plugin_logic_axi_r_payload_data(fetch_r_data),
+    .FetchL1Axi4Plugin_logic_axi_r_payload_id(fetch_r_id),
+    .FetchL1Axi4Plugin_logic_axi_r_payload_resp(fetch_r_resp),
+    .FetchL1Axi4Plugin_logic_axi_r_payload_last(fetch_r_last),
+
+    // LsuPlugin IO bus (uncached data)
+    .LsuPlugin_logic_bus_cmd_valid(io_cmd_valid),
+    .LsuPlugin_logic_bus_cmd_ready(io_cmd_ready),
+    .LsuPlugin_logic_bus_cmd_payload_write(io_cmd_write),
+    .LsuPlugin_logic_bus_cmd_payload_address(io_cmd_addr),
+    .LsuPlugin_logic_bus_cmd_payload_data(io_cmd_data),
+    .LsuPlugin_logic_bus_cmd_payload_size(),
+    .LsuPlugin_logic_bus_cmd_payload_mask(io_cmd_mask),
+    .LsuPlugin_logic_bus_cmd_payload_io(),
+    .LsuPlugin_logic_bus_cmd_payload_fromHart(),
+    .LsuPlugin_logic_bus_cmd_payload_uopId(),
+    .LsuPlugin_logic_bus_rsp_valid(io_rsp_valid),
+    .LsuPlugin_logic_bus_rsp_payload_error(io_rsp_error),
+    .LsuPlugin_logic_bus_rsp_payload_data(io_rsp_data)
 );
 
 // ============================================
-// Request arbitration (AXI4)
+// Request arbitration
 // ============================================
 localparam BUS_NONE  = 2'd0;
-localparam BUS_IBUS  = 2'd1;
-localparam BUS_DBUS  = 2'd2;
+localparam BUS_FETCH = 2'd1;
+localparam BUS_LSU   = 2'd2;
+localparam BUS_IO    = 2'd3;
 
-reg last_grant_dbus;
+reg last_grant_lsu;
 
-wire ibus_req = ibus_ar_valid;
-wire dbus_rd_req = dbus_ar_valid;
-wire dbus_wr_req = dbus_aw_valid;
-wire dbus_req = dbus_rd_req | dbus_wr_req;
+wire fetch_req = fetch_ar_valid;
+wire lsu_rd_req = lsu_ar_valid;
+wire lsu_wr_req = lsu_aw_valid;
+wire lsu_req = lsu_rd_req | lsu_wr_req;
 
-wire dbus_grant = dbus_req & (~ibus_req | ~last_grant_dbus);
-wire ibus_grant = ibus_req & ~dbus_grant;
-wire dbus_rd_grant = dbus_grant & dbus_rd_req;
-wire dbus_wr_grant = dbus_grant & ~dbus_rd_req;
-
-// Muxed request address for address decode
-wire [31:0] grant_addr = dbus_grant ?
-                          (dbus_rd_grant ? dbus_ar_addr : dbus_aw_addr) :
-                          ibus_ar_addr;
-
-// ============================================
-// Simplified address decode — 3 targets
-// ============================================
-wire dec_sdram = (grant_addr[31:26] == 6'b000100) || (grant_addr[31:26] == 6'b010100);
-wire dec_psram = (grant_addr[31:24] == 8'h30);
-wire dec_local = ~dec_sdram & ~dec_psram;
+// Priority: LSU > Fetch with round-robin, IO lowest
+wire lsu_grant = lsu_req & (~fetch_req | ~last_grant_lsu);
+wire fetch_grant = fetch_req & ~lsu_grant;
+wire lsu_rd_grant = lsu_grant & lsu_rd_req;
+wire lsu_wr_grant = lsu_grant & ~lsu_rd_req;
+wire io_grant = io_cmd_valid & ~lsu_grant & ~fetch_grant;
 
 // ============================================
 // Memory access FSM
@@ -251,6 +289,7 @@ reg [2:0] fsm_state;
 reg [31:0] req_addr_r;
 reg [31:0] req_wdata_r;
 reg [3:0]  req_wstrb_r;
+reg [0:0]  req_id_r;       // AXI ID echo-back (refill-count=2)
 reg [1:0]  active_bus;
 reg        is_write_r;
 
@@ -301,27 +340,33 @@ always @(posedge clk or posedge reset) begin
         req_addr_r <= 0;
         req_wdata_r <= 0;
         req_wstrb_r <= 0;
+        req_id_r <= 0;
         burst_len_r <= 0;
         burst_count <= 0;
-        last_grant_dbus <= 0;
+        last_grant_lsu <= 0;
 
         target_mem <= TGT_SDRAM;
 
-        ibus_ar_ready <= 0;
-        ibus_r_valid <= 0;
-        ibus_r_data <= 0;
-        ibus_r_resp <= 0;
-        ibus_r_last <= 0;
+        fetch_ar_ready <= 0;
+        fetch_r_valid <= 0;
+        fetch_r_data <= 0;
+        fetch_r_id <= 0;
+        fetch_r_last <= 0;
 
-        dbus_aw_ready <= 0;
-        dbus_w_ready <= 0;
-        dbus_ar_ready <= 0;
-        dbus_r_valid <= 0;
-        dbus_r_data <= 0;
-        dbus_r_resp <= 0;
-        dbus_r_last <= 0;
-        dbus_b_valid <= 0;
-        dbus_b_resp <= 0;
+        lsu_aw_ready <= 0;
+        lsu_w_ready <= 0;
+        lsu_ar_ready <= 0;
+        lsu_r_valid <= 0;
+        lsu_r_data <= 0;
+        lsu_r_id <= 0;
+        lsu_r_last <= 0;
+        lsu_b_valid <= 0;
+        lsu_b_id <= 0;
+
+        io_cmd_ready <= 0;
+        io_rsp_valid <= 0;
+        io_rsp_error <= 0;
+        io_rsp_data <= 0;
 
         m_sdram_arvalid <= 0;
         m_sdram_araddr <= 0;
@@ -357,13 +402,15 @@ always @(posedge clk or posedge reset) begin
         m_local_wlast <= 0;
     end else begin
         // Defaults: deassert single-cycle pulses
-        ibus_ar_ready <= 0;
-        ibus_r_valid <= 0;
-        dbus_aw_ready <= 0;
-        dbus_w_ready <= 0;
-        dbus_ar_ready <= 0;
-        dbus_r_valid <= 0;
-        dbus_b_valid <= 0;
+        fetch_ar_ready <= 0;
+        fetch_r_valid <= 0;
+        lsu_aw_ready <= 0;
+        lsu_w_ready <= 0;
+        lsu_ar_ready <= 0;
+        lsu_r_valid <= 0;
+        lsu_b_valid <= 0;
+        io_cmd_ready <= 0;
+        io_rsp_valid <= 0;
 
         case (fsm_state)
 
@@ -382,106 +429,159 @@ always @(posedge clk or posedge reset) begin
             m_local_awvalid <= 0;
             m_local_wvalid <= 0;
 
-            if (ibus_grant) begin
-                // Accept iBus read (AR channel)
-                ibus_ar_ready <= 1;
-                active_bus <= BUS_IBUS;
+            if (lsu_rd_grant) begin
+                // Accept LsuL1 read (AR channel)
+                lsu_ar_ready <= 1;
+                active_bus <= BUS_LSU;
                 is_write_r <= 0;
-                req_addr_r <= ibus_ar_addr;
-                burst_len_r <= ibus_ar_len;
+                req_addr_r <= lsu_ar_addr;
+                req_id_r <= lsu_ar_id;
+                burst_len_r <= lsu_ar_len;
                 burst_count <= 0;
-                last_grant_dbus <= 0;
+                last_grant_lsu <= 1;
 
                 // Issue AR to target slave
                 fsm_state <= FSM_MEM_AR;
-                if (ibus_ar_addr[31:26] == 6'b000100 || ibus_ar_addr[31:26] == 6'b010100) begin
+                if (lsu_ar_addr[31:26] == 6'b000100 || lsu_ar_addr[31:26] == 6'b010100) begin
                     target_mem <= TGT_SDRAM;
                     m_sdram_arvalid <= 1;
-                    m_sdram_araddr <= ibus_ar_addr;
-                    m_sdram_arlen <= ibus_ar_len;
-                end else if (ibus_ar_addr[31:24] == 8'h30) begin
+                    m_sdram_araddr <= lsu_ar_addr;
+                    m_sdram_arlen <= lsu_ar_len;
+                end else if (lsu_ar_addr[31:27] == 5'b00110) begin
                     target_mem <= TGT_PSRAM;
                     m_psram_arvalid <= 1;
-                    m_psram_araddr <= ibus_ar_addr;
-                    m_psram_arlen <= ibus_ar_len;
+                    m_psram_araddr <= lsu_ar_addr;
+                    m_psram_arlen <= lsu_ar_len;
                 end else begin
                     target_mem <= TGT_LOCAL;
                     m_local_arvalid <= 1;
-                    m_local_araddr <= ibus_ar_addr;
-                    m_local_arlen <= ibus_ar_len;
+                    m_local_araddr <= lsu_ar_addr;
+                    m_local_arlen <= lsu_ar_len;
                 end
 
-            end else if (dbus_rd_grant) begin
-                // Accept dBus read (AR channel)
-                dbus_ar_ready <= 1;
-                active_bus <= BUS_DBUS;
-                is_write_r <= 0;
-                req_addr_r <= dbus_ar_addr;
-                burst_len_r <= dbus_ar_len;
-                burst_count <= 0;
-                last_grant_dbus <= 1;
-
-                // Issue AR to target slave
-                fsm_state <= FSM_MEM_AR;
-                if (dbus_ar_addr[31:26] == 6'b000100 || dbus_ar_addr[31:26] == 6'b010100) begin
-                    target_mem <= TGT_SDRAM;
-                    m_sdram_arvalid <= 1;
-                    m_sdram_araddr <= dbus_ar_addr;
-                    m_sdram_arlen <= dbus_ar_len;
-                end else if (dbus_ar_addr[31:24] == 8'h30) begin
-                    target_mem <= TGT_PSRAM;
-                    m_psram_arvalid <= 1;
-                    m_psram_araddr <= dbus_ar_addr;
-                    m_psram_arlen <= dbus_ar_len;
-                end else begin
-                    target_mem <= TGT_LOCAL;
-                    m_local_arvalid <= 1;
-                    m_local_araddr <= dbus_ar_addr;
-                    m_local_arlen <= dbus_ar_len;
-                end
-
-            end else if (dbus_wr_grant) begin
-                // Accept dBus write address (AW channel)
-                dbus_aw_ready <= 1;
-                active_bus <= BUS_DBUS;
+            end else if (lsu_wr_grant) begin
+                // Accept LsuL1 write address (AW channel)
+                lsu_aw_ready <= 1;
+                active_bus <= BUS_LSU;
                 is_write_r <= 1;
-                req_addr_r <= dbus_aw_addr;
-                burst_len_r <= dbus_aw_len;
+                req_addr_r <= lsu_aw_addr;
+                req_id_r <= lsu_aw_id;
+                burst_len_r <= lsu_aw_len;
                 burst_count <= 0;
-                last_grant_dbus <= 1;
+                last_grant_lsu <= 1;
 
                 // Determine target
-                if (dbus_aw_addr[31:26] == 6'b000100 || dbus_aw_addr[31:26] == 6'b010100)
+                if (lsu_aw_addr[31:26] == 6'b000100 || lsu_aw_addr[31:26] == 6'b010100)
                     target_mem <= TGT_SDRAM;
-                else if (dbus_aw_addr[31:24] == 8'h30)
+                else if (lsu_aw_addr[31:27] == 5'b00110)
                     target_mem <= TGT_PSRAM;
                 else
                     target_mem <= TGT_LOCAL;
 
                 // Also accept W if valid on same cycle
-                if (dbus_w_valid) begin
-                    dbus_w_ready <= 1;
-                    req_wdata_r <= dbus_w_data;
-                    req_wstrb_r <= dbus_w_strb;
+                if (lsu_w_valid) begin
+                    lsu_w_ready <= 1;
+                    req_wdata_r <= lsu_w_data;
+                    req_wstrb_r <= lsu_w_strb;
 
                     // Issue AW to target slave
                     fsm_state <= FSM_MEM_AW;
-                    if (dbus_aw_addr[31:26] == 6'b000100 || dbus_aw_addr[31:26] == 6'b010100) begin
+                    if (lsu_aw_addr[31:26] == 6'b000100 || lsu_aw_addr[31:26] == 6'b010100) begin
                         m_sdram_awvalid <= 1;
-                        m_sdram_awaddr <= dbus_aw_addr;
-                        m_sdram_awlen <= dbus_aw_len;
-                    end else if (dbus_aw_addr[31:24] == 8'h30) begin
+                        m_sdram_awaddr <= lsu_aw_addr;
+                        m_sdram_awlen <= lsu_aw_len;
+                    end else if (lsu_aw_addr[31:27] == 5'b00110) begin
                         m_psram_awvalid <= 1;
-                        m_psram_awaddr <= dbus_aw_addr;
-                        m_psram_awlen <= dbus_aw_len;
+                        m_psram_awaddr <= lsu_aw_addr;
+                        m_psram_awlen <= lsu_aw_len;
                     end else begin
                         m_local_awvalid <= 1;
-                        m_local_awaddr <= dbus_aw_addr;
-                        m_local_awlen <= dbus_aw_len;
+                        m_local_awaddr <= lsu_aw_addr;
+                        m_local_awlen <= lsu_aw_len;
                     end
                 end else begin
                     // W not ready yet - wait for it
                     fsm_state <= FSM_WRITE_NEXT;
+                end
+
+            end else if (fetch_grant) begin
+                // Accept FetchL1 read (AR channel)
+                fetch_ar_ready <= 1;
+                active_bus <= BUS_FETCH;
+                is_write_r <= 0;
+                req_addr_r <= fetch_ar_addr;
+                req_id_r <= fetch_ar_id;
+                burst_len_r <= fetch_ar_len;
+                burst_count <= 0;
+                last_grant_lsu <= 0;
+
+                // Issue AR to target slave
+                fsm_state <= FSM_MEM_AR;
+                if (fetch_ar_addr[31:26] == 6'b000100 || fetch_ar_addr[31:26] == 6'b010100) begin
+                    target_mem <= TGT_SDRAM;
+                    m_sdram_arvalid <= 1;
+                    m_sdram_araddr <= fetch_ar_addr;
+                    m_sdram_arlen <= fetch_ar_len;
+                end else if (fetch_ar_addr[31:27] == 5'b00110) begin
+                    target_mem <= TGT_PSRAM;
+                    m_psram_arvalid <= 1;
+                    m_psram_araddr <= fetch_ar_addr;
+                    m_psram_arlen <= fetch_ar_len;
+                end else begin
+                    target_mem <= TGT_LOCAL;
+                    m_local_arvalid <= 1;
+                    m_local_araddr <= fetch_ar_addr;
+                    m_local_arlen <= fetch_ar_len;
+                end
+
+            end else if (io_grant) begin
+                // Accept IO bus command (single-beat)
+                io_cmd_ready <= 1;
+                active_bus <= BUS_IO;
+                burst_len_r <= 0;  // IO is always single-beat
+                burst_count <= 0;
+
+                // Address decode for IO bus:
+                // 0x50-0x53 (uncached SDRAM alias) → SDRAM target
+                // Everything else → Local target
+                if (io_cmd_addr[31:26] == 6'b010100) begin
+                    target_mem <= TGT_SDRAM;
+                end else begin
+                    target_mem <= TGT_LOCAL;
+                end
+
+                if (io_cmd_write) begin
+                    // IO write: issue AW + W simultaneously
+                    is_write_r <= 1;
+                    req_addr_r <= io_cmd_addr;
+                    req_wdata_r <= io_cmd_data;
+                    req_wstrb_r <= io_cmd_mask;
+
+                    fsm_state <= FSM_MEM_AW;
+                    if (io_cmd_addr[31:26] == 6'b010100) begin
+                        m_sdram_awvalid <= 1;
+                        m_sdram_awaddr <= io_cmd_addr;
+                        m_sdram_awlen <= 0;
+                    end else begin
+                        m_local_awvalid <= 1;
+                        m_local_awaddr <= io_cmd_addr;
+                        m_local_awlen <= 0;
+                    end
+                end else begin
+                    // IO read: issue AR
+                    is_write_r <= 0;
+                    req_addr_r <= io_cmd_addr;
+
+                    fsm_state <= FSM_MEM_AR;
+                    if (io_cmd_addr[31:26] == 6'b010100) begin
+                        m_sdram_arvalid <= 1;
+                        m_sdram_araddr <= io_cmd_addr;
+                        m_sdram_arlen <= 0;
+                    end else begin
+                        m_local_arvalid <= 1;
+                        m_local_araddr <= io_cmd_addr;
+                        m_local_arlen <= 0;
+                    end
                 end
             end
         end
@@ -499,20 +599,25 @@ always @(posedge clk or posedge reset) begin
         end
 
         // ============================================
-        // MEM_R: Forward R beats to VexRiscv
+        // MEM_R: Forward R beats to requester
         // ============================================
         FSM_MEM_R: begin
             if (mem_rvalid) begin
-                if (active_bus == BUS_IBUS) begin
-                    ibus_r_valid <= 1;
-                    ibus_r_data <= mem_rdata;
-                    ibus_r_resp <= 2'b00;
-                    ibus_r_last <= beat_is_last;
+                if (active_bus == BUS_FETCH) begin
+                    fetch_r_valid <= 1;
+                    fetch_r_data <= mem_rdata;
+                    fetch_r_id <= req_id_r;
+                    fetch_r_last <= beat_is_last;
+                end else if (active_bus == BUS_LSU) begin
+                    lsu_r_valid <= 1;
+                    lsu_r_data <= mem_rdata;
+                    lsu_r_id <= req_id_r;
+                    lsu_r_last <= beat_is_last;
                 end else begin
-                    dbus_r_valid <= 1;
-                    dbus_r_data <= mem_rdata;
-                    dbus_r_resp <= 2'b00;
-                    dbus_r_last <= beat_is_last;
+                    // BUS_IO: single-beat read response
+                    io_rsp_valid <= 1;
+                    io_rsp_data <= mem_rdata;
+                    io_rsp_error <= 0;
                 end
                 burst_count <= burst_count + 1;
                 if (beat_is_last)
@@ -568,29 +673,37 @@ always @(posedge clk or posedge reset) begin
         end
 
         // ============================================
-        // MEM_B: Wait for target bvalid, forward to VexRiscv
+        // MEM_B: Wait for target bvalid, forward response
         // ============================================
         FSM_MEM_B: begin
             if (mem_bvalid) begin
-                dbus_b_valid <= 1;
-                dbus_b_resp <= 2'b00;
+                if (active_bus == BUS_IO) begin
+                    // IO write complete
+                    io_rsp_valid <= 1;
+                    io_rsp_data <= 0;
+                    io_rsp_error <= 0;
+                end else begin
+                    // LSU write complete
+                    lsu_b_valid <= 1;
+                    lsu_b_id <= req_id_r;
+                end
                 fsm_state <= FSM_IDLE;
             end
         end
 
         // ============================================
-        // WRITE_NEXT: Accept next W beat from VexRiscv, forward to target
+        // WRITE_NEXT: Accept next W beat from VexiiRiscv, forward to target
         // ============================================
         FSM_WRITE_NEXT: begin
-            if (dbus_w_valid) begin
-                dbus_w_ready <= 1;
-                req_wdata_r <= dbus_w_data;
-                req_wstrb_r <= dbus_w_strb;
+            if (lsu_w_valid) begin
+                lsu_w_ready <= 1;
+                req_wdata_r <= lsu_w_data;
+                req_wstrb_r <= lsu_w_strb;
 
                 // Issue AW if we haven't yet (first beat case where W wasn't ready)
                 // or send W beat for subsequent beats
                 if (burst_count == 0 && !m_sdram_awvalid && !m_psram_awvalid && !m_local_awvalid) begin
-                    // First beat: we accepted AW from VexRiscv but haven't issued AW to target yet
+                    // First beat: we accepted AW from VexiiRiscv but haven't issued AW to target yet
                     fsm_state <= FSM_MEM_AW;
                     if (target_mem == TGT_SDRAM) begin
                         m_sdram_awvalid <= 1;
@@ -610,18 +723,18 @@ always @(posedge clk or posedge reset) begin
                     fsm_state <= FSM_MEM_W;
                     if (target_mem == TGT_SDRAM) begin
                         m_sdram_wvalid <= 1;
-                        m_sdram_wdata <= dbus_w_data;
-                        m_sdram_wstrb <= dbus_w_strb;
+                        m_sdram_wdata <= lsu_w_data;
+                        m_sdram_wstrb <= lsu_w_strb;
                         m_sdram_wlast <= (burst_count == burst_len_r);
                     end else if (target_mem == TGT_PSRAM) begin
                         m_psram_wvalid <= 1;
-                        m_psram_wdata <= dbus_w_data;
-                        m_psram_wstrb <= dbus_w_strb;
+                        m_psram_wdata <= lsu_w_data;
+                        m_psram_wstrb <= lsu_w_strb;
                         m_psram_wlast <= (burst_count == burst_len_r);
                     end else begin
                         m_local_wvalid <= 1;
-                        m_local_wdata <= dbus_w_data;
-                        m_local_wstrb <= dbus_w_strb;
+                        m_local_wdata <= lsu_w_data;
+                        m_local_wstrb <= lsu_w_strb;
                         m_local_wlast <= (burst_count == burst_len_r);
                     end
                 end

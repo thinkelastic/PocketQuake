@@ -86,8 +86,14 @@ void D_InitCaches (void *buffer, int size)
 	if (!msg_suppress_1)
 		Con_Printf ("%ik surface cache\n", size/1024);
 
-	sc_size = size - GUARDSIZE;
-	sc_base = (surfcache_t *)buffer;
+	// Align sc_base to 64-byte D-cache line boundary so that surfcache_t
+	// metadata and data[] (at struct offset 64) are in separate cache lines.
+	{
+		unsigned int aligned = ((unsigned int)buffer + 63) & ~63;
+		int lost = aligned - (unsigned int)buffer;
+		sc_size = size - GUARDSIZE - lost;
+		sc_base = (surfcache_t *)aligned;
+	}
 	sc_rover = sc_base;
 	
 	sc_base->next = NULL;
@@ -151,7 +157,7 @@ surfcache_t     *D_SCAlloc (int width, int size)
 	
 	size = (int)&((surfcache_t *)0)->data[size];
 	size += 64;  /* guard padding: absorb HW surface block overrun */
-	size = (size + 3) & ~3;
+	size = (size + 63) & ~63;  /* 64-byte align: keep metadata/data in separate cache lines */
 	if (size > sc_size)
 		Sys_Error ("D_SCAlloc: %i > cache size",size);
 
@@ -339,6 +345,13 @@ PQ_FASTTEXT surfcache_t *D_CacheSurface (msurface_t *surface, int miplevel)
 	r_drawsurf.surf = surface;
 
 	c_surf++;
+
+	/* Ordering fence: ensure CPU metadata stores complete before MMIO stores
+	 * in R_DrawSurface.  No fence.i needed: surfcache_t is padded so data[]
+	 * starts at a 64-byte cache line boundary, so CPU metadata writes and
+	 * HW pixel writes never share a cache line. */
+	__asm__ volatile("fence");
+
 	R_DrawSurface ();
 
 	return surface->cachespots[miplevel];

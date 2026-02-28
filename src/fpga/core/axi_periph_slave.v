@@ -13,7 +13,9 @@
 
 `default_nettype none
 
-module axi_periph_slave (
+module axi_periph_slave #(
+    parameter ENABLE_DEBUG_CTRS = 1   // Debug scanline counters
+) (
     input wire clk,
     input wire reset_n,
 
@@ -110,7 +112,7 @@ module axi_periph_slave (
     // Audio output interface
     output reg         audio_sample_wr,
     output reg  [31:0] audio_sample_data,
-    input wire  [10:0] audio_fifo_level,
+    input wire  [11:0] audio_fifo_level,
     input wire         audio_fifo_full,
 
     // Link MMIO interface
@@ -145,17 +147,7 @@ module axi_periph_slave (
     output reg         scanline_reg_rd,
     output reg  [3:0]  scanline_reg_addr,
     output reg  [31:0] scanline_reg_wdata,
-    input wire  [31:0] scanline_reg_rdata,
-
-    // Performance monitoring inputs
-    input wire         perf_span_active,
-    input wire         perf_dma_active,
-    input wire         perf_sramfill_active,
-    input wire         perf_sram_busy,
-    input wire         perf_sdram_active,
-    input wire         perf_sdram_grant_span,
-    input wire         perf_sdram_grant_dma,
-    input wire         perf_sdram_grant_cpu
+    input wire  [31:0] scanline_reg_rdata
 );
 
 wire reset = ~reset_n;
@@ -261,16 +253,6 @@ reg [31:0] sysreg_rdata;
 reg [63:0] cycle_counter;
 reg display_mode_reg;
 
-// Hardware performance counters (free-running, gated by active/busy signals)
-reg [31:0] perf_ctr_span;
-reg [31:0] perf_ctr_dma;
-reg [31:0] perf_ctr_sramfill;
-reg [31:0] perf_ctr_sram_busy;
-reg [31:0] perf_ctr_sdram_active;
-reg [31:0] perf_ctr_sdram_span;
-reg [31:0] perf_ctr_sdram_dma;
-reg [31:0] perf_ctr_sdram_cpu;
-
 reg [15:0] ds_slot_id_reg;
 reg [31:0] ds_slot_offset_reg;
 reg [31:0] ds_bridge_addr_reg;
@@ -280,11 +262,37 @@ reg [31:0] ds_resp_addr_reg;
 
 reg [7:0] pal_index_reg;
 
-localparam FB_ADDR_0 = 25'h0000000;
-localparam FB_ADDR_1 = 25'h0080000;
-reg [24:0] fb_display_addr_reg;
-reg [24:0] fb_draw_addr_reg;
-reg fb_swap_pending;
+// Triple-buffered framebuffer: 3 fixed buffers, indexed by role
+localparam FB_ADDR_0 = 25'h0000000;  // 0x10000000 in CPU space
+localparam FB_ADDR_1 = 25'h0080000;  // 0x10100000
+localparam FB_ADDR_2 = 25'h0100000;  // 0x10200000 (quake.bin LMA, free after boot)
+reg [1:0] fb_display_idx;   // buffer being scanned out
+reg [1:0] fb_ready_idx;     // completed frame waiting for vsync (3 = none)
+reg [1:0] fb_draw_idx;      // buffer CPU is rendering to
+
+// Lookup table: index → word address
+function [24:0] fb_addr;
+    input [1:0] idx;
+    case (idx)
+        2'd0: fb_addr = FB_ADDR_0;
+        2'd1: fb_addr = FB_ADDR_1;
+        2'd2: fb_addr = FB_ADDR_2;
+        default: fb_addr = FB_ADDR_0;
+    endcase
+endfunction
+
+wire [24:0] fb_display_addr_reg = fb_addr(fb_display_idx);
+wire [24:0] fb_draw_addr_reg = fb_addr(fb_draw_idx);
+
+// Find the free buffer (neither display nor draw)
+function [1:0] fb_free;
+    input [1:0] disp, draw;
+    begin
+        if (disp != 2'd0 && draw != 2'd0) fb_free = 2'd0;
+        else if (disp != 2'd1 && draw != 2'd1) fb_free = 2'd1;
+        else fb_free = 2'd2;
+    end
+endfunction
 
 assign display_mode = display_mode_reg;
 assign fb_display_addr = fb_display_addr_reg;
@@ -353,9 +361,9 @@ always @(posedge clk) begin
     if (reset) begin
         cycle_counter <= 0;
         display_mode_reg <= 0;
-        fb_display_addr_reg <= FB_ADDR_0;
-        fb_draw_addr_reg <= FB_ADDR_1;
-        fb_swap_pending <= 0;
+        fb_display_idx <= 2'd0;
+        fb_ready_idx <= 2'd3;  // 3 = none ready
+        fb_draw_idx <= 2'd1;
         pal_wr <= 0;
         pal_addr <= 0;
         pal_data <= 0;
@@ -366,14 +374,6 @@ always @(posedge clk) begin
         ds_length_reg <= 0;
         ds_param_addr_reg <= 0;
         ds_resp_addr_reg <= 0;
-        perf_ctr_span <= 0;
-        perf_ctr_dma <= 0;
-        perf_ctr_sramfill <= 0;
-        perf_ctr_sram_busy <= 0;
-        perf_ctr_sdram_active <= 0;
-        perf_ctr_sdram_span <= 0;
-        perf_ctr_sdram_dma <= 0;
-        perf_ctr_sdram_cpu <= 0;
         target_dataslot_read <= 0;
         target_dataslot_write <= 0;
         target_dataslot_openfile <= 0;
@@ -387,32 +387,21 @@ always @(posedge clk) begin
         cycle_counter <= cycle_counter + 1;
         pal_wr <= 0;
 
-        // Performance counters: increment when gated signal is high
-        if (perf_span_active)      perf_ctr_span       <= perf_ctr_span + 1;
-        if (perf_dma_active)       perf_ctr_dma        <= perf_ctr_dma + 1;
-        if (perf_sramfill_active)  perf_ctr_sramfill   <= perf_ctr_sramfill + 1;
-        if (perf_sram_busy)        perf_ctr_sram_busy  <= perf_ctr_sram_busy + 1;
-        if (perf_sdram_active)     perf_ctr_sdram_active <= perf_ctr_sdram_active + 1;
-        if (perf_sdram_grant_span) perf_ctr_sdram_span <= perf_ctr_sdram_span + 1;
-        if (perf_sdram_grant_dma)  perf_ctr_sdram_dma  <= perf_ctr_sdram_dma + 1;
-        if (perf_sdram_grant_cpu)  perf_ctr_sdram_cpu  <= perf_ctr_sdram_cpu + 1;
-
         if (target_ack_s) begin
             target_dataslot_read <= 0;
             target_dataslot_write <= 0;
             target_dataslot_openfile <= 0;
         end
 
-        if (fb_swap_pending && vsync_rising) begin
-            fb_display_addr_reg <= fb_draw_addr_reg;
-            fb_draw_addr_reg <= fb_display_addr_reg;
-            fb_swap_pending <= 0;
-        end
-
+        // Triple buffer: CPU swap request (before vsync so vsync can override fb_ready_idx)
         if (sysreg_wr_fire) begin
             case (req_addr[7:2])
                 6'b000011: display_mode_reg <= req_wdata[0];
-                6'b000110: if (req_wdata[0]) fb_swap_pending <= 1;
+                6'b000110: if (req_wdata[0]) begin
+                    // Draw buffer complete → ready; assign free buffer as new draw
+                    fb_ready_idx <= fb_draw_idx;
+                    fb_draw_idx <= fb_free(fb_display_idx, fb_draw_idx);
+                end
                 6'b001000: ds_slot_id_reg <= req_wdata[15:0];
                 6'b001001: ds_slot_offset_reg <= req_wdata;
                 6'b001010: ds_bridge_addr_reg <= req_wdata;
@@ -448,6 +437,12 @@ always @(posedge clk) begin
                 default: ;
             endcase
         end
+
+        // Triple buffer vsync: promote ready → display (after sysreg_wr so vsync wins on collision)
+        if (fb_ready_idx != 2'd3 && vsync_rising) begin
+            fb_display_idx <= fb_ready_idx;
+            fb_ready_idx <= 2'd3;  // consumed
+        end
     end
 end
 
@@ -460,7 +455,7 @@ always @(*) begin
         6'b000011: sysreg_rdata = {31'b0, display_mode_reg};
         6'b000100: sysreg_rdata = {7'b0, fb_display_addr_reg};
         6'b000101: sysreg_rdata = {7'b0, fb_draw_addr_reg};
-        6'b000110: sysreg_rdata = {31'b0, fb_swap_pending};
+        6'b000110: sysreg_rdata = 32'h0;  // triple buffer: never blocks
         6'b001000: sysreg_rdata = {16'b0, ds_slot_id_reg};
         6'b001001: sysreg_rdata = ds_slot_offset_reg;
         6'b001010: sysreg_rdata = ds_bridge_addr_reg;
@@ -477,18 +472,18 @@ always @(*) begin
         6'b010111: sysreg_rdata = cont2_key_s;
         6'b011000: sysreg_rdata = cont2_joy_s;
         6'b011001: sysreg_rdata = {16'b0, cont2_trig_s};
-        6'b011100: sysreg_rdata = perf_ctr_span;        // 0x70
-        6'b011101: sysreg_rdata = perf_ctr_dma;          // 0x74
-        6'b011110: sysreg_rdata = perf_ctr_sramfill;     // 0x78
-        6'b011111: sysreg_rdata = perf_ctr_sram_busy;    // 0x7C
-        6'b100000: sysreg_rdata = perf_ctr_sdram_active; // 0x80
-        6'b100001: sysreg_rdata = perf_ctr_sdram_span;   // 0x84
-        6'b100010: sysreg_rdata = perf_ctr_sdram_dma;    // 0x88
-        6'b100011: sysreg_rdata = perf_ctr_sdram_cpu;    // 0x8C
-        6'b100100: sysreg_rdata = {dbg_scanline_rd_hit, dbg_scanline_ar_hit}; // 0x90
-        6'b100101: sysreg_rdata = dbg_periph_rd_capture;  // 0x94
-        6'b100110: sysreg_rdata = 32'h0;  // 0x98 (reserved)
-        6'b100111: sysreg_rdata = 32'h0; // 0x9C (reserved)
+        6'b011100: sysreg_rdata = 32'h0; // 0x70 (perf counters removed)
+        6'b011101: sysreg_rdata = 32'h0; // 0x74
+        6'b011110: sysreg_rdata = 32'h0; // 0x78
+        6'b011111: sysreg_rdata = 32'h0; // 0x7C
+        6'b100000: sysreg_rdata = 32'h0; // 0x80
+        6'b100001: sysreg_rdata = 32'h0; // 0x84
+        6'b100010: sysreg_rdata = 32'h0; // 0x88
+        6'b100011: sysreg_rdata = 32'h0; // 0x8C
+        6'b100100: sysreg_rdata = ENABLE_DEBUG_CTRS ? {dbg_scanline_rd_hit, dbg_scanline_ar_hit} : 32'h0; // 0x90
+        6'b100101: sysreg_rdata = ENABLE_DEBUG_CTRS ? dbg_periph_rd_capture : 32'h0; // 0x94
+        6'b100110: sysreg_rdata = 32'h0; // 0x98
+        6'b100111: sysreg_rdata = 32'h0; // 0x9C
         default: sysreg_rdata = 32'h0;
     endcase
 end
@@ -508,7 +503,7 @@ wire [31:0] periph_rd_mux = reg_sysreg   ? sysreg_rdata :
                              reg_span     ? span_reg_rdata :
                              reg_cmap     ? cmap_rdata :
                              reg_atm      ? atm_reg_rdata :
-                             reg_audio    ? {20'b0, audio_fifo_full, audio_fifo_level} :
+                             reg_audio    ? {19'b0, audio_fifo_full, audio_fifo_level} :
                              reg_link     ? link_reg_rdata :
                              reg_sramfill ? sramfill_reg_rdata :
                              reg_scanline ? scanline_reg_rdata :
@@ -778,7 +773,7 @@ always @(posedge clk or posedge reset) begin
                     if (ar_dec_sramfill) sramfill_reg_addr <= ar_addr[6:2];
                     if (ar_dec_scanline) begin
                         scanline_reg_addr <= ar_addr[5:2];
-                        dbg_scanline_ar_hit <= dbg_scanline_ar_hit + 1;
+                        if (ENABLE_DEBUG_CTRS) dbg_scanline_ar_hit <= dbg_scanline_ar_hit + 1;
                     end
                 end
 
@@ -826,20 +821,20 @@ always @(posedge clk or posedge reset) begin
                         state <= S_PERIPH_WR;
                         if (aw_dec_sysreg && |s_axi_wstrb)
                             sysreg_wr_fire <= 1;
-                        if (aw_dec_dma && |s_axi_wstrb) begin
-                            dma_reg_wr <= 1;
+                        if (aw_dec_dma) begin
                             dma_reg_addr <= aw_addr[6:2];
-                            dma_reg_wdata <= s_axi_wdata;
+                            if (|s_axi_wstrb) begin
+                                dma_reg_wr <= 1;
+                                dma_reg_wdata <= s_axi_wdata;
+                            end
                         end
-                        if (aw_dec_dma)
-                            dma_reg_addr <= aw_addr[6:2];
-                        if (aw_dec_span && |s_axi_wstrb) begin
-                            span_reg_wr <= 1;
+                        if (aw_dec_span) begin
                             span_reg_addr <= aw_addr[7:2];
-                            span_reg_wdata <= s_axi_wdata;
+                            if (|s_axi_wstrb) begin
+                                span_reg_wr <= 1;
+                                span_reg_wdata <= s_axi_wdata;
+                            end
                         end
-                        if (aw_dec_span)
-                            span_reg_addr <= aw_addr[7:2];
                         if (aw_dec_audio && |s_axi_wstrb && aw_addr[3:2] == 2'b00) begin
                             audio_sample_wr <= 1;
                             audio_sample_data <= s_axi_wdata;
@@ -864,20 +859,20 @@ always @(posedge clk or posedge reset) begin
                                 end
                             end
                         end
-                        if (aw_dec_sramfill && |s_axi_wstrb) begin
-                            sramfill_reg_wr <= 1;
+                        if (aw_dec_sramfill) begin
                             sramfill_reg_addr <= aw_addr[6:2];
-                            sramfill_reg_wdata <= s_axi_wdata;
+                            if (|s_axi_wstrb) begin
+                                sramfill_reg_wr <= 1;
+                                sramfill_reg_wdata <= s_axi_wdata;
+                            end
                         end
-                        if (aw_dec_sramfill)
-                            sramfill_reg_addr <= aw_addr[6:2];
-                        if (aw_dec_scanline && |s_axi_wstrb) begin
-                            scanline_reg_wr <= 1;
+                        if (aw_dec_scanline) begin
                             scanline_reg_addr <= aw_addr[5:2];
-                            scanline_reg_wdata <= s_axi_wdata;
+                            if (|s_axi_wstrb) begin
+                                scanline_reg_wr <= 1;
+                                scanline_reg_wdata <= s_axi_wdata;
+                            end
                         end
-                        if (aw_dec_scanline)
-                            scanline_reg_addr <= aw_addr[5:2];
                     end
                 end else begin
                     // W not ready yet — wait for it
@@ -933,11 +928,13 @@ always @(posedge clk or posedge reset) begin
                 if (reg_scanline) begin
                     scanline_reg_rd <= 1;
                     scanline_reg_addr <= req_addr[5:2];
-                    dbg_scanline_rd_hit <= dbg_scanline_rd_hit + 1;
-                    dbg_periph_rd_capture <= {reg_ram, reg_term, reg_sysreg,
-                        reg_dma, reg_span, reg_audio, reg_link, reg_cmap,
-                        reg_atm, reg_sram, reg_sramfill, reg_scanline,
-                        4'b0, periph_rd_mux[15:0]};
+                    if (ENABLE_DEBUG_CTRS) begin
+                        dbg_scanline_rd_hit <= dbg_scanline_rd_hit + 1;
+                        dbg_periph_rd_capture <= {reg_ram, reg_term, reg_sysreg,
+                            reg_dma, reg_span, reg_audio, reg_link, reg_cmap,
+                            reg_atm, reg_sram, reg_sramfill, reg_scanline,
+                            4'b0, periph_rd_mux[15:0]};
+                    end
                 end
                 if (beat_is_last) begin
                     state <= S_IDLE;
@@ -1018,18 +1015,20 @@ always @(posedge clk or posedge reset) begin
                     state <= S_PERIPH_WR;
                     if (reg_sysreg && |s_axi_wstrb)
                         sysreg_wr_fire <= 1;
-                    if (reg_dma && |s_axi_wstrb) begin
-                        dma_reg_wr <= 1;
+                    if (reg_dma) begin
                         dma_reg_addr <= req_addr[6:2];
-                        dma_reg_wdata <= s_axi_wdata;
+                        if (|s_axi_wstrb) begin
+                            dma_reg_wr <= 1;
+                            dma_reg_wdata <= s_axi_wdata;
+                        end
                     end
-                    if (reg_dma) dma_reg_addr <= req_addr[6:2];
-                    if (reg_span && |s_axi_wstrb) begin
-                        span_reg_wr <= 1;
+                    if (reg_span) begin
                         span_reg_addr <= req_addr[7:2];
-                        span_reg_wdata <= s_axi_wdata;
+                        if (|s_axi_wstrb) begin
+                            span_reg_wr <= 1;
+                            span_reg_wdata <= s_axi_wdata;
+                        end
                     end
-                    if (reg_span) span_reg_addr <= req_addr[7:2];
                     if (reg_audio && |s_axi_wstrb && req_addr[3:2] == 2'b00) begin
                         audio_sample_wr <= 1;
                         audio_sample_data <= s_axi_wdata;
@@ -1054,18 +1053,20 @@ always @(posedge clk or posedge reset) begin
                             end
                         end
                     end
-                    if (reg_sramfill && |s_axi_wstrb) begin
-                        sramfill_reg_wr <= 1;
+                    if (reg_sramfill) begin
                         sramfill_reg_addr <= req_addr[6:2];
-                        sramfill_reg_wdata <= s_axi_wdata;
+                        if (|s_axi_wstrb) begin
+                            sramfill_reg_wr <= 1;
+                            sramfill_reg_wdata <= s_axi_wdata;
+                        end
                     end
-                    if (reg_sramfill) sramfill_reg_addr <= req_addr[6:2];
-                    if (reg_scanline && |s_axi_wstrb) begin
-                        scanline_reg_wr <= 1;
+                    if (reg_scanline) begin
                         scanline_reg_addr <= req_addr[5:2];
-                        scanline_reg_wdata <= s_axi_wdata;
+                        if (|s_axi_wstrb) begin
+                            scanline_reg_wr <= 1;
+                            scanline_reg_wdata <= s_axi_wdata;
+                        end
                     end
-                    if (reg_scanline) scanline_reg_addr <= req_addr[5:2];
                 end
             end
         end

@@ -84,11 +84,23 @@ typedef struct __attribute__((packed)) {
 int dataslot_wait_complete(void);
 
 /*
- * Open a file into data slot 0.
+ * Non-blocking dataslot read: start + poll.
+ * dataslot_read_start() fires the DMA command and returns immediately.
+ * dataslot_read_poll() checks completion:
+ *   returns  0 = still pending
+ *           1 = complete (success)
+ *          <0 = error
+ */
+void dataslot_read_start(uint32_t slot_id, uint32_t offset, void *dest, uint32_t length);
+int  dataslot_read_poll(void);
+
+/*
+ * Open a file into a data slot.
+ * slot_id: target data slot ID
  * The file path is relative to the Assets directory.
  * Returns 0 on success, negative on error.
  */
-int dataslot_open_file(const char *filename, uint32_t flags, uint32_t size);
+int dataslot_open_file(uint16_t slot_id, const char *filename, uint32_t flags, uint32_t size);
 
 /*
  * Read data from a data slot into SDRAM.
@@ -127,5 +139,14 @@ int32_t dataslot_load(uint16_t slot_id, void *dest, uint32_t max_length);
  * Note: Currently returns a fixed max size as slot size query is not implemented.
  */
 int dataslot_get_size(uint16_t slot_id, uint32_t *size_out);
+
+/*
+ * CD audio dataslot yield hook.
+ * Set by cd_pocket.c once CD audio is initialized.
+ * dataslot_read/write() call this before blocking operations to
+ * complete any in-flight async CD DMA first.
+ * CDAudio_Refill() (once per frame) restarts async streaming.
+ */
+extern void (*dataslot_yield_hook)(void);
 
 #endif /* DATASLOT_H */

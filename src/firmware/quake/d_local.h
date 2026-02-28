@@ -45,6 +45,10 @@ typedef struct surfcache_s
 	unsigned			height;		// DEBUG only needed for debug
 	float				mipscale;
 	struct texture_s	*texture;	// checked for animating textures
+	// Pad so data[] starts at 64-byte D-cache line boundary (offset 64).
+	// CPU metadata writes (above) and HW pixel writes (data[]) are in
+	// separate cache lines, eliminating the need for fence.i in D_CacheSurface.
+	int					_pad[4];
 	byte				data[4];	// width*height elements
 } surfcache_t;
 

@@ -634,12 +634,9 @@ Read all incoming data from the server
 int CL_ReadFromServer (void)
 {
 	int		ret;
-	int		msg_count = 0;
-	static int dbg_reads = 0;
-
 	cl.oldtime = cl.time;
 	cl.time += host_frametime;
-	
+
 	do
 	{
 		ret = CL_GetMessage ();
@@ -647,18 +644,10 @@ int CL_ReadFromServer (void)
 			Host_Error ("CL_ReadFromServer: lost server connection");
 		if (!ret)
 			break;
-		msg_count++;
-		
+
 		cl.last_received_message = realtime;
 		CL_ParseServerMessage ();
 	} while (ret && cls.state == ca_connected);
-
-	if (dbg_reads < 16)
-	{
-		if (0) Sys_Printf ("DBG CL_ReadFromServer: msgs=%d state=%d signon=%d time=%.3f\n",
-			msg_count, cls.state, cls.signon, cl.time);
-		dbg_reads++;
-	}
 	
 	if (cl_shownet.value)
 		Con_Printf ("\n");

@@ -5,10 +5,10 @@ module mf_pllram_133(
     input  wire rst,
     output wire outclk_0,
     output wire outclk_1,
+    output wire outclk_2,
     output wire locked
 );
 
-    wire unused_outclk2;
     wire unused_outclk3;
     wire unused_outclk4;
 
@@ -17,14 +17,14 @@ module mf_pllram_133(
         .reference_clock_frequency("74.25 MHz"),
         .operation_mode("normal"),
         .number_of_clocks(5),
-        .output_clock_frequency0("100.000000 MHz"),
+        .output_clock_frequency0("105.000000 MHz"),
         .phase_shift0("0 ps"),
         .duty_cycle0(50),
-        .output_clock_frequency1("100.000000 MHz"),
-        .phase_shift1("7500 ps"),
+        .output_clock_frequency1("105.000000 MHz"),
+        .phase_shift1("7142 ps"),
         .duty_cycle1(50),
-        .output_clock_frequency2("0 MHz"),
-        .phase_shift2("0 ps"),
+        .output_clock_frequency2("105.000000 MHz"),
+        .phase_shift2("5714 ps"),
         .duty_cycle2(50),
         .output_clock_frequency3("0 MHz"),
         .phase_shift3("0 ps"),
@@ -36,7 +36,7 @@ module mf_pllram_133(
         .pll_subtype("General")
     ) altera_pll_i (
         .rst    (rst),
-        .outclk ({unused_outclk4, unused_outclk3, unused_outclk2, outclk_1, outclk_0}),
+        .outclk ({unused_outclk4, unused_outclk3, outclk_2, outclk_1, outclk_0}),
         .locked (locked),
         .fboutclk (),
         .fbclk  (1'b0),

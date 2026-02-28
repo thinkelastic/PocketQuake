@@ -25,19 +25,10 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 portable_samplepair_t paintbuffer[PAINTBUFFER_SIZE];
 
-int snd_scaletable[32][256];
-int *snd_p, snd_linear_count, snd_vol;
-short *snd_out;
-
-void SND_PaintChannelFrom8(channel_t *ch, sfxcache_t *sc, int count);
+void SND_PaintChannelFrom16(channel_t *ch, sfxcache_t *sc, int count);
 
 void SND_InitScaletable(void)
 {
-    int i, j;
-
-    for (i = 0; i < 32; i++)
-        for (j = 0; j < 256; j++)
-            snd_scaletable[i][j] = ((signed char)j) * i * 8;
 }
 
 static void S_TransferPaintBuffer(int count)
@@ -108,10 +99,7 @@ void S_PaintChannels(int endtime)
                     count = end - ltime;
 
                 if (count > 0) {
-                    if (sc->width == 1)
-                        SND_PaintChannelFrom8(ch, sc, count);
-                    // 16-bit source: treat as 8-bit (rare in Quake)
-
+                    SND_PaintChannelFrom16(ch, sc, count);
                     ltime += count;
                 }
 
@@ -136,26 +124,22 @@ void S_PaintChannels(int endtime)
     }
 }
 
-void SND_PaintChannelFrom8(channel_t *ch, sfxcache_t *sc, int count)
+void SND_PaintChannelFrom16(channel_t *ch, sfxcache_t *sc, int count)
 {
-    int data;
-    int *lscale, *rscale;
-    unsigned char *sfx;
+    short *sfx;
     int i;
+    int leftvol = ch->leftvol;
+    int rightvol = ch->rightvol;
 
-    if (ch->leftvol > 255)
-        ch->leftvol = 255;
-    if (ch->rightvol > 255)
-        ch->rightvol = 255;
+    if (leftvol > 255) leftvol = 255;
+    if (rightvol > 255) rightvol = 255;
 
-    lscale = snd_scaletable[ch->leftvol >> 3];
-    rscale = snd_scaletable[ch->rightvol >> 3];
-    sfx = (unsigned char *)sc->data + ch->pos;
+    sfx = (short *)sc->data + ch->pos;
 
     for (i = 0; i < count; i++) {
-        data = sfx[i];
-        paintbuffer[i].left += lscale[data];
-        paintbuffer[i].right += rscale[data];
+        int s = sfx[i];
+        paintbuffer[i].left += s * leftvol;
+        paintbuffer[i].right += s * rightvol;
     }
 
     ch->pos += count;

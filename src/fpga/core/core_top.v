@@ -265,8 +265,10 @@ assign link_sd_i = port_tran_sd;
 
 // PSRAM Controller for CRAM0 (16MB)
 // Uses muxed signals for bridge/CPU arbitration
+// Async mode only — cram0_clk driven to 0 by psram.sv
+
 psram_controller #(
-    .CLOCK_SPEED(100.0)
+    .CLOCK_SPEED(105.0)
 ) psram0 (
     .clk(clk_ram_controller),
     .reset_n(reset_n),
@@ -280,7 +282,6 @@ psram_controller #(
     .word_q(psram_mux_rdata),
     .word_busy(psram_mux_busy),
     .word_q_valid(psram_mux_rdata_valid),
-
     // Physical PSRAM signals
     .cram_a(cram0_a),
     .cram_dq(cram0_dq),
@@ -296,8 +297,8 @@ psram_controller #(
     .cram_lb_n(cram0_lb_n)
 );
 
-// CRAM1 unused - tie off all outputs
-assign cram1_a     = 6'h0;
+// CRAM1 unused — tie off all outputs
+assign cram1_a     = 6'd0;
 assign cram1_dq    = 16'hZZZZ;
 assign cram1_clk   = 1'b0;
 assign cram1_adv_n = 1'b1;
@@ -316,7 +317,7 @@ reg             ram1_word_wr;
 reg     [23:0]  ram1_word_addr;
 reg     [31:0]  ram1_word_data;
 reg     [3:0]   ram1_word_wstrb;
-reg     [2:0]   ram1_word_burst_len;
+reg     [3:0]   ram1_word_burst_len;
 wire    [31:0]  ram1_word_q;
 wire            ram1_word_busy;
 wire            ram1_word_q_valid;
@@ -327,7 +328,7 @@ wire            sdram_slave_wr;
 wire    [23:0]  sdram_slave_addr;
 wire    [31:0]  sdram_slave_wdata;
 wire    [3:0]   sdram_slave_wstrb;
-wire    [2:0]   sdram_slave_burst_len;
+wire    [3:0]   sdram_slave_burst_len;
 
 // CPU AXI4 master → axi_sdram_slave
 wire        cpu_m_sdram_arvalid;
@@ -419,7 +420,7 @@ wire        atm_busy;
 // Audio output interface (between cpu_system and audio_output)
 wire        audio_sample_wr;
 wire [31:0] audio_sample_data;
-wire [10:0] audio_fifo_level;
+wire [11:0] audio_fifo_level;
 wire        audio_fifo_full;
 
 // Link MMIO register interface (between cpu_system and link_mmio)
@@ -517,12 +518,6 @@ wire [3:0]  arb_s_wstrb;
 wire        arb_s_bvalid;
 wire [1:0]  arb_s_bresp;
 
-// SDRAM arbiter performance monitoring outputs
-wire        sdram_arb_perf_active;
-wire        sdram_arb_perf_grant_span;
-wire        sdram_arb_perf_grant_dma;
-wire        sdram_arb_perf_grant_cpu;
-
 // Bridge AXI4 master (from axi_bridge_master to axi_sdram_arbiter M3)
 wire        bridge_m_arvalid, bridge_m_arready;
 wire [31:0] bridge_m_araddr;
@@ -544,29 +539,18 @@ wire [31:0] bridge_axi_rd_data;  // Read data from axi_bridge_master
 wire        bridge_axi_rd_done;  // Read done pulse from axi_bridge_master
 
 // ============================================================
-// SRAM Controller + Fill Engine + 3-way Arbitration Mux
-// Z-buffer lives in external SRAM for parallel SDRAM access.
+// Z-buffer in physical SRAM chip + Fill Engine + 3-way Arbitration Mux
 // Priority: CPU > Span rasterizer > sram_fill
 // ============================================================
 
-// Tristate handling for SRAM data bus
+// SRAM controller for physical SRAM chip (z-buffer)
 wire [15:0] sram_dq_out;
 wire [15:0] sram_dq_in;
 wire        sram_dq_oe;
 assign sram_dq    = sram_dq_oe ? sram_dq_out : 16'hZZZZ;
 assign sram_dq_in = sram_dq;
 
-// SRAM controller word interface
-wire        sram_ctrl_rd;
-wire        sram_ctrl_wr;
-wire [21:0] sram_ctrl_addr;
-wire [31:0] sram_ctrl_wdata;
-wire [3:0]  sram_ctrl_wstrb;
-wire [31:0] sram_ctrl_q;
-wire        sram_ctrl_busy;
-wire        sram_ctrl_q_valid;
-
-sram_controller #(.WAIT_CYCLES(5)) sram_ctrl (
+sram_controller #(.WAIT_CYCLES(5)) sram_zbuf (
     .clk(clk_ram_controller),
     .reset_n(reset_n),
     .word_rd(sram_ctrl_rd),
@@ -587,6 +571,16 @@ sram_controller #(.WAIT_CYCLES(5)) sram_ctrl (
     .sram_lb_n(sram_lb_n)
 );
 
+// Z-buffer controller word interface (driven by sram_zbuf above)
+wire        sram_ctrl_rd;
+wire        sram_ctrl_wr;
+wire [21:0] sram_ctrl_addr;
+wire [31:0] sram_ctrl_wdata;
+wire [3:0]  sram_ctrl_wstrb;
+wire [31:0] sram_ctrl_q;
+wire        sram_ctrl_busy;
+wire        sram_ctrl_q_valid;
+
 // CPU SRAM interface (from axi_periph_slave)
 wire        cpu_sram_rd;
 wire        cpu_sram_wr;
@@ -597,12 +591,15 @@ wire        cpu_sram_busy;
 wire [31:0] cpu_sram_q;
 wire        cpu_sram_q_valid;
 
-// Span rasterizer SRAM interface (z-buffer writes)
+// Span rasterizer SRAM interface (z-buffer reads + writes)
 wire        span_sram_wr;
+wire        span_sram_rd;
 wire [21:0] span_sram_addr;
 wire [31:0] span_sram_wdata;
 wire [3:0]  span_sram_wstrb;
 wire        span_sram_busy;
+wire [31:0] span_sram_rdata;
+wire        span_sram_rdata_valid;
 
 // sram_fill register interface (from axi_periph_slave)
 wire        sramfill_reg_wr;
@@ -652,28 +649,44 @@ scanline_engine scanline_engine_inst (
 
 // 3-way SRAM word arbitration mux (combinational priority)
 // Priority: CPU > Span rasterizer > sram_fill
-wire cpu_sram_req = cpu_sram_rd | cpu_sram_wr;
+wire cpu_sram_req  = cpu_sram_rd | cpu_sram_wr;
+wire span_sram_req = span_sram_wr | span_sram_rd;
 
-assign sram_ctrl_rd    = cpu_sram_req ? cpu_sram_rd    : 1'b0;
-assign sram_ctrl_wr    = cpu_sram_req ? cpu_sram_wr    :
-                          span_sram_wr ? 1'b1           :
-                          fill_sram_wr ? 1'b1           : 1'b0;
+assign sram_ctrl_rd    = cpu_sram_req  ? cpu_sram_rd  :
+                          span_sram_rd  ? 1'b1         : 1'b0;
+assign sram_ctrl_wr    = cpu_sram_req  ? cpu_sram_wr  :
+                          span_sram_req ? span_sram_wr :
+                          fill_sram_wr  ? 1'b1         : 1'b0;
 assign sram_ctrl_addr  = cpu_sram_req  ? cpu_sram_addr  :
-                          span_sram_wr  ? span_sram_addr :
+                          span_sram_req ? span_sram_addr :
                           fill_sram_wr  ? {6'd0, fill_sram_addr} : 22'd0;
 assign sram_ctrl_wdata = cpu_sram_req  ? cpu_sram_wdata :
-                          span_sram_wr  ? span_sram_wdata :
+                          span_sram_req ? span_sram_wdata :
                           fill_sram_wr  ? fill_sram_data : 32'd0;
 assign sram_ctrl_wstrb = cpu_sram_req  ? cpu_sram_wstrb :
-                          span_sram_wr  ? span_sram_wstrb :
+                          span_sram_req ? span_sram_wstrb :
                           fill_sram_wr  ? fill_sram_wstrb : 4'b0;
 
 // Per-source busy: higher priority blocks lower
 assign cpu_sram_busy    = sram_ctrl_busy;
 assign cpu_sram_q       = sram_ctrl_q;
-assign cpu_sram_q_valid = sram_ctrl_q_valid;
 assign span_sram_busy   = sram_ctrl_busy | cpu_sram_req;
-assign fill_sram_busy   = sram_ctrl_busy | cpu_sram_req | span_sram_wr;
+assign fill_sram_busy   = sram_ctrl_busy | cpu_sram_req | span_sram_req;
+
+// Track SRAM read source for response routing (CPU vs span rasterizer)
+reg sram_rd_is_span;
+always @(posedge clk_ram_controller or negedge reset_n) begin
+    if (!reset_n)
+        sram_rd_is_span <= 1'b0;
+    else if (sram_ctrl_q_valid)
+        sram_rd_is_span <= 1'b0;
+    else if (!sram_ctrl_busy && sram_ctrl_rd && !cpu_sram_req)
+        sram_rd_is_span <= 1'b1;
+end
+
+assign cpu_sram_q_valid       = sram_ctrl_q_valid & !sram_rd_is_span;
+assign span_sram_rdata        = sram_ctrl_q;
+assign span_sram_rdata_valid  = sram_ctrl_q_valid & sram_rd_is_span;
 
 assign dbg_tx = 1'bZ;
 assign user1 = 1'bZ;
@@ -1011,7 +1024,6 @@ always @(posedge clk_ram_controller) begin
 end
 
 // PSRAM mux: Bridge writes have priority, CPU access when bridge idle
-// CPU runs at same clock as PSRAM controller (no CDC needed)
 assign psram_mux_rd = bridge_psram_wr_active ? 1'b0 : cpu_psram_rd;
 assign psram_mux_wr = bridge_psram_write_pending ? 1'b1 : cpu_psram_wr;
 assign psram_mux_addr = bridge_psram_write_pending ? bridge_psram_addr_ram_clk[23:2] : cpu_psram_addr;
@@ -1163,10 +1175,31 @@ assign cpu_psram_rdata_valid = psram_mux_rdata_valid;
 // synchronous to clk_74a
 // Not used - APF handles data slot loading automatically
 
-    wire    [9:0]   datatable_addr = 0;
+    reg     [9:0]   datatable_addr;
     wire    [31:0]  datatable_q;
-    wire            datatable_wren = 0;
-    wire    [31:0]  datatable_data = 0;
+    reg             datatable_wren;
+    reg     [31:0]  datatable_data;
+
+// Write save slot size to datatable after all data slots are loaded.
+// The framework reads datatable entry (slot_id * 2 + 1) at shutdown
+// to know how many bytes to read back from SDRAM and save to SD card.
+reg dt_init_done;
+always @(posedge clk_74a or negedge reset_n_apf) begin
+    if (~reset_n_apf) begin
+        datatable_addr <= 0;
+        datatable_data <= 0;
+        datatable_wren <= 0;
+        dt_init_done   <= 0;
+    end else begin
+        datatable_wren <= 0;
+        if (dataslot_allcomplete && !dt_init_done) begin
+            datatable_addr <= 10'd11;           // slot 5 * 2 + 1
+            datatable_data <= 32'h000D0000;     // 832KB (matches data.json size_maximum)
+            datatable_wren <= 1;
+            dt_init_done   <= 1;
+        end
+    end
+end
 
 core_bridge_cmd icb (
 
@@ -1292,8 +1325,6 @@ assign video_hs = vidout_hs;
     localparam  VID_H_ACTIVE = 'd320;
     localparam  VID_H_TOTAL = 'd400;
 
-    reg [15:0]  frame_count;
-
     reg [9:0]   x_count;
     reg [9:0]   y_count;
 
@@ -1318,8 +1349,8 @@ assign video_hs = vidout_hs;
     wire display_mode;
     wire [24:0] fb_display_addr;
 
-    // VexRiscv CPU system - running at 100 MHz (CPU + memory)
-    // Pure bus routing: VexRiscv → arbiter → {SDRAM, PSRAM, Local} AXI4 masters
+    // VexiiRiscv CPU system - running at 100 MHz (CPU + memory)
+    // Pure bus routing: VexiiRiscv → arbiter → {SDRAM, PSRAM, Local} AXI4 masters
     cpu_system cpu (
         .clk(clk_cpu),  // 100 MHz
         .reset_n(reset_n),
@@ -1387,7 +1418,9 @@ assign video_hs = vidout_hs;
 
     // AXI4 peripheral slave: BRAM, colormap, system registers, CDC, terminal,
     // and DMA/Span/ATM/Audio/Link register dispatch
-    axi_periph_slave periph (
+    axi_periph_slave #(
+        .ENABLE_DEBUG_CTRS(0)
+    ) periph (
         .clk(clk_cpu),
         .reset_n(reset_n),
         // AXI4 slave interface (from cpu_system m_local)
@@ -1500,16 +1533,7 @@ assign video_hs = vidout_hs;
         .scanline_reg_rd(scanline_reg_rd),
         .scanline_reg_addr(scanline_reg_addr),
         .scanline_reg_wdata(scanline_reg_wdata),
-        .scanline_reg_rdata(scanline_reg_rdata),
-        // Performance monitoring inputs
-        .perf_span_active(span_active),
-        .perf_dma_active(dma_active),
-        .perf_sramfill_active(fill_active),
-        .perf_sram_busy(sram_ctrl_busy),
-        .perf_sdram_active(sdram_arb_perf_active),
-        .perf_sdram_grant_span(sdram_arb_perf_grant_span),
-        .perf_sdram_grant_dma(sdram_arb_perf_grant_dma),
-        .perf_sdram_grant_cpu(sdram_arb_perf_grant_cpu)
+        .scanline_reg_rdata(scanline_reg_rdata)
     );
 
     // Slave → io_sdram pulse adapter: axi_sdram_slave holds rd/wr high until
@@ -1520,7 +1544,7 @@ assign video_hs = vidout_hs;
     always @(posedge clk_ram_controller) begin
         ram1_word_rd <= 0;
         ram1_word_wr <= 0;
-        ram1_word_burst_len <= 3'd0;
+        ram1_word_burst_len <= 4'd0;
         sdram_accepted_r <= 0;
 
         if (!sdram_slave_rd && !sdram_slave_wr)
@@ -1627,12 +1651,7 @@ assign video_hs = vidout_hs;
         .s_wvalid(arb_s_wvalid),   .s_wready(arb_s_wready),
         .s_wdata(arb_s_wdata),     .s_wstrb(arb_s_wstrb),
         .s_wlast(arb_s_wlast),
-        .s_bvalid(arb_s_bvalid),   .s_bresp(arb_s_bresp),
-        // Performance monitoring
-        .perf_active(sdram_arb_perf_active),
-        .perf_grant_span(sdram_arb_perf_grant_span),
-        .perf_grant_dma(sdram_arb_perf_grant_dma),
-        .perf_grant_cpu(sdram_arb_perf_grant_cpu)
+        .s_bvalid(arb_s_bvalid),   .s_bresp(arb_s_bresp)
     );
 
     // AXI4 slave wrapper: arbiter output → SDRAM word-level → io_sdram (direct)
@@ -1756,12 +1775,15 @@ assign video_hs = vidout_hs;
         .m_axi_wdata(span_m_wdata),     .m_axi_wstrb(span_m_wstrb),
         .m_axi_wlast(span_m_wlast),
         .m_axi_bvalid(span_m_bvalid),   .m_axi_bresp(span_m_bresp),
-        // SRAM write interface (z-buffer in external SRAM)
+        // SRAM interface (z-buffer reads + writes in external SRAM)
         .sram_wr(span_sram_wr),
+        .sram_rd(span_sram_rd),
         .sram_addr(span_sram_addr),
         .sram_wdata(span_sram_wdata),
         .sram_wstrb(span_sram_wstrb),
         .sram_busy(span_sram_busy),
+        .sram_rdata(span_sram_rdata),
+        .sram_rdata_valid(span_sram_rdata_valid),
         // Status
         .active(span_active),
         // Colormap BRAM interface (port B, read-only)
@@ -1884,7 +1906,6 @@ always @(posedge clk_core_12288 or negedge reset_n) begin
             // sync signal in back porch
             // new frame
             vidout_vs <= 1;
-            frame_count <= frame_count + 1'b1;
         end
 
         // we want HS to occur a bit after VS, not on the same cycle
@@ -1926,7 +1947,7 @@ end
 // Link MMIO peripheral (FIFO + synchronous SCK/SO/SI PHY)
 //
 link_mmio #(
-    .CLK_HZ(100000000),
+    .CLK_HZ(105000000),
     .SCK_HZ(256000),
     .POLL_HZ(3000),
     .FIFO_DEPTH(256)
@@ -2005,6 +2026,7 @@ mf_pllram_133 mp_ram (
     .rst            ( 0 ),
     .outclk_0       ( clk_ram_controller ), // 100 MHz for SDRAM controller
     .outclk_1       ( clk_ram_chip ),       // 100 MHz for SDRAM chip (phase shifted)
+    .outclk_2       ( ),                    // 100 MHz (unused, was CRAM0 sync burst)
     .locked         ( pll_ram_locked )
 );
 

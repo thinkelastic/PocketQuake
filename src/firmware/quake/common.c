@@ -1396,11 +1396,6 @@ int COM_FindFile (char *filename, int *handle, FILE **file)
 				for (i=0 ; i<pak->numfiles ; i++)
 					if (!strcmp (pak->files[i].name, filename))
 					{       // found it!
-						if (0) Sys_Printf ("PackFile: %s : %s\n",pak->filename, filename);
-						if (0 && !strcmp(filename, "progs.dat")) {
-							Sys_Printf("DBG progs.dat: handle=%d filepos=0x%x filelen=0x%x\n",
-								pak->handle, pak->files[i].filepos, pak->files[i].filelen);
-						}
 						if (handle)
 						{
 							*handle = pak->handle;
@@ -1575,7 +1570,11 @@ byte *COM_LoadFile (char *path, int usehunk)
 	((byte *)buf)[len] = 0;
 
 	Draw_BeginDisc ();
-	Sys_FileRead (h, buf, len);                     
+	{
+		int rd = Sys_FileRead (h, buf, len);
+		if (rd != len)
+			Sys_Error ("COM_LoadFile: short read on %s (%d of %d bytes)", path, rd, len);
+	}
 	COM_CloseFile (h);
 	Draw_EndDisc ();
 
@@ -1717,7 +1716,7 @@ void COM_AddGameDirectory (char *dir)
 		search = Hunk_Alloc (sizeof(searchpath_t));
 		search->pack = pak;
 		search->next = com_searchpaths;
-		com_searchpaths = search;               
+		com_searchpaths = search;
 	}
 
 //

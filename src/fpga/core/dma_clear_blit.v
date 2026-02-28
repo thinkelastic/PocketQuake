@@ -37,13 +37,13 @@ module dma_clear_blit (
     output reg         m_axi_awvalid,
     input  wire        m_axi_awready,
     output reg  [31:0] m_axi_awaddr,
-    output wire [7:0]  m_axi_awlen,     // Always 0 (single-beat writes)
+    output reg  [7:0]  m_axi_awlen,
 
     output reg         m_axi_wvalid,
     input  wire        m_axi_wready,
     output reg  [31:0] m_axi_wdata,
     output reg  [3:0]  m_axi_wstrb,
-    output wire        m_axi_wlast,     // Always 1 (single-beat writes)
+    output reg         m_axi_wlast,
 
     input  wire        m_axi_bvalid,
     input  wire [1:0]  m_axi_bresp,
@@ -52,10 +52,11 @@ module dma_clear_blit (
     output wire       active           // DMA is running (blocks CPU SDRAM access)
 );
 
-// Static AXI4 ties — single-beat only
+// Fill burst length (0-based: 15 = 16 beats = 64 bytes per burst)
+localparam [7:0] FILL_BURST_LEN = 8'd15;
+
+// Single-beat for reads (copy mode)
 assign m_axi_arlen = 8'd0;
-assign m_axi_awlen = 8'd0;
-assign m_axi_wlast = 1'b1;
 
 // Configuration registers
 reg [31:0] src_addr_reg;    // Source byte address
@@ -66,18 +67,21 @@ reg        copy_mode;       // 0=fill, 1=copy
 
 // DMA state machine
 localparam ST_IDLE       = 3'd0;
-localparam ST_FILL_ISSUE = 3'd1;
-localparam ST_FILL_WAIT  = 3'd2;
-localparam ST_COPY_READ  = 3'd3;
-localparam ST_COPY_RWAIT = 3'd4;
-localparam ST_COPY_WRITE = 3'd5;
-localparam ST_COPY_WWAIT = 3'd6;
+localparam ST_FILL_AW    = 3'd1;  // Issue AW for burst fill
+localparam ST_FILL_W     = 3'd2;  // Stream W beats
+localparam ST_FILL_BWAIT = 3'd3;  // Wait for B response
+localparam ST_COPY_READ  = 3'd4;
+localparam ST_COPY_RWAIT = 3'd5;
+localparam ST_COPY_WRITE = 3'd6;
+localparam ST_COPY_WWAIT = 3'd7;
 
 reg [2:0]  state;
 reg [31:0] cur_src;         // Current source byte address
 reg [31:0] cur_dst;         // Current destination byte address
 reg [31:0] remaining;       // Remaining bytes to transfer
 reg [31:0] copy_buf;        // Temporary buffer for copy read data
+reg [7:0]  burst_beat;      // Current beat within burst (0..FILL_BURST_LEN)
+reg [7:0]  burst_len_r;     // Actual burst length for current AW (may be < FILL_BURST_LEN)
 
 assign active = (state != ST_IDLE);
 
@@ -106,13 +110,17 @@ always @(posedge clk or negedge reset_n) begin
         cur_dst <= 32'd0;
         remaining <= 32'd0;
         copy_buf <= 32'd0;
+        burst_beat <= 8'd0;
+        burst_len_r <= 8'd0;
         m_axi_arvalid <= 1'b0;
         m_axi_araddr <= 32'd0;
         m_axi_awvalid <= 1'b0;
         m_axi_awaddr <= 32'd0;
+        m_axi_awlen <= 8'd0;
         m_axi_wvalid <= 1'b0;
         m_axi_wdata <= 32'd0;
         m_axi_wstrb <= 4'b0;
+        m_axi_wlast <= 1'b0;
     end else begin
         // AXI4 valid/ready handshake: deassert valid when ready fires
         if (m_axi_arvalid && m_axi_arready) m_axi_arvalid <= 1'b0;
@@ -136,7 +144,7 @@ always @(posedge clk or negedge reset_n) begin
                         if (reg_wdata[1])
                             state <= ST_COPY_READ;
                         else
-                            state <= ST_FILL_ISSUE;
+                            state <= ST_FILL_AW;
                     end
                 end
                 default: ;
@@ -149,35 +157,59 @@ always @(posedge clk or negedge reset_n) begin
                 // Nothing to do
             end
 
-            // ---- Fill mode ----
-            ST_FILL_ISSUE: begin
-                // Assert AW+W simultaneously for single-beat write
-                m_axi_awvalid <= 1'b1;
-                m_axi_awaddr  <= {6'b0, cur_dst[25:2], 2'b00};
-                m_axi_wvalid  <= 1'b1;
-                m_axi_wdata   <= fill_data_reg;
-                m_axi_wstrb   <= 4'b1111;
-                state <= ST_FILL_WAIT;
-            end
-
-            ST_FILL_WAIT: begin
-                // Wait for B response (write complete)
-                if (m_axi_bvalid) begin
-                    cur_dst <= cur_dst + 32'd4;
-                    remaining <= remaining - 32'd4;
-                    if (remaining <= 32'd4)
-                        state <= ST_IDLE;
+            // ---- Fill mode (burst writes) ----
+            ST_FILL_AW: begin
+                // Calculate burst length: min(remaining/4 - 1, FILL_BURST_LEN)
+                // remaining is always >= 4 here (checked at start and after each burst)
+                if (!m_axi_awvalid) begin
+                    m_axi_awvalid <= 1'b1;
+                    m_axi_awaddr  <= {6'b0, cur_dst[25:2], 2'b00};
+                    if (remaining >= ((FILL_BURST_LEN + 1) << 2))
+                        burst_len_r <= FILL_BURST_LEN;
                     else
-                        state <= ST_FILL_ISSUE;
+                        burst_len_r <= remaining[9:2] - 8'd1;
+                    m_axi_awlen <= (remaining >= ((FILL_BURST_LEN + 1) << 2)) ?
+                                   FILL_BURST_LEN : (remaining[9:2] - 8'd1);
+                    burst_beat <= 8'd0;
+                    state <= ST_FILL_W;
                 end
             end
 
-            // ---- Copy mode ----
+            ST_FILL_W: begin
+                // Stream W beats — issue next beat when previous accepted or first beat
+                if (!m_axi_wvalid || m_axi_wready) begin
+                    m_axi_wvalid <= 1'b1;
+                    m_axi_wdata  <= fill_data_reg;
+                    m_axi_wstrb  <= 4'b1111;
+                    m_axi_wlast  <= (burst_beat == burst_len_r);
+                    if (burst_beat == burst_len_r) begin
+                        state <= ST_FILL_BWAIT;
+                    end else begin
+                        burst_beat <= burst_beat + 8'd1;
+                    end
+                end
+            end
+
+            ST_FILL_BWAIT: begin
+                // Wait for B response (write complete)
+                if (m_axi_bvalid) begin
+                    cur_dst <= cur_dst + {22'b0, burst_len_r + 8'd1, 2'b00};
+                    remaining <= remaining - {22'b0, burst_len_r + 8'd1, 2'b00};
+                    if (remaining <= {22'b0, burst_len_r + 8'd1, 2'b00})
+                        state <= ST_IDLE;
+                    else
+                        state <= ST_FILL_AW;
+                end
+            end
+
+            // ---- Copy mode (single-beat read → single-beat write) ----
             ST_COPY_READ: begin
                 // Assert AR for single-beat read
-                m_axi_arvalid <= 1'b1;
-                m_axi_araddr  <= {6'b0, cur_src[25:2], 2'b00};
-                state <= ST_COPY_RWAIT;
+                if (!m_axi_arvalid) begin
+                    m_axi_arvalid <= 1'b1;
+                    m_axi_araddr  <= {6'b0, cur_src[25:2], 2'b00};
+                    state <= ST_COPY_RWAIT;
+                end
             end
 
             ST_COPY_RWAIT: begin
@@ -190,12 +222,16 @@ always @(posedge clk or negedge reset_n) begin
 
             ST_COPY_WRITE: begin
                 // Assert AW+W simultaneously for single-beat write
-                m_axi_awvalid <= 1'b1;
-                m_axi_awaddr  <= {6'b0, cur_dst[25:2], 2'b00};
-                m_axi_wvalid  <= 1'b1;
-                m_axi_wdata   <= copy_buf;
-                m_axi_wstrb   <= 4'b1111;
-                state <= ST_COPY_WWAIT;
+                if (!m_axi_awvalid && !m_axi_wvalid) begin
+                    m_axi_awvalid <= 1'b1;
+                    m_axi_awaddr  <= {6'b0, cur_dst[25:2], 2'b00};
+                    m_axi_awlen   <= 8'd0;
+                    m_axi_wvalid  <= 1'b1;
+                    m_axi_wdata   <= copy_buf;
+                    m_axi_wstrb   <= 4'b1111;
+                    m_axi_wlast   <= 1'b1;
+                    state <= ST_COPY_WWAIT;
+                end
             end
 
             ST_COPY_WWAIT: begin

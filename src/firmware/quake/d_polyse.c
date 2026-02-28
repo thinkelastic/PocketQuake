@@ -24,6 +24,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "r_local.h"
 #include "d_local.h"
 #include "surface_accel.h"
+#include "span_accel.h"
 
 // TODO: put in span spilling to shrink list size
 // !!! if this is changed, it must be changed in d_polysa.s too !!!
@@ -128,12 +129,9 @@ D_PolysetDraw
 */
 void D_PolysetDraw (void)
 {
-	spanpackage_t	spans[DPS_MAXSPANS + 1 +
-			((CACHE_SIZE - 1) / sizeof(spanpackage_t)) + 1];
-						// one extra because of cache line pretouching
+	static spanpackage_t	spans[DPS_MAXSPANS + 1 + 1];
 
-	a_spans = (spanpackage_t *)
-			(((long)&spans[0] + CACHE_SIZE - 1) & ~(CACHE_SIZE - 1));
+	a_spans = &spans[0];
 
 	if (r_affinetridesc.drawtype)
 	{
@@ -565,10 +563,14 @@ PQ_FASTTEXT void D_PolysetCalcGradients (int skinwidth)
 // very visible, overflow is very unlikely, because of ambient lighting
 	t0 = r_p0[4] - r_p2[4];
 	t1 = r_p1[4] - r_p2[4];
-	r_lstepx = (int)
-			ceilf((t1 * p01_minus_p21 - t0 * p11_minus_p21) * xstepdenominv);
-	r_lstepy = (int)
-			ceilf((t1 * p00_minus_p20 - t0 * p10_minus_p20) * ystepdenominv);
+	{
+		float lx = (t1 * p01_minus_p21 - t0 * p11_minus_p21) * xstepdenominv;
+		float ly = (t1 * p00_minus_p20 - t0 * p10_minus_p20) * ystepdenominv;
+		int ilx = (int)lx;
+		int ily = (int)ly;
+		r_lstepx = ilx + (lx > (float)ilx);
+		r_lstepy = ily + (ly > (float)ily);
+	}
 
 	t0 = r_p0[2] - r_p2[2];
 	t1 = r_p1[2] - r_p2[2];
@@ -600,6 +602,12 @@ PQ_FASTTEXT void D_PolysetCalcGradients (int skinwidth)
 #endif
 
 	a_ststepxwhole = skinwidth * (r_tstepx >> 16) + (r_sstepx >> 16);
+
+#if HW_ALIAS_ACCEL
+	span_alias_setup(a_ststepxwhole, a_sstepxfrac, a_tstepxfrac, skinwidth);
+	SPAN_LIGHTSTEP = (unsigned int)r_lstepx;
+	SPAN_ZISTEP    = (unsigned int)r_zistepx;
+#endif
 }
 
 #endif	// !id386
@@ -632,12 +640,14 @@ D_PolysetDrawSpans8
 PQ_FASTTEXT void D_PolysetDrawSpans8 (spanpackage_t *pspanpackage)
 {
 	int		lcount;
+#if !HW_ALIAS_ACCEL
 	byte	*lpdest;
 	byte	*lptex;
 	int		lsfrac, ltfrac;
 	int		llight;
 	int		lzi;
 	short	*lpz;
+#endif
 
 	do
 	{
@@ -654,8 +664,18 @@ PQ_FASTTEXT void D_PolysetDrawSpans8 (spanpackage_t *pspanpackage)
 			d_aspancount += ubasestep;
 		}
 
-		if (lcount)
+		if (lcount > 0)
 		{
+#if HW_ALIAS_ACCEL
+			while (!(SPAN_STATUS & SPAN_STATUS_CAN_ACCEPT)) ;
+			span_draw_alias_z(
+				(unsigned int)pspanpackage->pdest,
+				(unsigned int)pspanpackage->ptex,
+				pspanpackage->sfrac, pspanpackage->tfrac,
+				pspanpackage->light,
+				(unsigned int)pspanpackage->pz,
+				pspanpackage->zi, lcount);
+#else
 			lpdest = pspanpackage->pdest;
 			lptex = pspanpackage->ptex;
 			lpz = pspanpackage->pz;
@@ -686,6 +706,7 @@ PQ_FASTTEXT void D_PolysetDrawSpans8 (spanpackage_t *pspanpackage)
 					ltfrac &= 0xFFFF;
 				}
 			} while (--lcount);
+#endif
 		}
 
 		pspanpackage++;
@@ -703,10 +724,12 @@ The viewmodel renders last with ziscale*3, so it always passes the Z-test.
 PQ_FASTTEXT void D_PolysetDrawSpans8_NoZ (spanpackage_t *pspanpackage)
 {
 	int		lcount;
+#if !HW_ALIAS_ACCEL
 	byte	*lpdest;
 	byte	*lptex;
 	int		lsfrac, ltfrac;
 	int		llight;
+#endif
 
 	do
 	{
@@ -723,8 +746,16 @@ PQ_FASTTEXT void D_PolysetDrawSpans8_NoZ (spanpackage_t *pspanpackage)
 			d_aspancount += ubasestep;
 		}
 
-		if (lcount)
+		if (lcount > 0)
 		{
+#if HW_ALIAS_ACCEL
+			while (!(SPAN_STATUS & SPAN_STATUS_CAN_ACCEPT)) ;
+			span_draw_alias_noz(
+				(unsigned int)pspanpackage->pdest,
+				(unsigned int)pspanpackage->ptex,
+				pspanpackage->sfrac, pspanpackage->tfrac,
+				pspanpackage->light, lcount);
+#else
 			lpdest = pspanpackage->pdest;
 			lptex = pspanpackage->ptex;
 			lsfrac = pspanpackage->sfrac;
@@ -733,7 +764,7 @@ PQ_FASTTEXT void D_PolysetDrawSpans8_NoZ (spanpackage_t *pspanpackage)
 
 			do
 			{
-				*lpdest = ((byte *)acolormap)[*lptex + (llight & 0xFF00)];
+				*lpdest = CMAP_BRAM_PTR[*lptex + (llight & 0xFF00)];
 				lpdest++;
 				llight += r_lstepx;
 				lptex += a_ststepxwhole;
@@ -747,6 +778,7 @@ PQ_FASTTEXT void D_PolysetDrawSpans8_NoZ (spanpackage_t *pspanpackage)
 					ltfrac &= 0xFFFF;
 				}
 			} while (--lcount);
+#endif
 		}
 
 		pspanpackage++;

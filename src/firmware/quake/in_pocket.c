@@ -48,6 +48,7 @@ static qboolean dpad_down_nav_down = false;
 static qboolean dpad_up_game_down = false;
 static qboolean dpad_down_game_down = false;
 
+
 static unsigned int normalize_keys(unsigned int raw_keys)
 {
     unsigned int key_bits;

@@ -130,8 +130,30 @@ void IN_LeftDown(void) {KeyDown(&in_left);}
 void IN_LeftUp(void) {KeyUp(&in_left);}
 void IN_RightDown(void) {KeyDown(&in_right);}
 void IN_RightUp(void) {KeyUp(&in_right);}
-void IN_ForwardDown(void) {KeyDown(&in_forward);}
-void IN_ForwardUp(void) {KeyUp(&in_forward);}
+/* Double-tap +forward to run: second press within threshold activates +speed.
+ * Lives here (not in the input driver) so it works regardless of which
+ * physical button is bound to +forward. */
+#define DBLCLICK_THRESHOLD 0.3f
+static float forward_last_press = -1.0f;
+static qboolean forward_running = false;
+
+void IN_ForwardDown(void) {
+	float now = realtime;
+	if (forward_last_press >= 0.0f &&
+	    (now - forward_last_press) < DBLCLICK_THRESHOLD) {
+		KeyDown(&in_speed);
+		forward_running = true;
+	}
+	forward_last_press = now;
+	KeyDown(&in_forward);
+}
+void IN_ForwardUp(void) {
+	KeyUp(&in_forward);
+	if (forward_running) {
+		KeyUp(&in_speed);
+		forward_running = false;
+	}
+}
 void IN_BackDown(void) {KeyDown(&in_back);}
 void IN_BackUp(void) {KeyUp(&in_back);}
 void IN_LookupDown(void) {KeyDown(&in_lookup);}
@@ -180,7 +202,7 @@ float CL_KeyState (kbutton_t *key)
 	
 	if (impulsedown && !impulseup)
 		if (down)
-			val = 0.5;	// pressed and held this frame
+			val = 0.5f;	// pressed and held this frame
 		else
 			val = 0;	//	I_Error ();
 	if (impulseup && !impulsedown)
@@ -190,7 +212,7 @@ float CL_KeyState (kbutton_t *key)
 			val = 0;	// released this frame
 	if (!impulsedown && !impulseup)
 		if (down)
-			val = 1.0;	// held the entire frame
+			val = 1.0f;	// held the entire frame
 		else
 			val = 0;	// up the entire frame
 	if (impulsedown && impulseup)

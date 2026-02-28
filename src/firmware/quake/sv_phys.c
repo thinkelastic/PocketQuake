@@ -376,7 +376,7 @@ void SV_AddGravity (edict_t *ent)
 	if (ent->v.gravity)
 		ent_gravity = ent->v.gravity;
 	else
-		ent_gravity = 1.0;
+		ent_gravity = 1.0f;
 #else
 	eval_t	*val;
 
@@ -384,7 +384,7 @@ void SV_AddGravity (edict_t *ent)
 	if (val && val->_float)
 		ent_gravity = val->_float;
 	else
-		ent_gravity = 1.0;
+		ent_gravity = 1.0f;
 #endif
 	ent->v.velocity[2] -= ent_gravity * sv_gravity.value * host_frametime;
 }
@@ -873,7 +873,7 @@ void SV_WallFriction (edict_t *ent, trace_t *trace)
 	AngleVectors (ent->v.v_angle, forward, right, up);
 	d = DotProduct (trace->plane.normal, forward);
 	
-	d += 0.5;
+	d += 0.5f;
 	if (d >= 0)
 		return;
 		
@@ -1310,10 +1310,10 @@ void SV_Physics_Toss (edict_t *ent)
 		return;
 	
 	if (ent->v.movetype == MOVETYPE_BOUNCE)
-		backoff = 1.5;
+		backoff = 1.5f;
 #ifdef QUAKE2
 	else if (ent->v.movetype == MOVETYPE_BOUNCEMISSILE)
-		backoff = 2.0;
+		backoff = 2.0f;
 #endif
 	else
 		backoff = 1;
@@ -1405,7 +1405,7 @@ void SV_Physics_Step (edict_t *ent)
 		// apply friction
 		// let dead monsters who aren't completely onground slide
 		if (wasonground)
-			if (!(ent->v.health <= 0.0 && !SV_CheckBottom(ent)))
+			if (!(ent->v.health <= 0.0f && !SV_CheckBottom(ent)))
 			{
 				vel = ent->v.velocity;
 				speed = sqrtf(vel[0]*vel[0] +vel[1]*vel[1]);
@@ -1577,7 +1577,7 @@ trace_t SV_Trace_Toss (edict_t *ent, edict_t *ignore)
 
 
 	save_frametime = host_frametime;
-	host_frametime = 0.05;
+	host_frametime = 0.05f;
 
 	memcpy(&tempent, ent, sizeof(edict_t));
 	tent = &tempent;

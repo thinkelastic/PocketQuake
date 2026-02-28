@@ -38,7 +38,7 @@ void R_RotateSprite (float beamlength)
 {
 	vec3_t	vec;
 	
-	if (beamlength == 0.0)
+	if (beamlength == 0.0f)
 		return;
 
 	VectorScale (r_spritedesc.vpn, -beamlength, vec);
@@ -205,7 +205,7 @@ void R_SetupAndDrawSprite ()
 			transformed[2] = NEAR_CLIP;
 
 		pout = &outverts[i];
-		pout->zi = 1.0 / transformed[2];
+		pout->zi = 1.0f / transformed[2];
 		if (pout->zi > r_spritedesc.nearzi)
 			r_spritedesc.nearzi = pout->zi;
 

@@ -66,7 +66,7 @@ static void	(*surfmiptable[4])(void) = {
 
 
 
-unsigned		blocklights[18*18];
+unsigned		blocklights[18*18] __attribute__((aligned(64)));
 
 /*
 ===============
@@ -118,6 +118,7 @@ void R_AddDynamicLights (void)
 		
 		for (t = 0 ; t<tmax ; t++)
 		{
+			unsigned *bl_row = blocklights + t*smax;
 			td = local[1] - t*16;
 			if (td < 0)
 				td = -td;
@@ -135,19 +136,18 @@ void R_AddDynamicLights (void)
 				{
 					unsigned temp;
 					temp = (rad - dist)*256;
-					i = t*smax + s;
 					if (!cl_dlights[lnum].dark)
-						blocklights[i] += temp;
+						bl_row[s] += temp;
 					else
 					{
-						if (blocklights[i] > temp)
-							blocklights[i] -= temp;
+						if (bl_row[s] > temp)
+							bl_row[s] -= temp;
 						else
-							blocklights[i] = 0;
+							bl_row[s] = 0;
 					}
 				}
 #else
-					blocklights[t*smax + s] += (rad - dist)*256;
+					bl_row[s] += (rad - dist)*256;
 #endif
 			}
 		}
@@ -366,7 +366,7 @@ static void R_DrawSurfaceBlock8_unified (void)
 
 	for (int v = 0; v < r_numvblocks; v++)
 	{
-		while (!span_can_accept()) ;
+		while (!span_can_accept()) span_pump_audio();
 		span_draw_surface_block(
 			(unsigned int)prowdest, (unsigned int)psource,
 			r_lightptr[0], r_lightptr[1],
@@ -414,7 +414,7 @@ PQ_FASTTEXT void R_DrawSurfaceBlock8_mip0 (void)
 			int sw_step = (ll - lr) >> 4;
 			int hw_light = lr + 15 * sw_step;
 
-			while (!span_can_accept()) ;
+			while (!span_can_accept()) span_pump_audio();
 			span_draw_surface_row((unsigned int)prowdest, (unsigned int)psource,
 			                      (unsigned int)hw_light, (unsigned int)(-sw_step), 16);
 
@@ -498,7 +498,7 @@ PQ_FASTTEXT void R_DrawSurfaceBlock8_mip1 (void)
 			int sw_step = (ll - lr) >> 3;
 			int hw_light = lr + 7 * sw_step;
 
-			while (!span_can_accept()) ;
+			while (!span_can_accept()) span_pump_audio();
 			span_draw_surface_row((unsigned int)prowdest, (unsigned int)psource,
 			                      (unsigned int)hw_light, (unsigned int)(-sw_step), 8);
 
@@ -582,7 +582,7 @@ PQ_FASTTEXT void R_DrawSurfaceBlock8_mip2 (void)
 			int sw_step = (ll - lr) >> 2;
 			int hw_light = lr + 3 * sw_step;
 
-			while (!span_can_accept()) ;
+			while (!span_can_accept()) span_pump_audio();
 			span_draw_surface_row((unsigned int)prowdest, (unsigned int)psource,
 			                      (unsigned int)hw_light, (unsigned int)(-sw_step), 4);
 
@@ -666,7 +666,7 @@ PQ_FASTTEXT void R_DrawSurfaceBlock8_mip3 (void)
 			int sw_step = (ll - lr) >> 1;
 			int hw_light = lr + 1 * sw_step;
 
-			while (!span_can_accept()) ;
+			while (!span_can_accept()) span_pump_audio();
 			span_draw_surface_row((unsigned int)prowdest, (unsigned int)psource,
 			                      (unsigned int)hw_light, (unsigned int)(-sw_step), 2);
 

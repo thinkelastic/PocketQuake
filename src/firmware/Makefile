@@ -101,7 +101,7 @@ QUAKE_SRCS = $(QUAKE_DIR)/sys_pocket.c \
              $(QUAKE_DIR)/wad.c \
              $(QUAKE_DIR)/world.c \
              $(QUAKE_DIR)/zone.c \
-             $(QUAKE_DIR)/cd_null.c \
+             $(QUAKE_DIR)/cd_pocket.c \
              $(QUAKE_DIR)/snd_dma.c \
              $(QUAKE_DIR)/snd_mix.c \
              $(QUAKE_DIR)/snd_mem.c \

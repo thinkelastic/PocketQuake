@@ -119,14 +119,14 @@ float V_CalcBob (void)
 	if (cycle < cl_bobup.value)
 		cycle = M_PI * cycle / cl_bobup.value;
 	else
-		cycle = M_PI + M_PI*(cycle-cl_bobup.value)/(1.0 - cl_bobup.value);
+		cycle = M_PI + M_PI*(cycle-cl_bobup.value)/(1.0f - cl_bobup.value);
 
 // bob is proportional to velocity in the xy plane
 // (don't count Z, or jumping messes it up)
 
 	bob = sqrtf(cl.velocity[0]*cl.velocity[0] + cl.velocity[1]*cl.velocity[1]) * cl_bob.value;
 //Con_Printf ("speed: %5.1f\n", Length(cl.velocity));
-	bob = bob*0.3 + bob*0.7*sinf(cycle);
+	bob = bob*0.3f + bob*0.7f*sinf(cycle);
 	if (bob > 4)
 		bob = 4;
 	else if (bob < -7)
@@ -269,7 +269,7 @@ void BuildGammaTable (float g)
 {
 	int		i, inf;
 	
-	if (g == 1.0)
+	if (g == 1.0f)
 	{
 		for (i=0 ; i<256 ; i++)
 			gammatable[i] = i;
@@ -278,7 +278,7 @@ void BuildGammaTable (float g)
 	
 	for (i=0 ; i<256 ; i++)
 	{
-		inf = 255 * powf ( (i+0.5)/255.5 , g ) + 0.5;
+		inf = 255 * powf ( (i+0.5f)/255.5f , g ) + 0.5f;
 		if (inf < 0)
 			inf = 0;
 		if (inf > 255)
@@ -895,9 +895,9 @@ void V_CalcRefdef (void)
 // never let it sit exactly on a node line, because a water plane can
 // dissapear when viewed with the eye exactly on it.
 // the server protocol only specifies to 1/16 pixel, so add 1/32 in each axis
-	r_refdef.vieworg[0] += 1.0/32;
-	r_refdef.vieworg[1] += 1.0/32;
-	r_refdef.vieworg[2] += 1.0/32;
+	r_refdef.vieworg[0] += 1.0f/32;
+	r_refdef.vieworg[1] += 1.0f/32;
+	r_refdef.vieworg[2] += 1.0f/32;
 
 	VectorCopy (cl.viewangles, r_refdef.viewangles);
 	V_CalcViewRoll ();
@@ -1122,6 +1122,6 @@ void V_Init (void)
 	Cvar_RegisterVariable (&v_kickroll);
 	Cvar_RegisterVariable (&v_kickpitch);	
 	
-	BuildGammaTable (1.0);	// no gamma yet
+	BuildGammaTable (1.0f);	// no gamma yet
 	Cvar_RegisterVariable (&v_gamma);
 }

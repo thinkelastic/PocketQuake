@@ -14,6 +14,8 @@
 #define HW_SURFBLOCK_ACCEL 1
 #define HW_PERSP_ACCEL 1  /* HW perspective correction in span rasterizer */
 #define HW_COMBINED_Z 1   /* Combined texture + z-buffer write mode */
+#define HW_ALIAS_ACCEL 1  /* HW alias polygon span rendering */
+#define HW_SPRITE_ACCEL 1 /* HW sprite span rendering (persp + z-test + transparency) */
 
 #define SPAN_BASE       0x48000000
 #define SPAN_FB_ADDR    (*(volatile unsigned int *)(SPAN_BASE + 0x00))
@@ -45,6 +47,20 @@
 #define SPAN_PERSP_BBEXTENTS  (*(volatile unsigned int *)(SPAN_BASE + 0x88))
 #define SPAN_PERSP_BBEXTENTT  (*(volatile unsigned int *)(SPAN_BASE + 0x8C))
 
+/* Alias mode registers (slots 36-39) */
+#define SPAN_ALIAS_PTEX   (*(volatile unsigned int *)(SPAN_BASE + 0x90))
+#define SPAN_ALIAS_STSTEP (*(volatile unsigned int *)(SPAN_BASE + 0x94))
+#define SPAN_ALIAS_SFRAC  (*(volatile unsigned int *)(SPAN_BASE + 0x98))
+#define SPAN_ALIAS_TFRAC  (*(volatile unsigned int *)(SPAN_BASE + 0x9C))
+
+#define SPAN_CTL_CMAP   0x10000   /* bit 16: colormap enable */
+#define SPAN_CTL_TURB   0x20000   /* bit 17: turbulence enable */
+#define SPAN_CTL_PERSP  0x40000   /* bit 18: perspective enable */
+#define SPAN_CTL_COMBZ  0x80000   /* bit 19: combined z-write */
+#define SPAN_CTL_ALIAS  0x100000  /* bit 20: alias texture stepping */
+#define SPAN_CTL_NOZ    0x200000  /* bit 21: skip all z-test/z-write */
+#define SPAN_CTL_SPRITE 0x400000  /* bit 22: sprite mode (transparency + z-test) */
+
 /* Surface block registers */
 #define SURF_LIGHT_TL   (*(volatile unsigned int *)(SPAN_BASE + 0x40))
 #define SURF_LIGHT_TR   (*(volatile unsigned int *)(SPAN_BASE + 0x44))
@@ -59,11 +75,18 @@
 #define SPAN_STATUS_CAN_ACCEPT  0x04
 #define SPAN_STATUS_OVERFLOW    0x08
 
-/* Block until span completes */
+/* Service audio FIFO during hardware wait loops */
+extern void SNDDMA_Submit(void);
+static inline void span_pump_audio(void)
+{
+    SNDDMA_Submit();
+}
+
+/* Block until span completes, servicing audio in the meantime */
 static inline void span_wait(void)
 {
     while (SPAN_STATUS & SPAN_STATUS_BUSY)
-        ;
+        span_pump_audio();
 }
 
 /* Start a textured span draw (non-blocking).
@@ -253,22 +276,24 @@ static inline int span_busy(void)
     return SPAN_STATUS & SPAN_STATUS_BUSY;
 }
 
-/* Check if at least one command slot is available (active + 2-entry FIFO, depth=3). */
+/* Check if at least one command slot is available (active + 3-entry FIFO, depth=4). */
 static inline int span_can_accept(void)
 {
     return SPAN_STATUS & SPAN_STATUS_CAN_ACCEPT;
 }
 
 /* Set sticky perspective parameters (call once per surface / D_DrawSpans8 call).
- * Steps are d_*stepu float values; converted to 8.24 fixed-point * 16 internally.
+ * Steps are d_*stepu float values; converted to 16.16 fixed-point * 16 internally.
+ * Q16.16 gives range ±32768 (vs Q8.24's ±128) to prevent overflow on edge-on surfaces.
+ * Hardware CLZ normalization is format-independent: SCALE cancels in sdivz/zi division.
  * sadjust/tadjust and bbextents/bbextentt are 16.16 fixed-point integers. */
 static inline void span_set_perspective(float sdivzstepu, float tdivzstepu, float zistepu,
                                          int sadjust_val, int tadjust_val,
                                          int bbextents_val, int bbextentt_val)
 {
-    SPAN_PERSP_SDIVZ_STEP = (unsigned int)(int)(sdivzstepu * 16.0f * 16777216.0f);
-    SPAN_PERSP_TDIVZ_STEP = (unsigned int)(int)(tdivzstepu * 16.0f * 16777216.0f);
-    SPAN_PERSP_ZI_STEP    = (unsigned int)(int)(zistepu * 16.0f * 16777216.0f);
+    SPAN_PERSP_SDIVZ_STEP = (unsigned int)(int)(sdivzstepu * 16.0f * 65536.0f);
+    SPAN_PERSP_TDIVZ_STEP = (unsigned int)(int)(tdivzstepu * 16.0f * 65536.0f);
+    SPAN_PERSP_ZI_STEP    = (unsigned int)(int)(zistepu * 16.0f * 65536.0f);
     SPAN_PERSP_SADJUST    = (unsigned int)sadjust_val;
     SPAN_PERSP_TADJUST    = (unsigned int)tadjust_val;
     SPAN_PERSP_BBEXTENTS  = (unsigned int)bbextents_val;
@@ -276,15 +301,15 @@ static inline void span_set_perspective(float sdivzstepu, float tdivzstepu, floa
 }
 
 /* Dispatch entire span with HW perspective correction (non-blocking).
- * sdivz/tdivz/zi are float values at span origin. count is total span pixels.
+ * sdivz/tdivz/zi are float values at span origin, converted to Q16.16.
  * Hardware internally subdivides into 16-pixel affine chunks. */
 static inline void span_draw_persp(unsigned int fb_addr, float sdivz, float tdivz,
                                     float zi, int count)
 {
     SPAN_FB_ADDR     = fb_addr;
-    SPAN_PERSP_SDIVZ = (unsigned int)(int)(sdivz * 16777216.0f);
-    SPAN_PERSP_TDIVZ = (unsigned int)(int)(tdivz * 16777216.0f);
-    SPAN_PERSP_ZI    = (unsigned int)(int)(zi * 16777216.0f);
+    SPAN_PERSP_SDIVZ = (unsigned int)(int)(sdivz * 65536.0f);
+    SPAN_PERSP_TDIVZ = (unsigned int)(int)(tdivz * 65536.0f);
+    SPAN_PERSP_ZI    = (unsigned int)(int)(zi * 65536.0f);
     SPAN_CONTROL     = (unsigned int)count | 0x40000;  /* bit 18 = perspective enable */
 }
 
@@ -297,10 +322,72 @@ static inline void span_draw_persp_z(unsigned int fb_addr, float sdivz, float td
     SPAN_Z_ADDR      = z_addr;
     SPAN_ZI          = (unsigned int)izi;
     SPAN_FB_ADDR     = fb_addr;
-    SPAN_PERSP_SDIVZ = (unsigned int)(int)(sdivz * 16777216.0f);
-    SPAN_PERSP_TDIVZ = (unsigned int)(int)(tdivz * 16777216.0f);
-    SPAN_PERSP_ZI    = (unsigned int)(int)(zi * 16777216.0f);
+    SPAN_PERSP_SDIVZ = (unsigned int)(int)(sdivz * 65536.0f);
+    SPAN_PERSP_TDIVZ = (unsigned int)(int)(tdivz * 65536.0f);
+    SPAN_PERSP_ZI    = (unsigned int)(int)(zi * 65536.0f);
     SPAN_CONTROL     = (unsigned int)count | 0xC0000;  /* bits 18+19 = persp + combined z */
+}
+
+/* Set sticky alias stepping parameters (call once per triangle).
+ * ststepxwhole = skinwidth * (r_tstepx >> 16) + (r_sstepx >> 16) (combined whole step).
+ * sstepxfrac = r_sstepx & 0xFFFF, tstepxfrac = r_tstepx & 0xFFFF (fractional steps).
+ * skinwidth = texture width in pixels (for t carry). */
+static inline void span_alias_setup(int ststepxwhole, int sstepxfrac,
+                                     int tstepxfrac, int skinwidth)
+{
+    SPAN_ALIAS_STSTEP = (unsigned int)ststepxwhole;
+    SPAN_ALIAS_SFRAC  = ((unsigned int)(skinwidth & 0xFFFF) << 16) | (sstepxfrac & 0xFFFF);
+    SPAN_ALIAS_TFRAC  = (unsigned int)(tstepxfrac & 0xFFFF);
+}
+
+/* Dispatch alias span with combined z-write (entities).
+ * ptex is absolute SDRAM byte address of texture start for this span.
+ * sfrac/tfrac are initial fractional s/t values (16-bit).
+ * light is pre-shifted light level (light & 0xFF00).
+ * z_addr is byte address of short z-buffer, izi is starting fixed-point izi. */
+static inline void span_draw_alias_z(unsigned int fb_addr, unsigned int ptex,
+                                      int sfrac, int tfrac, int light,
+                                      unsigned int z_addr, int izi, int count)
+{
+    SPAN_ALIAS_PTEX = ptex;
+    SPAN_Z_ADDR     = z_addr;
+    SPAN_ZI         = (unsigned int)izi;
+    SPAN_FB_ADDR    = fb_addr;
+    SPAN_S          = (unsigned int)(sfrac & 0xFFFF);
+    SPAN_T          = (unsigned int)(tfrac & 0xFFFF);
+    SPAN_LIGHT      = (unsigned int)light;
+    SPAN_CONTROL    = (unsigned int)count | SPAN_CTL_ALIAS | SPAN_CTL_COMBZ;
+}
+
+/* Dispatch alias span without z-write (viewmodel / NoZ).
+ * Same as span_draw_alias_z but skips all z-buffer operations. */
+static inline void span_draw_alias_noz(unsigned int fb_addr, unsigned int ptex,
+                                        int sfrac, int tfrac, int light,
+                                        int count)
+{
+    SPAN_ALIAS_PTEX = ptex;
+    SPAN_FB_ADDR    = fb_addr;
+    SPAN_S          = (unsigned int)(sfrac & 0xFFFF);
+    SPAN_T          = (unsigned int)(tfrac & 0xFFFF);
+    SPAN_LIGHT      = (unsigned int)light;
+    SPAN_CONTROL    = (unsigned int)count | SPAN_CTL_ALIAS | SPAN_CTL_NOZ;
+}
+
+/* Dispatch sprite span with HW perspective + z-test + transparency.
+ * Texture source must be set via span_set_texture() before the span loop.
+ * Perspective params must be set via span_set_perspective() per surface.
+ * SPAN_ZISTEP must be set per surface.
+ * z_addr is byte address of short z-buffer, izi is starting fixed-point izi. */
+static inline void span_draw_sprite(unsigned int fb_addr, float sdivz, float tdivz,
+                                     float zi, unsigned int z_addr, int izi, int count)
+{
+    SPAN_Z_ADDR      = z_addr;
+    SPAN_ZI          = (unsigned int)izi;
+    SPAN_FB_ADDR     = fb_addr;
+    SPAN_PERSP_SDIVZ = (unsigned int)(int)(sdivz * 65536.0f);
+    SPAN_PERSP_TDIVZ = (unsigned int)(int)(tdivz * 65536.0f);
+    SPAN_PERSP_ZI    = (unsigned int)(int)(zi * 65536.0f);
+    SPAN_CONTROL     = (unsigned int)count | SPAN_CTL_PERSP | SPAN_CTL_COMBZ | SPAN_CTL_SPRITE;
 }
 
 #endif /* SPAN_ACCEL_H */

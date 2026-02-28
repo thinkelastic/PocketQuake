@@ -3,7 +3,7 @@
 
 PROJECT = ap_core
 TOP_LEVEL = core_top
-QUARTUS_DIR = /home/alberto/altera_lite/25.1std/quartus/bin
+QUARTUS_DIR ?= $(HOME)/altera_lite/25.1std/quartus/bin
 export PATH := $(QUARTUS_DIR):$(PATH)
 
 # Output files

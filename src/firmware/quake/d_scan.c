@@ -259,8 +259,9 @@ void Turbulent8 (espan_t *pspan)
 
 				if (r_turb_spancount > 1)
 				{
-					r_turb_sstep = (snext - r_turb_s) / (r_turb_spancount - 1);
-					r_turb_tstep = (tnext - r_turb_t) / (r_turb_spancount - 1);
+					float inv = 1.0f / (float)(r_turb_spancount - 1);
+					r_turb_sstep = (int)((float)(snext - r_turb_s) * inv);
+					r_turb_tstep = (int)((float)(tnext - r_turb_t) * inv);
 				}
 			}
 
@@ -268,7 +269,7 @@ void Turbulent8 (espan_t *pspan)
 			r_turb_t = r_turb_t & ((CYCLE<<16)-1);
 
 #if HW_TURB_ACCEL
-			while (!span_can_accept()) ;
+			while (!span_can_accept()) span_pump_audio();
 #if HW_COMBINED_Z
 			span_draw_turb_z((unsigned int)r_turb_pdest,
 			                 r_turb_s, r_turb_t,
@@ -357,7 +358,7 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 		int izi = (int)(zi * 0x8000 * 0x10000);
 		short *pzbuf = d_pzbuffer + (d_zwidth * pspan->v) + pspan->u;
 
-		while (!span_can_accept()) ;
+		while (!span_can_accept()) span_pump_audio();
 		span_draw_persp_z((unsigned int)pdest, sdivz, tdivz, zi,
 		                  (unsigned int)pzbuf, izi, count);
 
@@ -377,7 +378,7 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 		tdivz = d_tdivzorigin + dv*d_tdivzstepv + du*d_tdivzstepu;
 		zi = d_ziorigin + dv*d_zistepv + du*d_zistepu;
 
-		while (!span_can_accept()) ;
+		while (!span_can_accept()) span_pump_audio();
 		span_draw_persp((unsigned int)pdest, sdivz, tdivz, zi, count);
 
 	} while ((pspan = pspan->pnext) != NULL);
@@ -506,7 +507,7 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 #if HW_SPAN_ACCEL
 			if (use_hw) {
 				while (!span_can_accept())
-					;
+					span_pump_audio();
 				span_draw_tex((unsigned int)pdest, s, t, sstep, tstep, spancount);
 				if (!r_hwspan_queue.value)
 					span_wait();
@@ -593,7 +594,7 @@ PQ_FASTTEXT void D_DrawZSpans (espan_t *pspan)
 		if (r_hwzspan.value) {
 			if (count > 0) {
 				while (!span_can_accept())
-					;
+					span_pump_audio();
 				span_z_draw((unsigned int)pdest, izi, izistep, count);
 				if (!r_hwspan_queue.value)
 					span_wait();

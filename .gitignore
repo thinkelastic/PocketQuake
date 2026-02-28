@@ -9,6 +9,9 @@ incremental_db/
 # Archives
 *.zip
 
+# Downloaded soundtrack
+music/
+
 # Firmware build outputs
 src/firmware/**/*.o
 src/firmware/*.o

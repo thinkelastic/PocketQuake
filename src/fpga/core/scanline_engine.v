@@ -119,6 +119,23 @@ reg [9:0]  stack_surf  [0:STACK_DEPTH-1];
 reg [9:0]  stack_lastu [0:STACK_DEPTH-1];
 reg [4:0]  stack_count;  // 0-16
 
+// Pre-decoded stack_count masks (breaks critical stack_count → comparator → shift path)
+// Updated one cycle after stack_count changes; always stable before next shift operation
+// since shifts are separated by 3+ FSM cycles from stack_count updates.
+reg [16:0] sc_lt_mask;   // sc_lt_mask[i] = (i < stack_count)
+reg [16:0] sc_le_mask;   // sc_le_mask[i] = (i <= stack_count)
+
+// Free-running mask computation (updates 1 cycle after stack_count changes)
+always @(posedge clk or negedge reset_n) begin
+    if (!reset_n) begin
+        sc_lt_mask <= 17'd0;
+        sc_le_mask <= 17'd1;
+    end else begin
+        sc_lt_mask <= (17'd1 << stack_count) - 17'd1;
+        sc_le_mask <= (17'd2 << stack_count) - 17'd1;
+    end
+end
+
 // Background last_u (separate from stack)
 reg [9:0]  bg_last_u;
 
@@ -158,22 +175,22 @@ reg        find_surf_valid;
 always @(*) begin
     find_surf_pos = 5'd0;
     find_surf_valid = 1'b0;
-    if      (stack_count > 0  && stack_surf[0]  == cur_surfs0) begin find_surf_pos = 5'd0;  find_surf_valid = 1'b1; end
-    else if (stack_count > 1  && stack_surf[1]  == cur_surfs0) begin find_surf_pos = 5'd1;  find_surf_valid = 1'b1; end
-    else if (stack_count > 2  && stack_surf[2]  == cur_surfs0) begin find_surf_pos = 5'd2;  find_surf_valid = 1'b1; end
-    else if (stack_count > 3  && stack_surf[3]  == cur_surfs0) begin find_surf_pos = 5'd3;  find_surf_valid = 1'b1; end
-    else if (stack_count > 4  && stack_surf[4]  == cur_surfs0) begin find_surf_pos = 5'd4;  find_surf_valid = 1'b1; end
-    else if (stack_count > 5  && stack_surf[5]  == cur_surfs0) begin find_surf_pos = 5'd5;  find_surf_valid = 1'b1; end
-    else if (stack_count > 6  && stack_surf[6]  == cur_surfs0) begin find_surf_pos = 5'd6;  find_surf_valid = 1'b1; end
-    else if (stack_count > 7  && stack_surf[7]  == cur_surfs0) begin find_surf_pos = 5'd7;  find_surf_valid = 1'b1; end
-    else if (stack_count > 8  && stack_surf[8]  == cur_surfs0) begin find_surf_pos = 5'd8;  find_surf_valid = 1'b1; end
-    else if (stack_count > 9  && stack_surf[9]  == cur_surfs0) begin find_surf_pos = 5'd9;  find_surf_valid = 1'b1; end
-    else if (stack_count > 10 && stack_surf[10] == cur_surfs0) begin find_surf_pos = 5'd10; find_surf_valid = 1'b1; end
-    else if (stack_count > 11 && stack_surf[11] == cur_surfs0) begin find_surf_pos = 5'd11; find_surf_valid = 1'b1; end
-    else if (stack_count > 12 && stack_surf[12] == cur_surfs0) begin find_surf_pos = 5'd12; find_surf_valid = 1'b1; end
-    else if (stack_count > 13 && stack_surf[13] == cur_surfs0) begin find_surf_pos = 5'd13; find_surf_valid = 1'b1; end
-    else if (stack_count > 14 && stack_surf[14] == cur_surfs0) begin find_surf_pos = 5'd14; find_surf_valid = 1'b1; end
-    else if (stack_count > 15 && stack_surf[15] == cur_surfs0) begin find_surf_pos = 5'd15; find_surf_valid = 1'b1; end
+    if      (sc_lt_mask[0]  && stack_surf[0]  == cur_surfs0) begin find_surf_pos = 5'd0;  find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[1]  && stack_surf[1]  == cur_surfs0) begin find_surf_pos = 5'd1;  find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[2]  && stack_surf[2]  == cur_surfs0) begin find_surf_pos = 5'd2;  find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[3]  && stack_surf[3]  == cur_surfs0) begin find_surf_pos = 5'd3;  find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[4]  && stack_surf[4]  == cur_surfs0) begin find_surf_pos = 5'd4;  find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[5]  && stack_surf[5]  == cur_surfs0) begin find_surf_pos = 5'd5;  find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[6]  && stack_surf[6]  == cur_surfs0) begin find_surf_pos = 5'd6;  find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[7]  && stack_surf[7]  == cur_surfs0) begin find_surf_pos = 5'd7;  find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[8]  && stack_surf[8]  == cur_surfs0) begin find_surf_pos = 5'd8;  find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[9]  && stack_surf[9]  == cur_surfs0) begin find_surf_pos = 5'd9;  find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[10] && stack_surf[10] == cur_surfs0) begin find_surf_pos = 5'd10; find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[11] && stack_surf[11] == cur_surfs0) begin find_surf_pos = 5'd11; find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[12] && stack_surf[12] == cur_surfs0) begin find_surf_pos = 5'd12; find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[13] && stack_surf[13] == cur_surfs0) begin find_surf_pos = 5'd13; find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[14] && stack_surf[14] == cur_surfs0) begin find_surf_pos = 5'd14; find_surf_valid = 1'b1; end
+    else if (sc_lt_mask[15] && stack_surf[15] == cur_surfs0) begin find_surf_pos = 5'd15; find_surf_valid = 1'b1; end
 end
 
 // ============================================
@@ -192,7 +209,7 @@ always @(*) begin : find_insert_pos
     integer k;
     insert_pos = stack_count[4:0]; // default: append at end
     for (k = STACK_DEPTH - 1; k >= 0; k = k - 1) begin
-        if (k[4:0] < stack_count) begin
+        if (sc_lt_mask[k]) begin
             if (!backward_mode) begin
                 if (ins_key_val < stack_key[k][14:0])
                     insert_pos = k[4:0];
@@ -447,7 +464,7 @@ always @(posedge clk or negedge reset_n) begin
 
                         // Shift stack up (remove entry 0)
                         for (si = 0; si < STACK_DEPTH - 1; si = si + 1) begin
-                            if (si < stack_count - 1) begin
+                            if (sc_lt_mask[si + 1]) begin
                                 stack_key[si]   <= stack_key[si + 1];
                                 stack_surf[si]  <= stack_surf[si + 1];
                                 stack_lastu[si] <= stack_lastu[si + 1];
@@ -456,14 +473,14 @@ always @(posedge clk or negedge reset_n) begin
                         stack_count <= stack_count - 1;
 
                         // New top's last_u = cur_iu (last NBA wins over shift)
-                        if (stack_count > 5'd1)
+                        if (sc_lt_mask[1])
                             stack_lastu[0] <= cur_iu;
                         else
                             bg_last_u <= cur_iu;
                     end else begin
                         // Not top — just remove (shift up from found_pos)
                         for (si = 0; si < STACK_DEPTH - 1; si = si + 1) begin
-                            if (si[4:0] >= find_surf_pos && si < stack_count - 1) begin
+                            if (si[4:0] >= find_surf_pos && sc_lt_mask[si + 1]) begin
                                 stack_key[si]   <= stack_key[si + 1];
                                 stack_surf[si]  <= stack_surf[si + 1];
                                 stack_lastu[si] <= stack_lastu[si + 1];
@@ -533,7 +550,7 @@ always @(posedge clk or negedge reset_n) begin
         ST_LEADING_EXEC: begin
             if (insert_pos_r == 5'd0) begin
                 // New top surface — emit span for old top (or background)
-                if (stack_count > 0) begin
+                if (sc_lt_mask[0]) begin
                     if (cur_iu > stack_lastu[0]) begin
                         span_wr_en <= 1;
                         span_wr_data <= {2'b0, cur_iu - stack_lastu[0], stack_lastu[0], stack_surf[0]};
@@ -547,7 +564,7 @@ always @(posedge clk or negedge reset_n) begin
 
                 // Shift stack down from position 0
                 for (si = STACK_DEPTH - 1; si > 0; si = si - 1) begin
-                    if (si[4:0] <= stack_count) begin
+                    if (sc_le_mask[si]) begin
                         stack_key[si]   <= stack_key[si - 1];
                         stack_surf[si]  <= stack_surf[si - 1];
                         stack_lastu[si] <= stack_lastu[si - 1];
@@ -563,7 +580,7 @@ always @(posedge clk or negedge reset_n) begin
             end else if (insert_pos_r < STACK_DEPTH[4:0]) begin
                 // Insert at position P (not top — no span emission)
                 for (si = STACK_DEPTH - 1; si > 0; si = si - 1) begin
-                    if (si[4:0] > insert_pos_r && si[4:0] <= stack_count) begin
+                    if (si[4:0] > insert_pos_r && sc_le_mask[si]) begin
                         stack_key[si]   <= stack_key[si - 1];
                         stack_surf[si]  <= stack_surf[si - 1];
                         stack_lastu[si] <= stack_lastu[si - 1];

@@ -72,7 +72,7 @@ void VID_Init(unsigned char *palette)
     vid.maxwarpwidth = vid.width = vid.conwidth = BASEWIDTH;
     vid.maxwarpheight = vid.height = vid.conheight = BASEHEIGHT;
     vid.aspect = ((float)BASEHEIGHT / (float)BASEWIDTH) * (320.0f / 240.0f);
-    vid.numpages = 2;
+    vid.numpages = 3;
     vid.colormap = host_colormap;
     vid.fullbright = 256 - LittleLong(*((int *)vid.colormap + 2048));
     Sys_Printf("VID_Init: fullbright=%d\n", vid.fullbright);
@@ -135,26 +135,31 @@ void VID_Init(unsigned char *palette)
     }
 #endif
 
-    // SYS_DISPLAY_MODE = 1;  /* DISABLED: keep terminal visible for debug */
+    SYS_DISPLAY_MODE = 1;
     Sys_Printf("VID_Init: done\n");
 }
 
 void VID_Shutdown(void)
 {
-    SYS_DISPLAY_MODE = 0;  /* back to terminal overlay */
+    SYS_DISPLAY_MODE = 0;
 }
 
 void VID_Update(vrect_t *rects)
 {
     (void)rects;
 
-    /* Request buffer flip (will happen on next vblank) */
+    /* Triple buffer: mark draw buffer as ready, FPGA assigns new draw buffer.
+     * Never blocks — VID_WaitSync just reads the new draw target. */
     SYS_FB_SWAP = 1;
+}
 
-    /* Wait for swap to complete (vsync) */
-    while (SYS_FB_SWAP) ;
-
-    /* Update vid.buffer to point at the new draw buffer */
+/*
+ * Sync with the framebuffer after a swap request.
+ * With triple buffering, this never blocks — there's always a free
+ * draw buffer.  Just update vid.buffer to the new target.
+ */
+void VID_WaitSync(void)
+{
     vid.buffer = vid.conbuffer = fb_draw_buffer();
 }
 

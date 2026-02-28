@@ -44,17 +44,19 @@ vec3_t      listener_right;
 vec3_t      listener_up;
 
 int         paintedtime;    // sample PAIRS
+static int  soundtime;      // position in mono samples that hardware has played
 
 int         s_rawend;
 
 static qboolean sound_started = false;
 
-cvar_t bgmvolume = {"bgmvolume", "1", true};
-cvar_t volume = {"volume", "0.7", true};
+cvar_t bgmvolume = {"bgmvolume", "0.9", true};
+cvar_t volume = {"volume", "0.75", true};
 cvar_t nosound = {"nosound", "0"};
 cvar_t precache = {"precache", "1"};
 cvar_t ambient_level = {"ambient_level", "0"};
 cvar_t ambient_fade = {"ambient_fade", "100"};
+cvar_t _snd_mixahead = {"_snd_mixahead", "0.15"};
 
 // ====================================================================
 // Known SFX list
@@ -109,19 +111,27 @@ void SND_Spatialize(channel_t *ch)
 
     // Anything coming from the view entity will always be full volume
     if (ch->entnum == cl.viewentity) {
-        ch->leftvol = ch->master_vol;
-        ch->rightvol = ch->master_vol;
+        ch->leftvol = ch->rightvol = (int)(ch->master_vol * volume.value);
         return;
     }
 
-    // Distance-only attenuation (mono output, no stereo panning)
+    // Distance attenuation + stereo panning
     VectorSubtract(ch->origin, listener_origin, source_vec);
 
     dist = VectorNormalize(source_vec) * ch->dist_mult;
 
-    scale = 1.0 - dist;
+    scale = (1.0 - dist) * volume.value;
     if (scale < 0) scale = 0;
-    ch->leftvol = ch->rightvol = (int)(ch->master_vol * scale);
+
+    // Stereo panning: dot product with listener right vector
+    vec_t dot = source_vec[0] * listener_right[0]
+              + source_vec[1] * listener_right[1]
+              + source_vec[2] * listener_right[2];
+
+    // dot = -1..1: center sounds are full volume in both channels,
+    // hard-panned sounds reach 2x in one channel (matches original Quake)
+    ch->rightvol = (int)(ch->master_vol * scale * (1.0 + dot));
+    ch->leftvol  = (int)(ch->master_vol * scale * (1.0 - dot));
 }
 
 // ====================================================================
@@ -194,6 +204,7 @@ void S_Init(void)
     Cvar_RegisterVariable(&bgmvolume);
     Cvar_RegisterVariable(&ambient_level);
     Cvar_RegisterVariable(&ambient_fade);
+    Cvar_RegisterVariable(&_snd_mixahead);
 
     snd_initialized = true;
 
@@ -293,7 +304,7 @@ void S_StartSound(int entnum, int entchannel, sfx_t *sfx, vec3_t origin,
     // Spatialize
     memset(target_chan, 0, sizeof(*target_chan));
     VectorCopy(origin, target_chan->origin);
-    target_chan->dist_mult = attenuation / 1000.0;
+    target_chan->dist_mult = attenuation / 1000.0f;
     target_chan->master_vol = vol;
     target_chan->entnum = entnum;
     target_chan->entchannel = entchannel;
@@ -403,7 +414,7 @@ void S_StaticSound(sfx_t *sfx, vec3_t origin, float vol, float attenuation)
     ss->sfx = sfx;
     VectorCopy(origin, ss->origin);
     ss->master_vol = vol;
-    ss->dist_mult = (attenuation / 64) / 1000.0;
+    ss->dist_mult = (attenuation / 64) / 1000.0f;
     ss->end = paintedtime + sc->length;
 
     SND_Spatialize(ss);
@@ -453,8 +464,34 @@ static void S_UpdateAmbientSounds(void)
                 chan->master_vol = vol;
         }
 
-        chan->leftvol = chan->rightvol = chan->master_vol;
+        chan->leftvol = chan->rightvol = (int)(chan->master_vol * volume.value);
     }
+}
+
+// ====================================================================
+// GetSoundtime - derive playback position from hardware
+// ====================================================================
+
+static int buffers;
+static int oldsamplepos;
+
+static void GetSoundtime(void)
+{
+    int fullsamples;
+    int samplepos;
+
+    fullsamples = shm->samples / shm->channels;
+
+    // Get current position from driver (submit_src_pos based)
+    samplepos = SNDDMA_GetDMAPos();
+
+    if (samplepos < oldsamplepos) {
+        // Buffer wrapped
+        buffers++;
+    }
+    oldsamplepos = samplepos;
+
+    soundtime = buffers * fullsamples + samplepos / shm->channels;
 }
 
 // ====================================================================
@@ -522,13 +559,17 @@ void S_Update(vec3_t origin, vec3_t forward, vec3_t right, vec3_t up)
         }
     }
 
-    // Mix some sound
-    // Determine how many samples to mix based on how much time has passed
-    endtime = (int)(paintedtime + 0.5 * shm->speed);
+    // Anchor paintedtime to actual playback progress
+    GetSoundtime();
 
-    samps = shm->samples >> (shm->channels - 1);
-    if (endtime - paintedtime > samps)
-        endtime = paintedtime + samps;
+    if (paintedtime < soundtime)
+        paintedtime = soundtime;
+
+    // Mix ahead by _snd_mixahead seconds, capped by ring buffer size
+    samps = shm->samples / shm->channels;
+    endtime = soundtime + (int)(_snd_mixahead.value * shm->speed);
+    if (endtime - soundtime > samps)
+        endtime = soundtime + samps;
 
     S_PaintChannels(endtime);
 

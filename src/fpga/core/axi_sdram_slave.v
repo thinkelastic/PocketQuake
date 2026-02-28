@@ -55,7 +55,7 @@ module axi_sdram_slave (
     output reg  [23:0] sdram_addr,
     output reg  [31:0] sdram_wdata,
     output reg  [3:0]  sdram_wstrb,
-    output reg  [2:0]  sdram_burst_len,
+    output reg  [3:0]  sdram_burst_len,
     input  wire [31:0] sdram_rdata,
     input  wire        sdram_busy,
     input  wire        sdram_accepted,
@@ -130,6 +130,13 @@ always @(posedge clk or posedge reset) begin
                 addr_r <= s_axi_araddr;
                 burst_len <= s_axi_arlen;
                 beat_count <= 0;
+                // Early command issue: if SDRAM idle, start read 1 cycle sooner
+                if (!sdram_busy) begin
+                    sdram_rd <= 1;
+                    sdram_addr <= s_axi_araddr[25:2];
+                    sdram_burst_len <= s_axi_arlen[3:0];
+                    cmd_issued <= 1;
+                end
                 state <= S_RD_CMD;
             end else if (s_axi_awvalid) begin
                 s_axi_awready <= 1;
@@ -141,6 +148,12 @@ always @(posedge clk or posedge reset) begin
                     s_axi_wready <= 1;
                     sdram_wdata <= s_axi_wdata;
                     sdram_wstrb <= s_axi_wstrb;
+                    // Early command issue for writes too
+                    if (!sdram_busy) begin
+                        sdram_wr <= 1;
+                        sdram_addr <= s_axi_awaddr[25:2];
+                        cmd_issued <= 1;
+                    end
                     state <= S_WR_CMD;
                 end else begin
                     state <= S_WR_NEXT;
@@ -157,7 +170,7 @@ always @(posedge clk or posedge reset) begin
                 if (!sdram_busy) begin
                     sdram_rd <= 1;
                     sdram_addr <= addr_r[25:2];
-                    sdram_burst_len <= burst_len[2:0];
+                    sdram_burst_len <= burst_len[3:0];
                     cmd_issued <= 1;
                     started <= 0;
                 end
@@ -165,7 +178,7 @@ always @(posedge clk or posedge reset) begin
                 // Hold read request until arbiter accepts
                 sdram_rd <= 1;
                 sdram_addr <= addr_r[25:2];
-                sdram_burst_len <= burst_len[2:0];
+                sdram_burst_len <= burst_len[3:0];
                 if (sdram_accepted) begin
                     started <= 1;
                     state <= S_RD_DAT;

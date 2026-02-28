@@ -1,5 +1,5 @@
 // PSRAM Controller wrapper for VexRiscv CPU
-// Provides 32-bit word interface using two 16-bit PSRAM accesses
+// Provides 32-bit word interface using two 16-bit async PSRAM accesses
 // Uses the psram.sv module from analogue-pocket-utils
 
 `default_nettype none
@@ -35,18 +35,19 @@ module psram_controller #(
     output wire         cram_lb_n
 );
 
-// State machine for 32-bit to 16-bit conversion
-localparam [3:0] ST_IDLE      = 4'd0;
-localparam [3:0] ST_LO_START  = 4'd1;
-localparam [3:0] ST_LO_BUSY   = 4'd2;  // Wait for busy to go high
-localparam [3:0] ST_LO_WAIT   = 4'd3;  // Wait for busy to go low
-localparam [3:0] ST_HI_START  = 4'd4;
-localparam [3:0] ST_HI_BUSY   = 4'd5;  // Wait for busy to go high
-localparam [3:0] ST_HI_WAIT   = 4'd6;  // Wait for busy to go low
-localparam [3:0] ST_DONE      = 4'd7;
+// State machine
+localparam [3:0] ST_IDLE        = 4'd0;
+// Async write states (unchanged)
+localparam [3:0] ST_WR_LO_START = 4'd1;
+localparam [3:0] ST_WR_LO_BUSY  = 4'd2;
+localparam [3:0] ST_WR_LO_WAIT  = 4'd3;
+localparam [3:0] ST_WR_HI_START = 4'd4;
+localparam [3:0] ST_WR_HI_BUSY  = 4'd5;
+localparam [3:0] ST_WR_HI_WAIT  = 4'd6;
+localparam [3:0] ST_DONE        = 4'd7;
 
 reg [3:0] state;
-reg is_write;
+reg is_write;   // Distinguishes reads from writes in shared LO/HI states
 reg [31:0] latched_data;
 reg [21:0] latched_addr;
 reg latched_chip_sel;
@@ -79,6 +80,13 @@ psram #(
     .write_low_byte(psram_write_low_byte),
 
     .read_en(psram_read_en),
+
+    .sync_burst_en(1'b0),
+    .sync_burst_len(6'b0),
+
+    .config_en(1'b0),
+    .config_data(16'b0),
+
     .read_avail(psram_read_avail),
     .data_out(psram_data_out),
 
@@ -99,21 +107,17 @@ psram #(
     .cram_lb_n(cram_lb_n)
 );
 
-// Convert 22-bit word address to two 22-bit halfword addresses
-// word_addr[21] selects chip (bank_sel)
-// word_addr[20:0] * 2 = halfword address
-wire [21:0] addr_lo = {word_addr[20:0], 1'b0};  // Low 16-bit half
-wire [21:0] addr_hi = {word_addr[20:0], 1'b1};  // High 16-bit half
+// Convert 22-bit word address to two 22-bit halfword addresses (for writes)
 wire [21:0] latched_addr_lo = {latched_addr[20:0], 1'b0};
 wire [21:0] latched_addr_hi = {latched_addr[20:0], 1'b1};
 
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
         state <= ST_IDLE;
+        is_write <= 1'b0;
         word_busy <= 1'b0;
         word_q <= 32'b0;
         word_q_valid <= 1'b0;
-        is_write <= 1'b0;
         latched_data <= 32'b0;
         latched_addr <= 22'b0;
         latched_chip_sel <= 1'b0;
@@ -142,16 +146,23 @@ always @(posedge clk or negedge reset_n) begin
                     latched_addr <= word_addr;
                     latched_chip_sel <= word_addr[21];
                     latched_wstrb <= word_wr ? word_wstrb : 4'b1111;
-                    // Skip low half if no bytes enabled there
+                    // Skip low half if writing with no bytes enabled there
                     if (word_wr && word_wstrb[1:0] == 2'b00)
-                        state <= ST_HI_START;
+                        state <= ST_WR_HI_START;
                     else
-                        state <= ST_LO_START;
+                        state <= ST_WR_LO_START;
                 end
             end
 
-            ST_LO_START: begin
-                // Start access to low 16 bits
+            ST_DONE: begin
+                word_busy <= 1'b0;
+                state <= ST_IDLE;
+            end
+
+            // ============================================
+            // Async write / async read path
+            // ============================================
+            ST_WR_LO_START: begin
                 psram_bank_sel <= latched_chip_sel;
                 psram_addr <= latched_addr_lo;
                 psram_data_in <= latched_data[15:0];
@@ -163,32 +174,28 @@ always @(posedge clk or negedge reset_n) begin
                 else
                     psram_read_en <= 1'b1;
 
-                state <= ST_LO_BUSY;
+                state <= ST_WR_LO_BUSY;
             end
 
-            ST_LO_BUSY: begin
-                // Wait for psram to acknowledge (busy goes high)
+            ST_WR_LO_BUSY: begin
                 if (psram_busy) begin
-                    state <= ST_LO_WAIT;
+                    state <= ST_WR_LO_WAIT;
                 end
             end
 
-            ST_LO_WAIT: begin
-                // Wait for low access to complete (busy goes low)
+            ST_WR_LO_WAIT: begin
                 if (!psram_busy) begin
-                    if (!is_write) begin
+                    if (!is_write)
                         word_q[15:0] <= psram_data_out;
-                    end
-                    // Skip high half if no bytes enabled there (write only)
-                    if (is_write && latched_wstrb[3:2] == 2'b00)
+                    if (is_write && latched_wstrb[3:2] == 2'b00) begin
                         state <= ST_DONE;
-                    else
-                        state <= ST_HI_START;
+                    end else begin
+                        state <= ST_WR_HI_START;
+                    end
                 end
             end
 
-            ST_HI_START: begin
-                // Start access to high 16 bits
+            ST_WR_HI_START: begin
                 psram_bank_sel <= latched_chip_sel;
                 psram_addr <= latched_addr_hi;
                 psram_data_in <= latched_data[31:16];
@@ -200,32 +207,23 @@ always @(posedge clk or negedge reset_n) begin
                 else
                     psram_read_en <= 1'b1;
 
-                state <= ST_HI_BUSY;
+                state <= ST_WR_HI_BUSY;
             end
 
-            ST_HI_BUSY: begin
-                // Wait for psram to acknowledge (busy goes high)
+            ST_WR_HI_BUSY: begin
                 if (psram_busy) begin
-                    state <= ST_HI_WAIT;
+                    state <= ST_WR_HI_WAIT;
                 end
             end
 
-            ST_HI_WAIT: begin
-                // Wait for high access to complete (busy goes low)
+            ST_WR_HI_WAIT: begin
                 if (!psram_busy) begin
                     if (!is_write) begin
                         word_q[31:16] <= psram_data_out;
+                        word_q_valid <= 1'b1;
                     end
                     state <= ST_DONE;
                 end
-            end
-
-            ST_DONE: begin
-                word_busy <= 1'b0;
-                if (!is_write) begin
-                    word_q_valid <= 1'b1;  // Pulse valid on read completion
-                end
-                state <= ST_IDLE;
             end
 
             default: state <= ST_IDLE;

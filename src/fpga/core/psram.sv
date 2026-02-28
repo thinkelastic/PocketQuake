@@ -44,10 +44,12 @@ module psram #(
     parameter MIN_WRITE_PULSE = 45, // Minimum time (ns) for we_n to be held low to latch data (t_wp)
     parameter MIN_WRITE_TIME_FROM_ADV = 70, // Minimum time (ns) for write to complete after adv_n goes low (after setup) (t_aw)
 
-    // -- Reads --
-    parameter MIN_OE_AFTER_ADDR_UNLATCHED = 3, // Minimum time (ns) until oe_n goes low after addr unlatch. This isn't in the spec, so I'm guessing
-    // parameter MAX_OE_TO_VALID_DATA = 20, // Maximum time (ns) for valid data to appear after oe_n goes low
-    parameter MAX_ACCESS_TIME_FROM_ADV = 70 // Maximum time (ns) for valid data to appear after adv_n goes low
+    // -- Async reads (for non-sync-burst instances like CRAM1) --
+    parameter MIN_OE_AFTER_ADDR_UNLATCHED = 3, // Minimum time (ns) until oe_n goes low after addr unlatch
+    parameter MAX_ACCESS_TIME_FROM_ADV = 70, // Maximum time (ns) for valid data to appear after adv_n goes low
+
+    // -- Sync burst --
+    parameter SYNC_LATENCY = 4  // FSM wait cycles: φ=6ns CLK0 latch, code 4, negedge capture
 ) (
     input wire clk,
 
@@ -59,7 +61,14 @@ module psram #(
     input wire write_high_byte,
     input wire write_low_byte,
 
-    input wire read_en,
+    input wire read_en,              // Async single-word read (for non-sync-burst instances)
+
+    input wire sync_burst_en,        // Start synchronous burst read (single-cycle pulse)
+    input wire [5:0] sync_burst_len, // Number of 16-bit reads minus 1 (max 63)
+
+    input wire config_en,            // Write BCR register (single-cycle pulse)
+    input wire [15:0] config_data,   // BCR value to write
+
     output reg read_avail,
     output reg [15:0] data_out,
 
@@ -111,7 +120,7 @@ module psram #(
   localparam TOTAL_WRITE_CYCLE_COUNT =
   `CEIL(`MAX(MIN_WRITE_TIME_FROM_ADV, MIN_WRITE_PULSE) / PERIOD);
 
-  // -- Read cycle counts --
+  // -- Async read cycle counts --
   localparam OE_AFTER_ADDR_UNLATCH_CYCLE_COUNT =
   `CEIL(MIN_OE_AFTER_ADDR_UNLATCHED / PERIOD);
 
@@ -124,92 +133,35 @@ module psram #(
 
   localparam WRITE_INITIAL_COUNT = 1;
 
-  // On STATE_NONE, write_en triggers:
-  //
-  // Actions:
-  // - Hold adv_n low for MIN_ADV_N_PULSE.
-  // - Begin holding ce#_n low, which will continue until write is completed
-  // - Begin holding byte enables (lb_n and ub_n) low, which will continue until write is completed
-  // - Begin holding we_n low, which will continue until write is completed
-
-  // Actions:
-  // - Unlatch adv_n
-  //
-  // Requirements:
-  // - adv_n must be held low for MIN_ADV_N_PULSE (ADV_PULSE_CYCLE_COUNT)
-  // - Addr must be held for MIN_ADDRESS_SETUP_BEFORE_ADV_HIGH (ADDRESS_SETUP_BEFORE_ADV_CYCLE_COUNT) before pulse ends
-  // These requirements are combined in ADV_CYCLE_COUNT
-  //
-  // 1 is subtracted here as STATE_NONE will transition to WRITE_INITIAL_COUNT, which may be this state (if ADV_CYCLE_COUNT == 1)
   localparam STATE_WRITE_ADV_END = WRITE_INITIAL_COUNT - 1 + ADV_CYCLE_COUNT;
 
-  // Actions:
-  // - Unlatch addr in preparation for writing data on dq
-  //
-  // Requirements:
-  // - Addr must be held for MIN_ADDRESS_HOLD_AFTER_ADV_HIGH after adv_n pulse ends in the previous state
   localparam STATE_WRITE_ADDR_LATCH_END = STATE_WRITE_ADV_END + ADDR_HOLD_AFTER_ADV_CYCLE_COUNT;
 
-  // Actions:
-  // - Set data to write on dq
-  //
-  // Requirements:
-  // - Must happen some time period after addr is unlatched. Using MIN_DATA_AFTER_ADDR_UNLATCHED
-  //     (DATA_AFTER_ADDR_UNLATCH_CYCLE_COUNT) but this isn't in the spec
   localparam STATE_WRITE_DATA_START = STATE_WRITE_ADDR_LATCH_END + DATA_AFTER_ADDR_UNLATCH_CYCLE_COUNT;
 
-  // Actions:
-  // - Clean up all latched signals
-  //
-  // Requirements:
-  // - Occurs MIN_WRITE_TIME_FROM_ADV (TOTAL_WRITE_CYCLE_COUNT) after beginning of read
   localparam STATE_WRITE_DATA_END = WRITE_INITIAL_COUNT + TOTAL_WRITE_CYCLE_COUNT;
 
-  // -- Read states --
-
-  // The initial cycle count/FSM id for the beginning of a read
+  // -- Async read states (for non-sync-burst instances) --
   localparam READ_INITIAL_COUNT = 20;
-
-  // On STATE_NONE, read_en triggers:
-  //
-  // Actions:
-  // - Hold adv_n low for MIN_ADV_N_PULSE.
-  // - Begin holding ce#_n low, which will continue until read is completed
-  // - Begin holding byte enables (lb_n and ub_n) low, which will continue until read is completed
-
-  // Actions:
-  // - Unlatch adv_n
-  //
-  // Requirements:
-  // - adv_n must be held low for MIN_ADV_N_PULSE (ADV_PULSE_CYCLE_COUNT)
-  // - Addr must be held for MIN_ADDRESS_SETUP_BEFORE_ADV_HIGH (ADDRESS_SETUP_BEFORE_ADV_CYCLE_COUNT) before pulse ends
-  // These requirements are combined in ADV_CYCLE_COUNT
-  //
-  // 1 is subtracted here as STATE_NONE will transition to READ_INITIAL_COUNT, which may be this state (if ADV_CYCLE_COUNT == 1)
   localparam STATE_READ_ADV_END = READ_INITIAL_COUNT - 1 + ADV_CYCLE_COUNT;
-
-  // Actions:
-  // - Unlatch addr in preparation for data on dq
-  //
-  // Requirements:
-  // - Addr must be held for MIN_ADDRESS_HOLD_AFTER_ADV_HIGH after adv_n pulse ends in the previous state
   localparam STATE_READ_ADDR_LATCH_END = STATE_READ_ADV_END + ADDR_HOLD_AFTER_ADV_CYCLE_COUNT;
-
-  // Actions:
-  // - Hold oe_n low in preparation for data on dq
-  //
-  // Requirements:
-  // - Must happen some time period after addr is unlatched. Using MIN_OE_AFTER_ADDR_UNLATCHED
-  //     (OE_AFTER_ADDR_UNLATCH_CYCLE_COUNT) but this isn't in the spec
   localparam STATE_READ_DATA_ENABLE = STATE_READ_ADDR_LATCH_END + OE_AFTER_ADDR_UNLATCH_CYCLE_COUNT;
-
-  // Actions:
-  // - Receive data and write to data_out
-  // - Clean up all latched signals
-  //
-  // Requirements:
-  // - Occurs MAX_ACCESS_TIME_FROM_ADV (TOTAL_READ_CYCLE_COUNT) after beginning of read
   localparam STATE_READ_DATA_RECEIVED = READ_INITIAL_COUNT + TOTAL_READ_CYCLE_COUNT;
+
+  // -- Config write states (CRE-controlled BCR register write) --
+  // CRE must be HIGH ≥20ns before CE# falls (tCRES). We assert CRE two cycles early
+  // to guarantee 20ns setup even with IOB register timing differences.
+  localparam STATE_CONFIG_CRE_WAIT  = 48;  // Extra CRE hold cycle (auto-increments to 49)
+  localparam STATE_CONFIG_CRE_SETUP = 49;  // CE#/ADV#/WE#/address asserted (CRE already high)
+  localparam STATE_CONFIG_START = 50;       // CE#, ADV#, WE#, address driven
+  localparam STATE_CONFIG_ADV_END = STATE_CONFIG_START + ADV_CYCLE_COUNT - 1;
+  localparam STATE_CONFIG_HOLD_END = STATE_CONFIG_START + TOTAL_WRITE_CYCLE_COUNT;
+
+  // -- Sync burst read states (explicit state assignments) --
+  localparam STATE_SYNC_SETUP = 60;
+  localparam STATE_SYNC_WAIT  = 61;
+  localparam STATE_SYNC_DATA  = 62;
+  localparam STATE_SYNC_END   = 63;
 
   initial begin
     $info("Instantiated PSRAM with the following settings:");
@@ -221,13 +173,12 @@ module psram #(
     $info("    STATE_WRITE_DATA_END: %d", STATE_WRITE_DATA_END);
     $info("");
     $info("  Total write time: %d cycles", TOTAL_WRITE_CYCLE_COUNT);
-    $info("  Reads:");
-    $info("    STATE_READ_ADV_END: %d", STATE_READ_ADV_END);
-    $info("    STATE_READ_ADDR_LATCH_END: %d", STATE_READ_ADDR_LATCH_END);
-    $info("    STATE_READ_DATA_ENABLE: %d", STATE_READ_DATA_ENABLE);
-    $info("    STATE_READ_DATA_RECEIVED: %d", STATE_READ_DATA_RECEIVED);
-    $info("");
-    $info("  Total read time: %d cycles", TOTAL_READ_CYCLE_COUNT);
+    $info("  Config write:");
+    $info("    STATE_CONFIG_START: %d", STATE_CONFIG_START);
+    $info("    STATE_CONFIG_ADV_END: %d", STATE_CONFIG_ADV_END);
+    $info("    STATE_CONFIG_HOLD_END: %d", STATE_CONFIG_HOLD_END);
+    $info("  Sync burst:");
+    $info("    SYNC_LATENCY: %d", SYNC_LATENCY);
   end
 
   reg [7:0] state = STATE_NONE;
@@ -238,11 +189,25 @@ module psram #(
 
   reg [15:0] latched_data_in;
 
+  // Sync burst counters
+  reg [5:0] latency_counter;
+  reg [5:0] burst_counter;
+
   assign cram_dq = data_out_en ? cram_data : 16'hZZ;
+
+  // Negedge capture register for sync burst read data.
+  // At 100 MHz, posedge and CRAM CLK timing make posedge capture impossible
+  // across process corners: reliable address latch needs φ≥5ns, but posedge
+  // data capture needs φ≤4ns. Negedge capture shifts the window by 5ns,
+  // making both work with φ=7ns (2ns margin on all paths).
+  reg [15:0] cram_dq_neg;
+  always @(negedge clk) begin
+    cram_dq_neg <= cram_dq;
+  end
 
   always @(posedge clk) begin
     if (state != STATE_NONE) begin
-      // If we are not at STATE_NONE, increment state
+      // If we are not at STATE_NONE, increment state (overridden by explicit assignments)
       state <= state + 1;
     end
 
@@ -253,9 +218,11 @@ module psram #(
       busy <= 1;
     end
 
+    // Default: clear read_avail every cycle (pulsed in data states)
+    read_avail <= 0;
+
     case (state)
       STATE_NONE: begin
-        read_avail <= 0;
 
         cram_clk   <= 0;
         cram_adv_n <= 1;
@@ -292,29 +259,57 @@ module psram #(
 
           // Set busy now instead of waiting for the state change
           busy <= 1;
+        end else if (config_en) begin
+          // BCR config write via CRE — assert CRE two cycles early for ≥20ns tCRES
+          // State 48 (CRE_WAIT): CRE high, auto-increments to 49 (CRE_SETUP)
+          // State 49 (CRE_SETUP): CE#, ADV#, WE#, address asserted
+          state <= STATE_CONFIG_CRE_WAIT;
+          cram_cre <= 1;    // CRE high, 20ns before CE# falls (at state 49)
+          busy <= 1;
         end else if (read_en) begin
+          // Async single-word read
           state <= READ_INITIAL_COUNT;
 
-          // Activate chip
           if (bank_sel) cram_ce1_n <= 0;
           else cram_ce0_n <= 0;
 
-          // Set address and output on dq
           cram_a <= addr[21:16];
           cram_data <= addr[15:0];
           data_out_en <= 1;
 
-          // Enable address latching
           cram_adv_n <= 0;
           cram_ub_n <= 0;
           cram_lb_n <= 0;
 
-          // Set busy now instead of waiting for the state change
+          busy <= 1;
+        end else if (sync_burst_en) begin
+          // Synchronous burst read
+          state <= STATE_SYNC_SETUP;
+
+          if (bank_sel) cram_ce1_n <= 0;
+          else cram_ce0_n <= 0;
+
+          // Drive address
+          cram_a <= addr[21:16];
+          cram_data <= addr[15:0];
+          data_out_en <= 1;
+
+          cram_adv_n <= 0;  // ADV# low to latch address
+          cram_we_n <= 1;   // WE# high for read
+          cram_oe_n <= 1;   // OE# high during address phase
+          cram_ub_n <= 0;
+          cram_lb_n <= 0;
+
+          latency_counter <= SYNC_LATENCY[5:0];
+          burst_counter <= sync_burst_len;
+
           busy <= 1;
         end
       end
 
-      // Writes
+      // ============================================
+      // Async writes (unchanged)
+      // ============================================
       STATE_WRITE_ADV_END: begin
         // Continue holding address after setting adv high
         cram_adv_n <= 1;
@@ -346,36 +341,107 @@ module psram #(
         busy <= 0;
       end
 
-      // Reads
+      // ============================================
+      // Async reads (for non-sync-burst instances)
+      // ============================================
       STATE_READ_ADV_END: begin
-        // Continue holding address after setting adv high
         cram_adv_n <= 1;
       end
       STATE_READ_ADDR_LATCH_END: begin
-        // No longer sending address data on cram_dq
         data_out_en <= 0;
       end
       STATE_READ_DATA_ENABLE: begin
-        // Data should arrive shortly, enable output
         cram_oe_n <= 0;
       end
       STATE_READ_DATA_RECEIVED: begin
-        state <= STATE_NONE;
-
-        // Actually read data
         read_avail <= 1;
         data_out <= cram_dq;
 
-        // We're done reading, clean up
+        state <= STATE_NONE;
         cram_ce0_n <= 1;
         cram_ce1_n <= 1;
-
         cram_ub_n <= 1;
         cram_lb_n <= 1;
-
         cram_oe_n <= 1;
+        busy <= 0;
+      end
 
-        // Clear busy now, so we don't have to wait for the state change
+      // ============================================
+      // Config write states (BCR register via CRE)
+      // ============================================
+      STATE_CONFIG_CRE_SETUP: begin
+        // CRE is already HIGH from previous cycle. Now assert CE#, ADV#, WE#, address.
+        if (bank_sel) cram_ce1_n <= 0;
+        else cram_ce0_n <= 0;
+
+        cram_a <= {2'b00, 2'b10, 2'b00};  // A[21:16] with A[19]=1 (BCR select for 64Mbit die)
+        cram_data <= config_data;          // BCR value on DQ[15:0] = A[15:0]
+        data_out_en <= 1;
+
+        cram_we_n <= 0;   // WE# low for write
+        cram_adv_n <= 0;  // ADV# low to latch address
+        // Auto-increment → STATE_CONFIG_START (50) → STATE_CONFIG_ADV_END
+      end
+
+      STATE_CONFIG_ADV_END: begin
+        // Address latched, deassert ADV#
+        cram_adv_n <= 1;
+      end
+
+      STATE_CONFIG_HOLD_END: begin
+        // Config write complete — release everything
+        state <= STATE_NONE;
+        data_out_en <= 0;
+        cram_we_n <= 1;
+        cram_cre <= 0;
+        cram_ce0_n <= 1;
+        cram_ce1_n <= 1;
+        busy <= 0;
+      end
+
+      // ============================================
+      // Synchronous burst read states
+      // ============================================
+      STATE_SYNC_SETUP: begin
+        // Address was driven in STATE_NONE, ADV# is low.
+        // Deassert ADV# (address latched), release DQ, assert OE#
+        cram_adv_n <= 1;
+        data_out_en <= 0;  // Release DQ bus for CRAM to drive
+        cram_oe_n <= 0;    // OE# low for read
+        latency_counter <= latency_counter - 6'd1;
+        state <= STATE_SYNC_WAIT;
+      end
+
+      STATE_SYNC_WAIT: begin
+        // Wait for initial access latency
+        if (latency_counter == 6'd0) begin
+          state <= STATE_SYNC_DATA;
+        end else begin
+          latency_counter <= latency_counter - 6'd1;
+          state <= STATE_SYNC_WAIT;  // Explicit: stay here
+        end
+      end
+
+      STATE_SYNC_DATA: begin
+        read_avail <= 1;
+        data_out <= cram_dq_neg;  // Use negedge-captured data for sync burst
+
+        if (burst_counter == 6'd0) begin
+          state <= STATE_SYNC_END;
+        end else begin
+          burst_counter <= burst_counter - 6'd1;
+          state <= STATE_SYNC_DATA;  // Explicit: stay here
+        end
+      end
+
+      STATE_SYNC_END: begin
+        // Burst complete — release everything
+        state <= STATE_NONE;
+        cram_ce0_n <= 1;
+        cram_ce1_n <= 1;
+        cram_oe_n <= 1;
+        cram_ub_n <= 1;
+        cram_lb_n <= 1;
         busy <= 0;
       end
     endcase

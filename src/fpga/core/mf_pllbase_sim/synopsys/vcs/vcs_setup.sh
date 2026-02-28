@@ -99,7 +99,7 @@
 # initialize variables
 TOP_LEVEL_NAME="mf_pllbase"
 QSYS_SIMDIR="./../../"
-QUARTUS_INSTALL_DIR="/home/alberto/altera_lite/25.1std/quartus/"
+QUARTUS_INSTALL_DIR="${QUARTUS_ROOTDIR:-$HOME/altera_lite/25.1std/quartus}/"
 SKIP_FILE_COPY=0
 SKIP_SIM=0
 USER_DEFINED_ELAB_OPTIONS=""

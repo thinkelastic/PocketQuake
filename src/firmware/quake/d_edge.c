@@ -212,6 +212,8 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 	}
 	else
 	{
+		entity_t *last_bmodel_entity = NULL;
+
 		for (s = &surfaces[1] ; s<surface_p ; s++)
 		{
 			if (!s->spans)
@@ -233,12 +235,9 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 				if (profiling) prof_t = SYS_CYCLE_LO;
 				D_DrawSkyScans8 (s->spans);
 				if (profiling) pq_prof_ds_sky_cycles += SYS_CYCLE_LO - prof_t;
-				// Sky z-writes skipped: z-buffer cleared to 0, sky izi ≈ 0 (redundant)
 			}
 			else if (s->flags & SURF_DRAWBACKGROUND)
 			{
-			// set up a gradient for the background surface that places it
-			// effectively at infinity distance from the viewpoint
 				d_zistepu = 0;
 				d_zistepv = 0;
 				d_ziorigin = -0.9;
@@ -257,16 +256,33 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 
 				if (s->insubmodel)
 				{
-				// FIXME: we don't want to do all this for every polygon!
-				// TODO: store once at start of frame
-					currententity = s->entity;	//FIXME: make this passed in to
-												// R_RotateBmodel ()
-					VectorSubtract (r_origin, currententity->origin,
-							local_modelorg);
-					TransformVector (local_modelorg, transformed_modelorg);
-
-					R_RotateBmodel ();	// FIXME: don't mess with the frustum,
-										// make entity passed in
+					if (s->entity != last_bmodel_entity) {
+						if (last_bmodel_entity) {
+							currententity = &cl_entities[0];
+							VectorCopy(world_transformed_modelorg, transformed_modelorg);
+							VectorCopy(base_vpn, vpn);
+							VectorCopy(base_vup, vup);
+							VectorCopy(base_vright, vright);
+							VectorCopy(base_modelorg, modelorg);
+							R_TransformFrustum();
+						}
+						currententity = s->entity;
+						VectorSubtract(r_origin, currententity->origin, local_modelorg);
+						TransformVector(local_modelorg, transformed_modelorg);
+						R_RotateBmodel();
+						last_bmodel_entity = s->entity;
+					}
+				}
+				else if (last_bmodel_entity)
+				{
+					currententity = &cl_entities[0];
+					VectorCopy(world_transformed_modelorg, transformed_modelorg);
+					VectorCopy(base_vpn, vpn);
+					VectorCopy(base_vup, vup);
+					VectorCopy(base_vright, vright);
+					VectorCopy(base_modelorg, modelorg);
+					R_TransformFrustum();
+					last_bmodel_entity = NULL;
 				}
 
 				if (profiling) prof_t = SYS_CYCLE_LO;
@@ -276,44 +292,44 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 				if (!pq_combined_z_active)
 					D_DrawZSpans (s->spans);
 				pq_combined_z_active = 0;
-
-				if (s->insubmodel)
-				{
-				//
-				// restore the old drawing state
-				// FIXME: we don't want to do this every time!
-				// TODO: speed up
-				//
-					currententity = &cl_entities[0];
-					VectorCopy (world_transformed_modelorg,
-								transformed_modelorg);
-					VectorCopy (base_vpn, vpn);
-					VectorCopy (base_vup, vup);
-					VectorCopy (base_vright, vright);
-					VectorCopy (base_modelorg, modelorg);
-					R_TransformFrustum ();
-				}
 			}
 			else
 			{
 				if (s->insubmodel)
 				{
-				// FIXME: we don't want to do all this for every polygon!
-				// TODO: store once at start of frame
-					currententity = s->entity;	//FIXME: make this passed in to
-												// R_RotateBmodel ()
-					VectorSubtract (r_origin, currententity->origin, local_modelorg);
-					TransformVector (local_modelorg, transformed_modelorg);
-
-					R_RotateBmodel ();	// FIXME: don't mess with the frustum,
-										// make entity passed in
+					if (s->entity != last_bmodel_entity) {
+						if (last_bmodel_entity) {
+							currententity = &cl_entities[0];
+							VectorCopy(world_transformed_modelorg, transformed_modelorg);
+							VectorCopy(base_vpn, vpn);
+							VectorCopy(base_vup, vup);
+							VectorCopy(base_vright, vright);
+							VectorCopy(base_modelorg, modelorg);
+							R_TransformFrustum();
+						}
+						currententity = s->entity;
+						VectorSubtract(r_origin, currententity->origin, local_modelorg);
+						TransformVector(local_modelorg, transformed_modelorg);
+						R_RotateBmodel();
+						last_bmodel_entity = s->entity;
+					}
+				}
+				else if (last_bmodel_entity)
+				{
+					currententity = &cl_entities[0];
+					VectorCopy(world_transformed_modelorg, transformed_modelorg);
+					VectorCopy(base_vpn, vpn);
+					VectorCopy(base_vup, vup);
+					VectorCopy(base_vright, vright);
+					VectorCopy(base_modelorg, modelorg);
+					R_TransformFrustum();
+					last_bmodel_entity = NULL;
 				}
 
 				pface = s->data;
 				miplevel = D_MipLevelForScale (s->nearzi * scale_for_mip
 				* pface->texinfo->mipadjust);
 
-			// FIXME: make this passed in to D_CacheSurface
 				if (profiling) prof_t = SYS_CYCLE_LO;
 				pcurrentcache = D_CacheSurface (pface, miplevel);
 				if (profiling) pq_prof_ds_cachesurf_cycles += SYS_CYCLE_LO - prof_t;
@@ -330,24 +346,19 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 				if (!pq_combined_z_active)
 					D_DrawZSpans (s->spans);
 				pq_combined_z_active = 0;
-
-				if (s->insubmodel)
-				{
-				//
-				// restore the old drawing state
-				// FIXME: we don't want to do this every time!
-				// TODO: speed up
-				//
-					currententity = &cl_entities[0];
-					VectorCopy (world_transformed_modelorg,
-								transformed_modelorg);
-					VectorCopy (base_vpn, vpn);
-					VectorCopy (base_vup, vup);
-					VectorCopy (base_vright, vright);
-					VectorCopy (base_modelorg, modelorg);
-					R_TransformFrustum ();
-				}
 			}
+		}
+
+		// Restore world state if loop ended while in bmodel state
+		if (last_bmodel_entity)
+		{
+			currententity = &cl_entities[0];
+			VectorCopy(world_transformed_modelorg, transformed_modelorg);
+			VectorCopy(base_vpn, vpn);
+			VectorCopy(base_vup, vup);
+			VectorCopy(base_vright, vright);
+			VectorCopy(base_modelorg, modelorg);
+			R_TransformFrustum();
 		}
 	}
 }

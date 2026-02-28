@@ -40,7 +40,7 @@ qboolean	r_drawculledpolys;
 qboolean	r_worldpolysbacktofront;
 qboolean	r_recursiveaffinetriangles = false;
 int			r_pixbytes = 1;
-float		r_aliasuvscale = 1.0;
+float		r_aliasuvscale = 1.0f;
 int			r_outofsurfaces;
 int			r_outofedges;
 
@@ -130,6 +130,10 @@ extern unsigned int pq_prof_se_insert_cycles;
 extern unsigned int pq_prof_se_generate_cycles;
 extern unsigned int pq_prof_se_step_cycles;
 extern unsigned int pq_prof_se_draw_cycles;
+extern unsigned int pq_prof_aet_peak;
+extern unsigned int pq_prof_aet_peak_scanline;
+extern unsigned int pq_prof_aet_total_edges;
+extern unsigned int pq_prof_aet_step_max;
 extern unsigned int pq_prof_hw_spans_total;
 extern unsigned int pq_prof_hw_spans_linked;
 extern unsigned int pq_dbg_hw_nspans;
@@ -175,6 +179,10 @@ static unsigned int pq_prof_se_insert_accum;
 static unsigned int pq_prof_se_generate_accum;
 static unsigned int pq_prof_se_step_accum;
 static unsigned int pq_prof_se_draw_accum;
+static unsigned int pq_prof_aet_peak_accum;
+static unsigned int pq_prof_aet_peak_scanline_accum;
+static unsigned int pq_prof_aet_total_accum;
+static unsigned int pq_prof_aet_step_max_accum;
 static unsigned int pq_prof_hw_spans_total_accum;
 static unsigned int pq_prof_hw_spans_linked_accum;
 static unsigned int pq_prof_ds_calcgrad_accum;
@@ -200,6 +208,10 @@ static unsigned int pq_prof_avg_se_insert;
 static unsigned int pq_prof_avg_se_generate;
 static unsigned int pq_prof_avg_se_step;
 static unsigned int pq_prof_avg_se_draw;
+static unsigned int pq_prof_avg_aet_peak;
+static unsigned int pq_prof_avg_aet_peak_scanline;
+static unsigned int pq_prof_avg_aet_total;
+static unsigned int pq_prof_avg_aet_step_max;
 static unsigned int pq_prof_avg_hw_spans_total;
 static unsigned int pq_prof_avg_hw_spans_linked;
 static unsigned int pq_prof_avg_ds_calcgrad;
@@ -216,8 +228,8 @@ static unsigned int pq_hw_snap_sdram;
 static unsigned int pq_hw_snap_sdram_span;
 static unsigned int pq_hw_snap_sdram_dma;
 static unsigned int pq_hw_snap_sdram_cpu;
-static unsigned int pq_hw_snap_sram_cache_hits;
-static unsigned int pq_hw_snap_sram_cache_misses;
+static unsigned int pq_hw_snap_span_fifo_full;
+static unsigned int pq_hw_snap_cpu_contention;
 
 /* HW perf: per-frame deltas */
 static unsigned int pq_hw_span_frame;
@@ -231,8 +243,8 @@ static unsigned int pq_hw_sdram_cpu_frame;
 static unsigned int pq_hw_cache_hits_frame;
 static unsigned int pq_hw_cache_misses_frame;
 static unsigned int pq_hw_pixels_frame;
-static unsigned int pq_hw_sram_cache_hits_frame;
-static unsigned int pq_hw_sram_cache_misses_frame;
+static unsigned int pq_hw_span_fifo_full_frame;
+static unsigned int pq_hw_cpu_contention_frame;
 
 /* HW perf: 64-frame accumulators */
 static unsigned int pq_hw_span_accum;
@@ -246,8 +258,8 @@ static unsigned int pq_hw_sdram_cpu_accum;
 static unsigned int pq_hw_cache_hits_accum;
 static unsigned int pq_hw_cache_misses_accum;
 static unsigned int pq_hw_pixels_accum;
-static unsigned int pq_hw_sram_cache_hits_accum;
-static unsigned int pq_hw_sram_cache_misses_accum;
+static unsigned int pq_hw_span_fifo_full_accum;
+static unsigned int pq_hw_cpu_contention_accum;
 
 /* HW perf: averaged values */
 static unsigned int pq_hw_avg_span;
@@ -261,8 +273,8 @@ static unsigned int pq_hw_avg_sdram_cpu;
 static unsigned int pq_hw_avg_cache_hits;
 static unsigned int pq_hw_avg_cache_misses;
 static unsigned int pq_hw_avg_pixels;
-static unsigned int pq_hw_avg_sram_cache_hits;
-static unsigned int pq_hw_avg_sram_cache_misses;
+static unsigned int pq_hw_avg_span_fifo_full;
+static unsigned int pq_hw_avg_cpu_contention;
 
 /* Mode tracking for display mode transitions */
 static int pq_prof_prev_mode;
@@ -296,7 +308,7 @@ cvar_t	r_maxedges = {"r_maxedges", "0"};
 cvar_t	r_numedges = {"r_numedges", "0"};
 cvar_t	r_aliastransbase = {"r_aliastransbase", "200"};
 cvar_t	r_aliastransadj = {"r_aliastransadj", "100"};
-cvar_t	pq_cycleprof = {"pq_cycleprof", "2"};
+cvar_t	pq_cycleprof = {"pq_cycleprof", "0"};
 
 extern cvar_t	scr_fov;
 
@@ -416,12 +428,12 @@ R_NewMap
 void R_NewMap (void)
 {
 	int		i;
-	
+
 // clear out efrags in case the level hasn't been reloaded
 // FIXME: is this one short?
 	for (i=0 ; i<cl.worldmodel->numleafs ; i++)
 		cl.worldmodel->leafs[i].efrags = NULL;
-		 	
+
 	r_viewleaf = NULL;
 	R_ClearParticles ();
 
@@ -534,7 +546,7 @@ void R_ViewChanged (vrect_t *pvrect, int lineadj, float aspect)
 
 	R_SetVrect (pvrect, &r_refdef.vrect, lineadj);
 
-	r_refdef.horizontalFieldOfView = 2.0 * tanf (r_refdef.fov_x/360*M_PI);
+	r_refdef.horizontalFieldOfView = 2.0f * tanf (r_refdef.fov_x/360*M_PI);
 	r_refdef.fvrectx = (float)r_refdef.vrect.x;
 	r_refdef.fvrectx_adj = (float)r_refdef.vrect.x - 0.5;
 	r_refdef.vrect_x_adj_shift20 = (r_refdef.vrect.x<<20) + (1<<19) - 1;
@@ -585,35 +597,35 @@ void R_ViewChanged (vrect_t *pvrect, int lineadj, float aspect)
 
 	xscale = r_refdef.vrect.width / r_refdef.horizontalFieldOfView;
 	aliasxscale = xscale * r_aliasuvscale;
-	xscaleinv = 1.0 / xscale;
+	xscaleinv = 1.0f / xscale;
 	yscale = xscale * pixelAspect;
 	aliasyscale = yscale * r_aliasuvscale;
-	yscaleinv = 1.0 / yscale;
+	yscaleinv = 1.0f / yscale;
 	xscaleshrink = (r_refdef.vrect.width-6)/r_refdef.horizontalFieldOfView;
 	yscaleshrink = xscaleshrink*pixelAspect;
 
 // left side clip
-	screenedge[0].normal[0] = -1.0 / (xOrigin*r_refdef.horizontalFieldOfView);
+	screenedge[0].normal[0] = -1.0f / (xOrigin*r_refdef.horizontalFieldOfView);
 	screenedge[0].normal[1] = 0;
 	screenedge[0].normal[2] = 1;
 	screenedge[0].type = PLANE_ANYZ;
 	
 // right side clip
 	screenedge[1].normal[0] =
-			1.0 / ((1.0-xOrigin)*r_refdef.horizontalFieldOfView);
+			1.0f / ((1.0f-xOrigin)*r_refdef.horizontalFieldOfView);
 	screenedge[1].normal[1] = 0;
 	screenedge[1].normal[2] = 1;
 	screenedge[1].type = PLANE_ANYZ;
 	
 // top side clip
 	screenedge[2].normal[0] = 0;
-	screenedge[2].normal[1] = -1.0 / (yOrigin*verticalFieldOfView);
+	screenedge[2].normal[1] = -1.0f / (yOrigin*verticalFieldOfView);
 	screenedge[2].normal[2] = 1;
 	screenedge[2].type = PLANE_ANYZ;
 	
 // bottom side clip
 	screenedge[3].normal[0] = 0;
-	screenedge[3].normal[1] = 1.0 / ((1.0-yOrigin)*verticalFieldOfView);
+	screenedge[3].normal[1] = 1.0f / ((1.0f-yOrigin)*verticalFieldOfView);
 	screenedge[3].normal[2] = 1;	
 	screenedge[3].type = PLANE_ANYZ;
 	
@@ -694,7 +706,7 @@ void R_MarkLeaves (void)
 R_DrawEntitiesOnList
 =============
 */
-void R_DrawEntitiesOnList (void)
+PQ_FASTTEXT void R_DrawEntitiesOnList (void)
 {
 	int			i, j;
 	int			lnum;
@@ -746,10 +758,13 @@ void R_DrawEntitiesOnList (void)
 							VectorSubtract (currententity->origin,
 											cl_dlights[lnum].origin,
 											dist);
-							add = cl_dlights[lnum].radius - Length(dist);
-	
-							if (add > 0)
-								lighting.ambientlight += add;
+							float dist_sq = DotProduct(dist, dist);
+							float rad = cl_dlights[lnum].radius;
+							if (dist_sq < rad * rad) {
+								add = rad - __builtin_sqrtf(dist_sq);
+								if (add > 0)
+									lighting.ambientlight += add;
+							}
 						}
 					}
 				}
@@ -826,15 +841,17 @@ void R_DrawViewModel (void)
 			dl = &cl_dlights[lnum];
 			if (!dl->radius)
 				continue;
-			if (!dl->radius)
-				continue;
 			if (dl->die < cl.time)
 				continue;
 
 			VectorSubtract (currententity->origin, dl->origin, dist);
-			add = dl->radius - Length(dist);
-			if (add > 0)
-				r_viewlighting.ambientlight += add;
+			float dist_sq = DotProduct(dist, dist);
+			float rad = dl->radius;
+			if (dist_sq < rad * rad) {
+				add = rad - __builtin_sqrtf(dist_sq);
+				if (add > 0)
+					r_viewlighting.ambientlight += add;
+			}
 		}
 	}
 
@@ -1130,31 +1147,20 @@ static void PQ_Prof_DrawTerminal(void)
 	PROF_ROW("Other",      other);
 #undef PROF_ROW
 
-#if HW_SCANLINE_ACCEL
-	/* HW Scanline diagnostic */
+	/* AET stats + overflow + leaf0 check */
 	term_setpos(row++, 0);
-	snprintf(line, sizeof(line), "HW spans: %u total %u linked",
-		pq_prof_avg_hw_spans_total, pq_prof_avg_hw_spans_linked);
-	term_puts(line);
-	/* First-scanline raw dump */
-	term_setpos(row++, 0);
-	snprintf(line, sizeof(line), "1st: e=%u n=%u fe=%08x",
-		pq_dbg_hw_edges, pq_dbg_hw_nspans,
-		pq_dbg_hw_first_edge);
-	term_puts(line);
-	/* HW debug registers */
-	term_setpos(row++, 0);
-	snprintf(line, sizeof(line), "st=%08x ed=%08x",
-		pq_dbg_hw_state, pq_dbg_hw_edges_reg);
-	term_puts(line);
-#endif
-
-	/* Blank separator */
-	row++;
+	{
+		int leaf0 = (r_viewleaf == cl.worldmodel->leafs) ? 1 : 0;
+		snprintf(line, sizeof(line), "AET:%u/%u fc:%d poly:%d L0:%d",
+			pq_prof_avg_aet_peak,
+			pq_prof_avg_aet_total,
+			c_faceclip,
+			r_polycount,
+			leaf0);
+		term_puts(line);
+	}
 
 	/* HW Utilization section */
-	term_setpos(row++, 0);
-	term_puts("--- HW Utilization ---");
 
 	/* Helper macro for HW percentage rows */
 #define HW_ROW(label, val) do { \
@@ -1178,41 +1184,10 @@ static void PQ_Prof_DrawTerminal(void)
 		term_puts(line);
 	}
 
-	HW_ROW("DMA engine:",  pq_hw_avg_dma);
-	HW_ROW("SRAM fill:",   pq_hw_avg_sramfill);
 	HW_ROW("SRAM busy:",   pq_hw_avg_sram_busy);
+	HW_ROW("FIFO full:",  pq_hw_avg_span_fifo_full);
+	HW_ROW("CPU contend:",pq_hw_avg_cpu_contention);
 #undef HW_ROW
-
-	/* Texture cache stats */
-	{
-		unsigned int total_acc = pq_hw_avg_cache_hits + pq_hw_avg_cache_misses;
-		unsigned int hitp = pct10(pq_hw_avg_cache_hits, total_acc);
-		term_setpos(row++, 0);
-		snprintf(line, sizeof(line), "Tex$: %2u.%u%% hit (%upx)",
-			hitp / 10, hitp % 10, pq_hw_avg_pixels);
-		term_puts(line);
-	}
-
-	/* SRAM cache stats */
-	{
-		unsigned int total_acc = pq_hw_avg_sram_cache_hits + pq_hw_avg_sram_cache_misses;
-		unsigned int hitp = pct10(pq_hw_avg_sram_cache_hits, total_acc);
-		term_setpos(row++, 0);
-		snprintf(line, sizeof(line), "SRAM$: %2u.%u%% (%u/%u)",
-			hitp / 10, hitp % 10,
-			pq_hw_avg_sram_cache_hits, pq_hw_avg_sram_cache_misses);
-		term_puts(line);
-	}
-
-	/* Blank separator */
-	row++;
-
-	/* Call counts */
-	term_setpos(row++, 0);
-	snprintf(line, sizeof(line), "Span:%u Zspan:%u",
-		pq_prof_avg_spans8_calls,
-		pq_prof_avg_zspans_calls);
-	term_puts(line);
 
 	/* FPS estimate */
 	unsigned int total_ms = pq_prof_avg_total / 100000;
@@ -1309,10 +1284,6 @@ PQ_FASTTEXT void R_EdgeDrawing (void)
 		se_time1 = db_time2;
 	}
 
-	if (!r_dspeeds.value)
-	{
-		/* PocketQuake: skip mid-render audio extra update for stability. */
-	}
 	pq_dbg_stage = 0x3256;
 
 	if (profiling)
@@ -1340,10 +1311,6 @@ void R_RenderView_ (void)
 	int profiling = (int)pq_cycleprof.value;
 
 	r_warpbuffer = warpbuffer;
-
-	// Clear z-buffer asynchronously via sram_fill hardware engine
-	// Runs in background while CPU does frame setup (R_SetupFrame, R_MarkLeaves, etc.)
-	sram_fill_start(0x38000000, d_zwidth * vid.height * sizeof(short), 0);
 
 	if (profiling) {
 		pq_prof_spans8_cycles_frame = 0;
@@ -1374,8 +1341,8 @@ void R_RenderView_ (void)
 		pq_hw_snap_sdram_span = SYS_PERF_SDRAM_SPAN;
 		pq_hw_snap_sdram_dma = SYS_PERF_SDRAM_DMA;
 		pq_hw_snap_sdram_cpu = SYS_PERF_SDRAM_CPU;
-		pq_hw_snap_sram_cache_hits = SYS_PERF_SRAM_CACHE_HITS;
-		pq_hw_snap_sram_cache_misses = SYS_PERF_SRAM_CACHE_MISSES;
+		pq_hw_snap_span_fifo_full = SYS_PERF_SPAN_FIFO_FULL;
+		pq_hw_snap_cpu_contention = SYS_PERF_CPU_CONTENTION;
 		/* Write-clear span event counters */
 		SPAN_PERF_CACHE_HITS = 0;
 	}
@@ -1405,13 +1372,17 @@ SetVisibilityByPassages ();
 		Sys_Error ("R_RenderView: NULL worldmodel");
 	pq_dbg_stage = 0x3205;
 
-	if (!r_dspeeds.value)
-	{
-		S_ExtraUpdate ();
-	}
 	pq_dbg_stage = 0x3206;
 
-	/* Wait for async sram_fill z-buffer clear to complete */
+	/* Wait for z-buffer clear started at end of previous frame.
+	   First frame: no fill running yet, so start one synchronously. */
+	{
+		static qboolean zfill_started = false;
+		if (!zfill_started) {
+			sram_fill_start(0x38000000, d_zwidth * vid.height * sizeof(short), 0);
+			zfill_started = true;
+		}
+	}
 	if (profiling)
 		prof_start = SYS_CYCLE_LO;
 	sram_fill_wait();
@@ -1425,10 +1396,10 @@ SetVisibilityByPassages ();
 		pq_prof_edge_cycles_frame = SYS_CYCLE_LO - prof_start;
 	pq_dbg_stage = 0x3207;
 
-	if (!r_dspeeds.value)
-	{
-		S_ExtraUpdate ();
-	}
+	// Top up audio FIFO mid-frame to prevent underrun during long renders.
+	// Only touches DMA buffer (~16KB) + FIFO MMIO — minimal D-cache impact.
+	S_ExtraUpdate();
+
 	pq_dbg_stage = 0x3208;
 
 	if (r_dspeeds.value)
@@ -1492,8 +1463,8 @@ SetVisibilityByPassages ();
 		pq_hw_sdram_span_frame = SYS_PERF_SDRAM_SPAN - pq_hw_snap_sdram_span;
 		pq_hw_sdram_dma_frame = SYS_PERF_SDRAM_DMA - pq_hw_snap_sdram_dma;
 		pq_hw_sdram_cpu_frame = SYS_PERF_SDRAM_CPU - pq_hw_snap_sdram_cpu;
-		pq_hw_sram_cache_hits_frame = SYS_PERF_SRAM_CACHE_HITS - pq_hw_snap_sram_cache_hits;
-		pq_hw_sram_cache_misses_frame = SYS_PERF_SRAM_CACHE_MISSES - pq_hw_snap_sram_cache_misses;
+		pq_hw_span_fifo_full_frame = SYS_PERF_SPAN_FIFO_FULL - pq_hw_snap_span_fifo_full;
+		pq_hw_cpu_contention_frame = SYS_PERF_CPU_CONTENTION - pq_hw_snap_cpu_contention;
 		/* Span event counters (cleared at frame start) */
 		pq_hw_cache_hits_frame   = SPAN_PERF_CACHE_HITS;
 		pq_hw_cache_misses_frame = SPAN_PERF_CACHE_MISSES;
@@ -1553,6 +1524,14 @@ SetVisibilityByPassages ();
 			pq_prof_se_generate_accum += pq_prof_se_generate_cycles;
 			pq_prof_se_step_accum += pq_prof_se_step_cycles;
 			pq_prof_se_draw_accum += pq_prof_se_draw_cycles;
+			if (pq_prof_aet_peak > pq_prof_aet_peak_accum) {
+				pq_prof_aet_peak_accum = pq_prof_aet_peak;
+				pq_prof_aet_peak_scanline_accum = pq_prof_aet_peak_scanline;
+			}
+			pq_prof_aet_total_accum += pq_prof_aet_total_edges;
+			if (pq_prof_aet_step_max > pq_prof_aet_step_max_accum)
+				pq_prof_aet_step_max_accum = pq_prof_aet_step_max;
+			pq_prof_aet_step_max = 0;  // reset per-frame
 			pq_prof_hw_spans_total_accum += pq_prof_hw_spans_total;
 			pq_prof_hw_spans_linked_accum += pq_prof_hw_spans_linked;
 			pq_prof_ds_calcgrad_accum += pq_prof_ds_calcgrad_cycles;
@@ -1572,8 +1551,8 @@ SetVisibilityByPassages ();
 			pq_hw_cache_hits_accum += pq_hw_cache_hits_frame;
 			pq_hw_cache_misses_accum += pq_hw_cache_misses_frame;
 			pq_hw_pixels_accum += pq_hw_pixels_frame;
-			pq_hw_sram_cache_hits_accum += pq_hw_sram_cache_hits_frame;
-			pq_hw_sram_cache_misses_accum += pq_hw_sram_cache_misses_frame;
+			pq_hw_span_fifo_full_accum += pq_hw_span_fifo_full_frame;
+			pq_hw_cpu_contention_accum += pq_hw_cpu_contention_frame;
 
 			if ((pq_prof_frame_counter & 63) == 0) {
 				pq_prof_avg_total = pq_prof_total_accum >> 6;
@@ -1593,6 +1572,10 @@ SetVisibilityByPassages ();
 				pq_prof_avg_se_generate = pq_prof_se_generate_accum >> 6;
 				pq_prof_avg_se_step = pq_prof_se_step_accum >> 6;
 				pq_prof_avg_se_draw = pq_prof_se_draw_accum >> 6;
+				pq_prof_avg_aet_peak = pq_prof_aet_peak_accum;
+				pq_prof_avg_aet_peak_scanline = pq_prof_aet_peak_scanline_accum;
+				pq_prof_avg_aet_total = pq_prof_aet_total_accum >> 6;
+				pq_prof_avg_aet_step_max = pq_prof_aet_step_max_accum;
 				pq_prof_avg_hw_spans_total = pq_prof_hw_spans_total_accum >> 6;
 				pq_prof_avg_hw_spans_linked = pq_prof_hw_spans_linked_accum >> 6;
 				pq_prof_avg_ds_calcgrad = pq_prof_ds_calcgrad_accum >> 6;
@@ -1617,6 +1600,10 @@ SetVisibilityByPassages ();
 				pq_prof_se_generate_accum = 0;
 				pq_prof_se_step_accum = 0;
 				pq_prof_se_draw_accum = 0;
+				pq_prof_aet_peak_accum = 0;
+				pq_prof_aet_peak_scanline_accum = 0;
+				pq_prof_aet_total_accum = 0;
+				pq_prof_aet_step_max_accum = 0;
 				pq_prof_hw_spans_total_accum = 0;
 				pq_prof_hw_spans_linked_accum = 0;
 				pq_prof_ds_calcgrad_accum = 0;
@@ -1636,8 +1623,8 @@ SetVisibilityByPassages ();
 				pq_hw_avg_cache_hits = pq_hw_cache_hits_accum >> 6;
 				pq_hw_avg_cache_misses = pq_hw_cache_misses_accum >> 6;
 				pq_hw_avg_pixels = pq_hw_pixels_accum >> 6;
-				pq_hw_avg_sram_cache_hits = pq_hw_sram_cache_hits_accum >> 6;
-				pq_hw_avg_sram_cache_misses = pq_hw_sram_cache_misses_accum >> 6;
+				pq_hw_avg_span_fifo_full = pq_hw_span_fifo_full_accum >> 6;
+				pq_hw_avg_cpu_contention = pq_hw_cpu_contention_accum >> 6;
 
 				pq_hw_span_accum = 0;
 				pq_hw_dma_accum = 0;
@@ -1650,8 +1637,8 @@ SetVisibilityByPassages ();
 				pq_hw_cache_hits_accum = 0;
 				pq_hw_cache_misses_accum = 0;
 				pq_hw_pixels_accum = 0;
-				pq_hw_sram_cache_hits_accum = 0;
-				pq_hw_sram_cache_misses_accum = 0;
+				pq_hw_span_fifo_full_accum = 0;
+				pq_hw_cpu_contention_accum = 0;
 
 				PQ_Prof_DrawTerminal();
 			}
@@ -1681,6 +1668,10 @@ SetVisibilityByPassages ();
 		pq_prof_se_generate_accum = 0;
 		pq_prof_se_step_accum = 0;
 		pq_prof_se_draw_accum = 0;
+		pq_prof_aet_peak_accum = 0;
+		pq_prof_aet_peak_scanline_accum = 0;
+		pq_prof_aet_total_accum = 0;
+		pq_prof_aet_step_max_accum = 0;
 		pq_prof_hw_spans_total_accum = 0;
 		pq_prof_hw_spans_linked_accum = 0;
 		pq_prof_ds_calcgrad_accum = 0;
@@ -1706,6 +1697,10 @@ SetVisibilityByPassages ();
 
 // back to high floating-point precision
 	pq_dbg_stage = 0x3210;
+
+	// Start z-buffer clear for NEXT frame now that this frame's z-buffer is no longer needed.
+	// Runs in background during buffer swap, console, network, input, and next frame's setup.
+	sram_fill_start(0x38000000, d_zwidth * vid.height * sizeof(short), 0);
 }
 
 void R_RenderView (void)

@@ -160,7 +160,7 @@ float	anglemod(float a)
 	else
 		a += 360*( 1 + (int)(-a/360) );
 #endif
-	a = (360.0/65536) * ((int)(a*(65536/360.0)) & 65535);
+	a = (360.0f/65536) * ((int)(a*(65536/360.0f)) & 65535);
 	return a;
 }
 
@@ -289,18 +289,18 @@ if (sides == 0)
 #endif
 
 
-void AngleVectors (vec3_t angles, vec3_t forward, vec3_t right, vec3_t up)
+PQ_FASTTEXT void AngleVectors (vec3_t angles, vec3_t forward, vec3_t right, vec3_t up)
 {
 	float		angle;
 	float		sr, sp, sy, cr, cp, cy;
 	
-	angle = angles[YAW] * (M_PI*2 / 360);
+	angle = angles[YAW] * (float)(M_PI / 180.0);
 	sy = sinf(angle);
 	cy = cosf(angle);
-	angle = angles[PITCH] * (M_PI*2 / 360);
+	angle = angles[PITCH] * (float)(M_PI / 180.0);
 	sp = sinf(angle);
 	cp = cosf(angle);
-	angle = angles[ROLL] * (M_PI*2 / 360);
+	angle = angles[ROLL] * (float)(M_PI / 180.0);
 	sr = sinf(angle);
 	cr = cosf(angle);
 
@@ -380,7 +380,7 @@ vec_t Length(vec3_t v)
 	return length;
 }
 
-float VectorNormalize (vec3_t v)
+PQ_FASTTEXT float VectorNormalize (vec3_t v)
 {
 	float	length, ilength;
 
@@ -502,7 +502,7 @@ void FloorDivMod (float numer, float denom, int *quotient,
 	float	x;
 
 #ifndef PARANOID
-	if (denom <= 0.0)
+	if (denom <= 0.0f)
 		Sys_Error ("FloorDivMod: bad denominator %d\n", denom);
 
 //	if ((floor(numer) != numer) || (floor(denom) != denom))
@@ -510,7 +510,7 @@ void FloorDivMod (float numer, float denom, int *quotient,
 //				numer, denom);
 #endif
 
-	if (numer >= 0.0)
+	if (numer >= 0.0f)
 	{
 
 		x = floorf(numer / denom);

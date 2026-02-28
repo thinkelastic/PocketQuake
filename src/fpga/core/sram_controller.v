@@ -10,7 +10,7 @@
 `default_nettype none
 
 module sram_controller #(
-    parameter WAIT_CYCLES = 5  // Wait cycles for SRAM access time (55ns chip, need ~5 cycles at 100MHz)
+    parameter WAIT_CYCLES = 5  // Wait cycles for SRAM access time (55ns chip, FSM adds 2 extra cycles)
 )(
     input  wire        clk,
     input  wire        reset_n,
@@ -198,18 +198,10 @@ module sram_controller #(
                 end
 
                 ST_RD_LO_SAMPLE: begin
+                    // Sample low half and immediately set up high half read
+                    // (skip ST_RD_HI_SETUP — address change with OE held low is safe for async SRAM)
                     word_q[15:0] <= sram_dq_in;
-                    sram_oe_n <= 1'b1;
-                    sram_ub_n <= 1'b1;
-                    sram_lb_n <= 1'b1;
-                    state <= ST_RD_HI_SETUP;
-                end
-
-                // ---- Read High Half ----
-                ST_RD_HI_SETUP: begin
                     sram_a <= latched_addr_hi;
-                    sram_dq_oe <= 1'b0;
-                    sram_we_n <= 1'b1;
                     sram_oe_n <= 1'b0;
                     sram_ub_n <= 1'b0;
                     sram_lb_n <= 1'b0;

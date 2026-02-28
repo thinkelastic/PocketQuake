@@ -28,6 +28,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 unsigned int pq_prof_se_insert_cycles;
 unsigned int pq_prof_se_generate_cycles;
 unsigned int pq_prof_se_step_cycles;
+unsigned int pq_prof_aet_peak;
+unsigned int pq_prof_aet_peak_scanline;
+unsigned int pq_prof_aet_total_edges;
 unsigned int pq_prof_se_draw_cycles;
 unsigned int pq_prof_hw_spans_total;
 unsigned int pq_prof_hw_spans_linked;
@@ -98,8 +101,10 @@ typedef struct {
 	unsigned short  pad;        // pad to 16 bytes
 } aet_entry_t;
 
-static aet_entry_t aet[NUMSTACKEDGES];
-static int aet_count;
+static aet_entry_t aet[NUMSTACKEDGES];     // unsorted pool
+static int aet_order[NUMSTACKEDGES];        // sorted indices into aet[]
+static int aet_count;                        // number of active edges
+static int aet_alloc;                        // next free pool slot (monotonic within frame)
 
 // Store v_end in edge_t->prev (unused by array-based AET, same cache line as u/surfs)
 #define EDGE_V_END(e)  (*(unsigned short *)&(e)->prev)
@@ -712,10 +717,9 @@ Merge sorted newedges linked list into sorted aet[] array.
 PQ_FASTTEXT void R_InsertNewEdges_Array (edge_t *edgestoadd)
 {
 	edge_t *rev, *next;
-	int new_count, i, k;
+	int new_count, first_new, i, k, n;
 
 	// Reverse linked list to get descending u order for right-to-left merge.
-	// newedges[iv] is only traversed here, so in-place reversal is safe.
 	rev = NULL;
 	new_count = 0;
 	while (edgestoadd)
@@ -727,26 +731,39 @@ PQ_FASTTEXT void R_InsertNewEdges_Array (edge_t *edgestoadd)
 		edgestoadd = next;
 	}
 
-	// Right-to-left merge: aet[0..aet_count-1] ascending, rev list descending.
-	// Merge into aet[0..aet_count+new_count-1]. No temp buffer needed.
-	i = aet_count - 1;
-	k = aet_count + new_count - 1;
-
+	// Append new entries to pool (unsorted storage)
+	first_new = aet_alloc;
+	n = new_count - 1;  // index into new entries (highest u first from reversed list)
 	while (rev)
 	{
-		if (i >= 0 && aet[i].u > rev->u)
+		int idx = aet_alloc++;
+		aet[idx].u       = rev->u;
+		aet[idx].u_step  = rev->u_step;
+		aet[idx].surfs[0] = rev->surfs[0];
+		aet[idx].surfs[1] = rev->surfs[1];
+		aet[idx].v_end   = EDGE_V_END(rev);
+		rev = rev->next;
+	}
+
+	// Right-to-left merge into aet_order[]:
+	// Existing aet_order[0..aet_count-1] is sorted ascending by u.
+	// New entries at pool indices first_new..first_new+new_count-1
+	// were stored in descending u order, so new_indices in descending
+	// order are: first_new, first_new+1, ..., first_new+new_count-1
+	i = aet_count - 1;
+	k = aet_count + new_count - 1;
+	n = 0;  // index into new entries (first_new+0 = highest u)
+
+	while (n < new_count)
+	{
+		if (i >= 0 && aet[aet_order[i]].u > aet[first_new + n].u)
 		{
-			aet[k--] = aet[i--];
+			aet_order[k--] = aet_order[i--];
 		}
 		else
 		{
-			aet[k].u       = rev->u;
-			aet[k].u_step  = rev->u_step;
-			aet[k].surfs[0] = rev->surfs[0];
-			aet[k].surfs[1] = rev->surfs[1];
-			aet[k].v_end   = EDGE_V_END(rev);
-			k--;
-			rev = rev->next;
+			aet_order[k--] = first_new + n;
+			n++;
 		}
 	}
 
@@ -767,10 +784,9 @@ PQ_FASTTEXT void R_RemoveEdges_Array (int iv)
 
 	for (i = 0, j = 0; i < aet_count; i++)
 	{
-		if (aet[i].v_end != iv)
+		if (aet[aet_order[i]].v_end != iv)
 		{
-			if (i != j)
-				aet[j] = aet[i];
+			aet_order[j] = aet_order[i];
 			j++;
 		}
 	}
@@ -785,27 +801,35 @@ R_StepActiveU_Array
 Step all u values, then insertion sort (nearly sorted -> ~O(n)).
 ==============
 */
+unsigned int pq_prof_aet_step_max;  // max aet_count seen during Step
+
 PQ_FASTTEXT void R_StepActiveU_Array (void)
 {
 	int i;
 
-	// Step
-	for (i = 0; i < aet_count; i++)
-		aet[i].u += aet[i].u_step;
+	if (aet_count > (int)pq_prof_aet_step_max)
+		pq_prof_aet_step_max = aet_count;
 
-	// Insertion sort (nearly sorted, few swaps expected)
+	// Step all active u values (via order array since pool has holes)
+	for (i = 0; i < aet_count; i++)
+	{
+		int idx = aet_order[i];
+		aet[idx].u += aet[idx].u_step;
+	}
+
+	// Insertion sort on index array (4-byte swaps instead of 16-byte struct copies)
 	for (i = 1; i < aet_count; i++)
 	{
-		if (aet[i].u < aet[i-1].u)
+		int idx = aet_order[i];
+		int key = aet[idx].u;
+		if (key < aet[aet_order[i-1]].u)
 		{
-			aet_entry_t tmp = aet[i];
 			int j = i - 1;
-			while (j >= 0 && aet[j].u > tmp.u)
-			{
-				aet[j+1] = aet[j];
+			do {
+				aet_order[j+1] = aet_order[j];
 				j--;
-			}
-			aet[j+1] = tmp;
+			} while (j >= 0 && aet[aet_order[j]].u > key);
+			aet_order[j+1] = idx;
 		}
 	}
 }
@@ -831,6 +855,10 @@ PQ_FASTTEXT void R_TrailingEdge_A (surf_t *surf, int u)
 		if (surf == surfaces[1].next)
 		{
 			iu = u >> 20;
+			if (iu < edge_head_u_shift20)
+				iu = edge_head_u_shift20;
+			else if (iu > edge_tail_u_shift20)
+				iu = edge_tail_u_shift20;
 			if (iu > surf->last_u)
 			{
 				span = span_p++;
@@ -935,6 +963,10 @@ continue_search:
 
 newtop:
 			iu = u >> 20;
+			if (iu < edge_head_u_shift20)
+				iu = edge_head_u_shift20;
+			else if (iu > edge_tail_u_shift20)
+				iu = edge_tail_u_shift20;
 
 			if (iu > surf2->last_u)
 			{
@@ -999,6 +1031,10 @@ continue_search:
 
 newtop:
 		iu = u >> 20;
+		if (iu < edge_head_u_shift20)
+			iu = edge_head_u_shift20;
+		else if (iu > edge_tail_u_shift20)
+			iu = edge_tail_u_shift20;
 
 		if (iu > surf2->last_u)
 		{
@@ -1044,16 +1080,17 @@ PQ_FASTTEXT void R_GenerateSpans_HW (void)
 	// Write edge count (also resets HW edge buffer write pointer)
 	SCAN_EDGE_COUNT = hw_count;
 
-	// Feed all AET edges to hardware
+	// Feed all AET edges to hardware (in sorted order)
 	for (i = 0; i < hw_count; i++) {
-		int iu = aet[i].u >> 20;
+		int idx = aet_order[i];
+		int iu = aet[idx].u >> 20;
 		// Clamp to valid range — negative u from edge stepping would
 		// produce garbage in the unsigned 9-bit iu field
 		if (iu < 0) iu = 0;
 		else if (iu > 511) iu = 511;
 		SCAN_EDGE_DATA = ((unsigned int)iu << 23) |
-		                 ((unsigned int)aet[i].surfs[1] << 10) |
-		                 (unsigned int)aet[i].surfs[0];
+		                 ((unsigned int)aet[idx].surfs[1] << 10) |
+		                 (unsigned int)aet[idx].surfs[0];
 	}
 
 	// Start processing (bit 0 = start, bit 1 = backward mode)
@@ -1122,15 +1159,16 @@ PQ_FASTTEXT void R_GenerateSpans_Array (void)
 
 	for (i = 0; i < aet_count; i++)
 	{
-		if (aet[i].surfs[0])
+		int idx = aet_order[i];
+		if (aet[idx].surfs[0])
 		{
-			R_TrailingEdge_A (&surfaces[aet[i].surfs[0]], aet[i].u);
+			R_TrailingEdge_A (&surfaces[aet[idx].surfs[0]], aet[idx].u);
 
-			if (!aet[i].surfs[1])
+			if (!aet[idx].surfs[1])
 				continue;
 		}
 
-		R_LeadingEdge_A (aet[i].surfs[1], aet[i].u);
+		R_LeadingEdge_A (aet[idx].surfs[1], aet[idx].u);
 	}
 
 	R_CleanupSpan ();
@@ -1155,11 +1193,12 @@ PQ_FASTTEXT void R_GenerateSpansBackward_Array (void)
 
 	for (i = 0; i < aet_count; i++)
 	{
-		if (aet[i].surfs[0])
-			R_TrailingEdge_A (&surfaces[aet[i].surfs[0]], aet[i].u);
+		int idx = aet_order[i];
+		if (aet[idx].surfs[0])
+			R_TrailingEdge_A (&surfaces[aet[idx].surfs[0]], aet[idx].u);
 
-		if (aet[i].surfs[1])
-			R_LeadingEdgeBackwards_A (aet[i].surfs[1], aet[i].u);
+		if (aet[idx].surfs[1])
+			R_LeadingEdgeBackwards_A (aet[idx].surfs[1], aet[idx].u);
 	}
 
 	R_CleanupSpan ();
@@ -1182,7 +1221,7 @@ Each surface has a linked list of its visible spans
 PQ_FASTTEXT void R_ScanEdges (void)
 {
 	int		iv, bottom;
-	byte	basespans[MAXSPANS*sizeof(espan_t)+CACHE_SIZE];
+	static byte	basespans[MAXSPANS*sizeof(espan_t)+CACHE_SIZE];
 	espan_t	*basespan_p;
 	surf_t	*s;
 	int profiling = (int)pq_cycleprof.value;
@@ -1195,6 +1234,8 @@ PQ_FASTTEXT void R_ScanEdges (void)
 		pq_prof_se_draw_cycles = 0;
 		pq_prof_hw_spans_total = 0;
 		pq_prof_hw_spans_linked = 0;
+		pq_prof_aet_peak = 0;
+		pq_prof_aet_peak_scanline = 0;
 	}
 
 	basespan_p = (espan_t *)
@@ -1211,6 +1252,7 @@ PQ_FASTTEXT void R_ScanEdges (void)
 
 // clear array-based AET
 	aet_count = 0;
+	aet_alloc = 0;
 
 #if HW_SCANLINE_ACCEL
 // Frame setup: clear HW spanstate BRAM and load surface keys
@@ -1244,6 +1286,11 @@ PQ_FASTTEXT void R_ScanEdges (void)
 			if (profiling) prof_t = SYS_CYCLE_LO;
 			R_InsertNewEdges_Array (newedges[iv]);
 			if (profiling) pq_prof_se_insert_cycles += SYS_CYCLE_LO - prof_t;
+		}
+
+		if (profiling && aet_count > (int)pq_prof_aet_peak) {
+			pq_prof_aet_peak = aet_count;
+			pq_prof_aet_peak_scanline = iv;
 		}
 
 		if (profiling) prof_t = SYS_CYCLE_LO;
@@ -1304,4 +1351,7 @@ PQ_FASTTEXT void R_ScanEdges (void)
 		R_DrawCulledPolys ();
 	else
 		D_DrawSurfaces ();
+
+	if (profiling)
+		pq_prof_aet_total_edges = aet_alloc;
 }

@@ -293,7 +293,7 @@ Run consistancy and sentinal trahing checks
 void Hunk_Check (void)
 {
 	hunk_t	*h;
-	
+
 	for (h = (hunk_t *)hunk_base ; (byte *)h != hunk_base + hunk_low_used ; )
 	{
 		if (h->sentinal != HUNK_SENTINAL)

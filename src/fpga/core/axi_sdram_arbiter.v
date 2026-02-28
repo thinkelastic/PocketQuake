@@ -118,13 +118,7 @@ module axi_sdram_arbiter (
     output wire [3:0]  s_wstrb,
     output wire        s_wlast,
     input  wire        s_bvalid,
-    input  wire [1:0]  s_bresp,
-
-    // Performance monitoring outputs (active/grant taps)
-    output wire        perf_active,
-    output wire        perf_grant_span,
-    output wire        perf_grant_dma,
-    output wire        perf_grant_cpu
+    input  wire [1:0]  s_bresp
 );
 
 wire reset = ~reset_n;
@@ -200,12 +194,6 @@ wire grant_m3 = (grant == 2'd3);
 wire active_rd = (arb_state == ST_RD);
 wire active_wr = (arb_state == ST_WR);
 wire active = active_rd | active_wr;
-
-// Performance monitoring: combinational taps from existing signals
-assign perf_active     = active;
-assign perf_grant_span = active & grant_m0;
-assign perf_grant_dma  = active & grant_m1;
-assign perf_grant_cpu  = active & grant_m2;
 
 // Completion guards: on the cycle bvalid/rlast fires, the slave returns to
 // S_IDLE while the arbiter is still in ST_WR/ST_RD (registered transition).

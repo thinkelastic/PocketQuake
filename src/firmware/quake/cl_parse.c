@@ -285,21 +285,17 @@ void CL_ParseServerInfo (void)
 // now we try to load everything else until a cache allocation fails
 //
 
-	if (0) Sys_Printf ("CL_Parse: loading %d models\n", nummodels);
 	for (i=1 ; i<nummodels ; i++)
 	{
-		if (0) Sys_Printf ("CL_Parse: model %d/%d %s\n", i, nummodels-1, model_precache[i]);
 		cl.model_precache[i] = Mod_ForName (model_precache[i], false);
 		if (cl.model_precache[i] == NULL)
 		{
-			if (0) Sys_Printf ("CL_Parse: FAIL model %s\n", model_precache[i]);
 			Con_Printf("Model %s not found\n", model_precache[i]);
 			return;
 		}
 		CL_KeepaliveMessage ();
 	}
 
-	if (0) Sys_Printf ("CL_Parse: all models loaded OK\n");
 	S_BeginPrecaching ();
 	for (i=1 ; i<numsounds ; i++)
 	{
@@ -307,18 +303,16 @@ void CL_ParseServerInfo (void)
 		CL_KeepaliveMessage ();
 	}
 	S_EndPrecaching ();
-	if (0) Sys_Printf ("CL_Parse: sounds done\n");
 
 
 // local state
 	cl_entities[0].model = cl.worldmodel = cl.model_precache[1];
 
-	if (0) Sys_Printf ("CL_Parse: R_NewMap\n");
 	R_NewMap ();
 
 	Hunk_Check ();		// make sure nothing is hurt
-	
-	noclip_anglehack = false;		// noclip is turned off at start	
+
+	noclip_anglehack = false;		// noclip is turned off at start
 }
 
 
@@ -759,6 +753,15 @@ void CL_ParseServerMessage (void)
 		{
 			SHOWNET("END OF MESSAGE");
 			return;		// end of message
+		}
+
+		/* Brief delay between svc commands during signon.  Without this,
+		 * the message parser outruns some internal state when multiple
+		 * pak files are loaded, causing signon to stall at stage 2. */
+		if (cls.signon < SIGNONS) {
+			volatile unsigned int *cyc = (volatile unsigned int *)0x40000004;
+			unsigned int t = *cyc;
+			while (*cyc - t < 50000) {} /* ~500us @ 100MHz */
 		}
 
 	// if the high bit of the command byte is set, it is a fast update

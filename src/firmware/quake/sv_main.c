@@ -1123,7 +1123,7 @@ void SV_SpawnServer (char *server)
 	sv.state = ss_loading;
 	sv.paused = false;
 
-	sv.time = 1.0;
+	sv.time = 1.0f;
 
 	strcpy (sv.name, server);
 	sprintf (sv.modelname,"maps/%s.bsp", server);
@@ -1183,7 +1183,7 @@ void SV_SpawnServer (char *server)
 	sv.state = ss_active;
 
 // run two frames to allow everything to settle
-	host_frametime = 0.1;
+	host_frametime = 0.1f;
 	SV_Physics ();
 	SV_Physics ();
 

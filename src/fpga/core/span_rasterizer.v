@@ -26,6 +26,10 @@
 //   0x50: SURF_TEX_STEP   (RW) - Surface block: texture row stride (bytes)
 //   0x54: SURF_DEST_STEP  (RW) - Surface block: dest row stride (bytes)
 //   0x58: SURF_CONTROL    (W)  - Write blockdivshift to enqueue surface block
+//   0x90: ALIAS_PTEX      (RW) - Per-span: absolute SDRAM byte address of texture start
+//   0x94: ALIAS_STSTEP    (RW) - Sticky: a_ststepxwhole (signed, combined whole s+t step)
+//   0x98: ALIAS_SFRAC     (RW) - Sticky: {skinwidth[15:0], a_sstepxfrac[15:0]} packed
+//   0x9C: ALIAS_TFRAC     (RW) - Sticky: {16'd0, a_tstepxfrac[15:0]}
 //
 // Queueing:
 //   - One active command + 2-entry FIFO (depth=3 total).
@@ -69,12 +73,15 @@ module span_rasterizer (
     input  wire        m_axi_bvalid,
     input  wire [1:0]  m_axi_bresp,
 
-    // SRAM write interface (for z-span writes to external SRAM z-buffer)
+    // SRAM interface (z-buffer reads + writes to external SRAM)
     output reg        sram_wr,
+    output reg        sram_rd,
     output reg [21:0] sram_addr,
     output reg [31:0] sram_wdata,
     output reg [3:0]  sram_wstrb,
     input wire        sram_busy,
+    input wire [31:0] sram_rdata,
+    input wire        sram_rdata_valid,
 
     // Status
     output wire       active,
@@ -116,13 +123,20 @@ reg [31:0] surf_dest_step_reg;
 reg signed [31:0] persp_sdivz_reg;      // Per-span: current sdivz (8.24 signed)
 reg signed [31:0] persp_tdivz_reg;      // Per-span: current tdivz (8.24 signed)
 reg signed [31:0] persp_zi_reg;         // Per-span: current zi (8.24 signed)
-reg signed [31:0] persp_sdivz_step_reg; // Sticky: sdivz step per 16px (8.24)
-reg signed [31:0] persp_tdivz_step_reg; // Sticky: tdivz step per 16px (8.24)
-reg signed [31:0] persp_zi_step_reg;    // Sticky: zi step per 16px (8.24)
+reg signed [31:0] persp_sdivz_step_reg; // Sticky: sdivz step per 16px (Q16.16)
+reg signed [31:0] persp_tdivz_step_reg; // Sticky: tdivz step per 16px (Q16.16)
+reg signed [31:0] persp_zi_step_reg;    // Sticky: zi step per 16px (Q16.16)
 reg signed [31:0] persp_sadjust_reg;    // Sticky: s offset (16.16 signed)
 reg signed [31:0] persp_tadjust_reg;    // Sticky: t offset (16.16 signed)
 reg [31:0] persp_bbextents_reg;         // Sticky: s clamp upper bound (16.16)
 reg [31:0] persp_bbextentt_reg;         // Sticky: t clamp upper bound (16.16)
+
+// Alias mode staging registers (slots 36-39)
+reg [31:0] alias_ptex_reg;              // Per-span: absolute SDRAM byte addr of texture start
+reg signed [31:0] alias_ststep_reg;     // Sticky: a_ststepxwhole (combined whole s+t step)
+reg [15:0] alias_sfrac_step_reg;        // Sticky: a_sstepxfrac (fractional s step)
+reg [15:0] alias_skinwidth_reg;         // Sticky: skin texture width in pixels
+reg [15:0] alias_tfrac_step_reg;        // Sticky: a_tstepxfrac (fractional t step)
 
 // Active textured command state
 reg [31:0] cur_fb;
@@ -166,6 +180,11 @@ reg [3:0]  z_pending_strb;
 reg [21:0] z_pending_addr;
 reg        z_pending_valid;     // Pending write waiting for !sram_busy
 
+// Z-test cache (1-entry)
+reg [31:0] z_cache_data;
+reg [21:0] z_cache_addr;
+reg        z_cache_valid;
+
 // Surface block active state
 reg        surf_block_active;
 reg [31:0] surf_ll, surf_lr;
@@ -176,23 +195,36 @@ reg [2:0]  surf_blockshift;
 reg [31:0] surf_fb_base, surf_tex_base;
 
 // Perspective active state
-reg signed [31:0] persp_sdivz_cur;    // Accumulated sdivz
-reg signed [31:0] persp_tdivz_cur;    // Accumulated tdivz
-reg signed [31:0] persp_zi_cur;       // Accumulated zi
+reg signed [47:0] persp_sdivz_cur;    // Accumulated sdivz (48-bit: prevents overflow on long spans)
+reg signed [47:0] persp_tdivz_cur;    // Accumulated tdivz (48-bit)
+reg signed [47:0] persp_zi_cur;       // Accumulated zi (48-bit)
 reg [15:0] persp_total_remaining;     // Total pixels left in entire span
+reg        persp_more_chunks;         // Registered: persp_total_remaining > 0 (breaks critical path)
 reg signed [31:0] persp_s_saved;      // snext saved for next chunk's s
 reg signed [31:0] persp_t_saved;      // tnext saved for next chunk's t
 reg        persp_is_initial;          // First pass: compute initial s/t
 reg        persp_is_last_chunk;       // Last chunk: use inv_lut for step
-reg [4:0]  persp_lz;                  // CLZ result (5-bit)
+reg [5:0]  persp_lz;                  // CLZ result (6-bit for 48-bit zi)
 reg [15:0] persp_recip_raw;           // Captured from reciprocal LUT
 reg [4:0]  persp_chunk_count;         // Pixels in current chunk (1-16)
 reg        cur_persp_en;              // Perspective mode active for current command
+reg        cur_alias_en;             // Alias texture stepping mode active
+reg        cur_noz_en;               // NoZ mode: skip all z-test/z-write (viewmodel)
+reg        cur_sprite_en;            // Sprite mode: transparency + z-test (perspective spans)
+reg        sprite_ztest_done;        // Sprite: returned from z-test pass, write pixel now
+reg [31:0] cur_alias_ptex;           // Current alias texture pointer (SDRAM byte addr)
+reg signed [31:0] cur_alias_ststep;  // Whole s+t step per pixel
+reg [15:0] cur_alias_sfrac;          // Fractional s accumulator
+reg [15:0] cur_alias_sfrac_step;     // Fractional s step per pixel
+reg [15:0] cur_alias_tfrac;          // Fractional t accumulator
+reg [15:0] cur_alias_tfrac_step;     // Fractional t step per pixel
+reg [15:0] cur_alias_skinwidth;      // Skin texture width (for t carry)
 reg [3:0]  persp_adv_phase;          // DSP multiply phase for partial chunk advance
-reg signed [31:0] persp_sdivz_advance_r;  // Registered partial sdivz advance from DSP
-reg signed [31:0] persp_tdivz_advance_r;  // Registered partial tdivz advance from DSP
-reg [4:0]  persp_shift_amt;           // Pre-computed shift amount (30 - lz)
+reg signed [47:0] persp_sdivz_advance_r;  // Registered partial sdivz advance from DSP
+reg signed [47:0] persp_tdivz_advance_r;  // Registered partial tdivz advance from DSP
+reg [5:0]  persp_shift_amt;           // Pre-computed shift amount (46 - lz)
 reg signed [31:0] persp_shifted_r;   // Registered barrel shift output (product >>> shift_amt)
+reg        persp_pre_advanced;       // Pre-advanced divz/zi in STEP (skip ACCUM+ADVANCE)
 
 // Command FIFO (2-entry circular buffer, total depth = 3 with active command)
 reg        fifo_wr_ptr;
@@ -226,6 +258,14 @@ reg signed [31:0] fifo_persp_tdivz [0:1];
 reg signed [31:0] fifo_persp_zi    [0:1];
 reg        fifo_is_persp   [0:1];
 reg        fifo_combined_z [0:1];  // Combined z mode flag
+reg        fifo_alias_en   [0:1]; // Alias texture mode flag
+reg        fifo_noz_en     [0:1]; // NoZ mode flag
+reg        fifo_sprite_en  [0:1]; // Sprite mode flag
+reg [31:0] fifo_alias_ptex [0:1]; // Alias texture pointer (per-span)
+reg signed [31:0] fifo_alias_ststep [0:1]; // Alias whole s+t step (was sticky bug)
+reg [15:0] fifo_alias_sfrac_step [0:1];   // Alias fractional s step
+reg [15:0] fifo_alias_tfrac_step [0:1];   // Alias fractional t step
+reg [15:0] fifo_alias_skinwidth  [0:1];   // Alias skin texture width
 
 // Surface block FIFO fields
 reg [31:0] fifo_surf_light_tl [0:1];
@@ -383,10 +423,10 @@ endfunction
 // The two-stage pipeline breaks the critical path: DSP partial product carry chain
 // was being combined with downstream barrel shift + add + clamp (~13.7ns total).
 // With the extra register stage, each half fits within 10ns.
-reg signed [31:0] persp_mul_a;
+reg signed [47:0] persp_mul_a;          // 48-bit for widened accumulators
 reg signed [16:0] persp_mul_b;  // 17-bit signed (sign-extended unsigned recip/inv)
-reg signed [48:0] persp_mul_pipe;   // Stage 1: DSP output register
-(* dont_merge, preserve *) reg signed [48:0] persp_product;  // Stage 2: clean fabric register
+reg signed [64:0] persp_mul_pipe;   // Stage 1: DSP output register (48x17=65 bits)
+(* dont_merge, preserve *) reg signed [64:0] persp_product;  // Stage 2: clean fabric register
 
 always @(posedge clk) begin
     persp_mul_pipe <= persp_mul_a * persp_mul_b;
@@ -401,6 +441,34 @@ function [4:0] clz32;
         clz32 = 5'd31;
         for (k = 0; k <= 31; k = k + 1)
             if (val[k]) clz32 = 31 - k;
+    end
+endfunction
+
+// CLZ for 48-bit values (widened zi accumulator)
+function [5:0] clz48;
+    input [47:0] val;
+    integer k;
+    begin
+        clz48 = 6'd47;
+        for (k = 0; k <= 47; k = k + 1)
+            if (val[k]) clz48 = 47 - k;
+    end
+endfunction
+
+// Saturating arithmetic right shift: 65-bit -> 32-bit with +/-2^30 clamp.
+// Leaves headroom for subsequent sadjust/tadjust addition.
+function signed [31:0] sat_asr65;
+    input signed [64:0] val;
+    input [5:0] amt;
+    reg signed [64:0] shifted;
+    begin
+        shifted = val >>> amt;
+        if (shifted > 65'sh3FFFFFFF)
+            sat_asr65 = 32'sh3FFFFFFF;
+        else if (shifted < -65'sh40000000)
+            sat_asr65 = -32'sh40000000;
+        else
+            sat_asr65 = shifted[31:0];
     end
 endfunction
 
@@ -471,6 +539,8 @@ localparam ST_PERSP_INV2     = 6'd29;  // Read t inv product, launch chunk
 localparam ST_Z_FLUSH        = 6'd30;  // Wait for combined z pending write to flush
 localparam ST_PERSP_ADVANCE  = 6'd31;  // Compute & apply perspective chunk advance (multiply separated from clamp)
 localparam ST_PERSP_CLAMP2   = 6'd36;  // Add adjust + clamp s/t (from registered barrel shift)
+localparam ST_ZTEST_READ     = 6'd37;  // Z-test: check cache or issue SRAM read
+localparam ST_ZTEST_WAIT     = 6'd38;  // Z-test: wait for SRAM read response
 reg [5:0] state;
 reg       cmd_issued;      // Used for SRAM z-write path
 reg       seen_busy;       // Used for SRAM z-write path
@@ -521,6 +591,15 @@ wire next_t_over = !next_t[31] && (next_t[31:16] >= cur_tex_height);
 wire [31:0] next_s_clamped = cur_turb_en ? next_s : (next_s_over ? {cur_tex_width  - 16'd1, 16'hFFFF} : next_s);
 wire [31:0] next_t_clamped = cur_turb_en ? next_t : (next_t_over ? {cur_tex_height - 16'd1, 16'hFFFF} : next_t);
 
+// Alias texture stepping (ptex pointer with sfrac/tfrac fractional stepping)
+wire [16:0] alias_sfrac_sum = {1'b0, cur_alias_sfrac} + {1'b0, cur_alias_sfrac_step};
+wire        alias_sfrac_carry = alias_sfrac_sum[16];
+wire [16:0] alias_tfrac_sum = {1'b0, cur_alias_tfrac} + {1'b0, cur_alias_tfrac_step};
+wire        alias_tfrac_carry = alias_tfrac_sum[16];
+wire signed [31:0] alias_ptex_next = cur_alias_ptex + cur_alias_ststep
+    + {{31{1'b0}}, alias_sfrac_carry}
+    + (alias_tfrac_carry ? {{16{1'b0}}, cur_alias_skinwidth} : 32'd0);
+
 // ST_TEX_ADDR routing flag: 0->ST_PIXEL, 1->ST_TURB_FETCH
 reg tex_addr_for_turb;
 
@@ -544,12 +623,6 @@ wire [31:0] cache_hit_data =
 reg cache_hit_r;
 reg [31:0] cache_data_r;
 
-// Performance counters (read/write-clear via register mux)
-reg [31:0] perf_cache_hits;
-reg [31:0] perf_cache_misses;
-reg        perf_counter_pending;  // Deferred update flag (breaks cache compare → counter add path)
-reg [31:0] perf_pixels;
-
 integer ci;
 
 wire [7:0] cached_byte =
@@ -566,9 +639,12 @@ wire [7:0] tex_rdata_byte =
                               m_axi_rdata[31:24];
 
 // Colormap address computation (combinational, presented 1 cycle before ST_CMAP_WAIT)
-// cmap_byte_addr = {light[13:8], texel[7:0]} = 14-bit byte address into 16KB colormap
+// cmap_byte_addr = {light_index[5:0], texel[7:0]} = 14-bit byte address into 16KB colormap
+// Clamp light index to [0,63]: overflow (bit14+) → 63 (darkest), underflow (bit31) → 0 (brightest)
 wire [7:0] cmap_texel_byte = (state == ST_TEX_WAIT) ? tex_rdata_byte : cached_byte;
-wire [13:0] cmap_byte_addr_w = {cur_light[13:8], cmap_texel_byte};
+wire [5:0] light_clamped = cur_light[31] ? 6'd0 :
+                            (|cur_light[30:14]) ? 6'd63 : cur_light[13:8];
+wire [13:0] cmap_byte_addr_w = {light_clamped, cmap_texel_byte};
 assign cmap_addr = cmap_byte_addr_w[13:2];
 
 // Byte extraction from colormap BRAM read data (for ST_CMAP_WAIT)
@@ -587,11 +663,33 @@ wire [15:0] comb_z_val  = cur_izi_comb[31:16];
 wire        comb_z_half = cur_z_addr_comb[1];       // 0=low half, 1=high half
 wire [21:0] comb_z_waddr = {6'd0, cur_z_addr_comb[17:2]};  // SRAM word addr
 
+// Alias z-test enable (alias mode + combined z + not noz)
+wire alias_ztest_en = cur_alias_en && cur_combined_z && !cur_noz_en;
+
+// Sprite z-test enable (sprite mode + combined z + not noz)
+wire sprite_ztest_en = cur_sprite_en && cur_combined_z && !cur_noz_en;
+
+// Z-cache lookup (1-entry)
+wire z_cache_hit = z_cache_valid && (z_cache_addr == comb_z_waddr);
+wire [15:0] z_cache_half = comb_z_half ? z_cache_data[31:16] : z_cache_data[15:0];
+wire z_test_pass = (comb_z_val >= z_cache_half);
+
 // Combined z high-half write pre-computation (used in ST_PIXEL/ST_CMAP_WAIT)
 wire [31:0] comb_zw_data = z_pair_has_lo ? {comb_z_val, z_pair_lo}   : {comb_z_val, 16'd0};
 wire [3:0]  comb_zw_strb = z_pair_has_lo ? 4'b1111                   : 4'b1100;
 wire [21:0] comb_zw_addr = z_pair_has_lo ? z_pair_waddr              : comb_z_waddr;
-wire        comb_zw_direct = !sram_busy && !z_pending_valid;  // Can issue directly
+// Effective SRAM busy: includes our own sram_wr output to prevent a one-cycle
+// pipeline hazard.  When sram_wr=1, the SRAM controller will accept the command
+// THIS cycle and set word_busy=1, but that busy won't be visible to us until
+// NEXT cycle.  Without this, the opportunistic flush (sram_wr=1) and a direct
+// z-write can fire back-to-back, but the controller only processes the first —
+// the second write is silently lost → z-buffer holes → entities through walls.
+wire        sram_busy_eff = sram_busy | sram_wr | sram_rd;
+wire        comb_zw_direct = !sram_busy_eff && !z_pending_valid;
+// Stall pixel processing when a combined z-write would overwrite z_pending
+// before the SRAM controller has drained it.
+wire        comb_z_would_stall = cur_combined_z && !cur_noz_en && z_pending_valid && sram_busy_eff
+                                 && (alias_ztest_en || sprite_ztest_en || comb_z_half || remaining == 16'd1);
 wire [15:0] z_value0    = cur_izi[31:16];
 wire [31:0] z_izi_plus_step = cur_izi + cur_zistep;
 wire [15:0] z_value1    = z_izi_plus_step[31:16];
@@ -645,9 +743,9 @@ always @(*) begin
         6'd20: reg_rdata = surf_tex_step_reg;
         6'd21: reg_rdata = surf_dest_step_reg;
         6'd22: reg_rdata = 32'd0; // SURF_CONTROL write-only
-        6'd23: reg_rdata = perf_cache_hits;    // 0x4800005C
-        6'd24: reg_rdata = perf_cache_misses;  // 0x48000060
-        6'd25: reg_rdata = perf_pixels;        // 0x48000064
+        6'd23: reg_rdata = 32'd0;
+        6'd24: reg_rdata = 32'd0;
+        6'd25: reg_rdata = 32'd0;
         6'd26: reg_rdata = persp_sdivz_reg;
         6'd27: reg_rdata = persp_tdivz_reg;
         6'd28: reg_rdata = persp_zi_reg;
@@ -658,6 +756,10 @@ always @(*) begin
         6'd33: reg_rdata = persp_tadjust_reg;
         6'd34: reg_rdata = persp_bbextents_reg;
         6'd35: reg_rdata = persp_bbextentt_reg;
+        6'd36: reg_rdata = alias_ptex_reg;
+        6'd37: reg_rdata = alias_ststep_reg;
+        6'd38: reg_rdata = {alias_skinwidth_reg, alias_sfrac_step_reg};
+        6'd39: reg_rdata = {16'd0, alias_tfrac_step_reg};
         default: reg_rdata = 32'd0;
     endcase
 end
@@ -765,11 +867,6 @@ always @(posedge clk or negedge reset_n) begin
         cache_hit_r      <= 1'b0;
         cache_data_r     <= 32'd0;
 
-        perf_cache_hits  <= 32'd0;
-        perf_cache_misses <= 32'd0;
-        perf_pixels      <= 32'd0;
-        perf_counter_pending <= 1'b0;
-
         acc_data         <= 32'd0;
         acc_strb         <= 4'b0000;
         acc_addr         <= 24'd0;
@@ -784,24 +881,40 @@ always @(posedge clk or negedge reset_n) begin
         persp_tadjust_reg    <= 32'sd0;
         persp_bbextents_reg  <= 32'd0;
         persp_bbextentt_reg  <= 32'd0;
-        persp_sdivz_cur      <= 32'sd0;
-        persp_tdivz_cur      <= 32'sd0;
-        persp_zi_cur         <= 32'sd0;
+        alias_ptex_reg       <= 32'd0;
+        alias_ststep_reg     <= 32'sd0;
+        alias_sfrac_step_reg <= 16'd0;
+        alias_skinwidth_reg  <= 16'd0;
+        alias_tfrac_step_reg <= 16'd0;
+        cur_alias_en         <= 1'b0;
+        cur_noz_en           <= 1'b0;
+        cur_alias_ptex       <= 32'd0;
+        cur_alias_ststep     <= 32'sd0;
+        cur_alias_sfrac      <= 16'd0;
+        cur_alias_sfrac_step <= 16'd0;
+        cur_alias_tfrac      <= 16'd0;
+        cur_alias_tfrac_step <= 16'd0;
+        cur_alias_skinwidth  <= 16'd0;
+        persp_sdivz_cur      <= 48'sd0;
+        persp_tdivz_cur      <= 48'sd0;
+        persp_zi_cur         <= 48'sd0;
         persp_total_remaining <= 16'd0;
+        persp_more_chunks    <= 1'b0;
         persp_s_saved        <= 32'sd0;
         persp_t_saved        <= 32'sd0;
         persp_is_initial     <= 1'b0;
         persp_is_last_chunk  <= 1'b0;
-        persp_lz             <= 5'd0;
+        persp_lz             <= 6'd0;
         persp_recip_raw      <= 16'd0;
         persp_chunk_count    <= 5'd0;
         cur_persp_en         <= 1'b0;
         persp_adv_phase      <= 4'd0;
-        persp_sdivz_advance_r <= 32'sd0;
-        persp_tdivz_advance_r <= 32'sd0;
-        persp_shift_amt      <= 5'd0;
+        persp_sdivz_advance_r <= 48'sd0;
+        persp_tdivz_advance_r <= 48'sd0;
+        persp_shift_amt      <= 6'd0;
         persp_shifted_r      <= 32'sd0;
-        persp_mul_a          <= 32'sd0;
+        persp_pre_advanced   <= 1'b0;
+        persp_mul_a          <= 48'sd0;
         persp_mul_b          <= 17'sd0;
         // persp_mul_pipe and persp_product driven by standalone always block (no reset needed)
         recip_lut_addr       <= 10'd0;
@@ -821,9 +934,15 @@ always @(posedge clk or negedge reset_n) begin
         m_axi_wstrb      <= 4'b0;
 
         sram_wr          <= 1'b0;
+        sram_rd          <= 1'b0;
         sram_addr        <= 22'd0;
         sram_wdata       <= 32'd0;
         sram_wstrb       <= 4'b0;
+        z_cache_valid    <= 1'b0;
+        z_cache_data     <= 32'd0;
+        z_cache_addr     <= 22'd0;
+        cur_sprite_en    <= 1'b0;
+        sprite_ztest_done <= 1'b0;
     end else begin : main_logic
         // Blocking flags for simultaneous FIFO enqueue/dequeue handling
         reg did_enqueue, did_dequeue;
@@ -836,10 +955,14 @@ always @(posedge clk or negedge reset_n) begin
         if (m_axi_awvalid && m_axi_awready) m_axi_awvalid <= 1'b0;
         if (m_axi_wvalid && m_axi_wready)   m_axi_wvalid  <= 1'b0;
         sram_wr <= 1'b0;
+        sram_rd <= 1'b0;
 
         // Opportunistic combined z-pending flush (runs every cycle, zero pipeline stalls)
         // Only fires when NOT in standalone z-span mode (ST_Z_WRITE/ST_Z_WAIT use sram directly)
-        if (z_pending_valid && !sram_busy && state != ST_Z_WRITE && state != ST_Z_WAIT) begin
+        // Uses sram_busy_eff (not sram_busy) to avoid back-to-back write hazard
+        if (z_pending_valid && !sram_busy_eff
+            && state != ST_Z_WRITE && state != ST_Z_WAIT
+            && state != ST_ZTEST_READ && state != ST_ZTEST_WAIT) begin
             sram_wr         <= 1'b1;
             sram_addr       <= z_pending_addr;
             sram_wdata      <= z_pending_data;
@@ -879,26 +1002,20 @@ always @(posedge clk or negedge reset_n) begin
         end
 
         // Free-running registered address (multiply + s_int_eff + cur_tex_addr, latched in ST_TEX_ADDR)
-        tex_byte_addr_r <= tex_byte_addr_comb;
+        // Alias mode: use absolute ptex pointer instead of computed s/t address
+        tex_byte_addr_r <= cur_alias_en ? cur_alias_ptex : tex_byte_addr_comb;
 
         // Free-running registered subtraction (breaks state mux → subtraction critical path)
         surf_row_diff_r <= $signed(surf_ll) - $signed(surf_lr);
-
-        // Deferred performance counter update (breaks cache tag compare → 32-bit counter add path)
-        // perf_counter_pending is set in ST_TEX_CACHE; cache_hit_r is already registered there.
-        if (perf_counter_pending) begin
-            if (cache_hit_r)
-                perf_cache_hits <= perf_cache_hits + 32'd1;
-            else
-                perf_cache_misses <= perf_cache_misses + 32'd1;
-            perf_counter_pending <= 1'b0;
-        end
 
         // Register writes are always accepted.
         if (reg_wr) begin
             case (reg_addr)
                 6'd0: fb_addr_reg   <= reg_wdata;
-                6'd1: tex_addr_reg  <= reg_wdata;
+                6'd1: begin
+                    tex_addr_reg  <= reg_wdata;
+                    tex_cache_valid <= 16'b0;  // Invalidate texture cache on new texture base
+                end
                 6'd2: begin tex_width_reg <= reg_wdata[15:0]; tex_height_reg <= reg_wdata[31:16]; end
                 6'd3: s_reg         <= reg_wdata;
                 6'd4: t_reg         <= reg_wdata;
@@ -924,10 +1041,25 @@ always @(posedge clk or negedge reset_n) begin
                             cur_turb_en   <= reg_wdata[17];
                             cur_persp_en  <= reg_wdata[18];
                             cur_combined_z <= reg_wdata[19];
+                            cur_alias_en  <= reg_wdata[20];
+                            cur_noz_en    <= reg_wdata[21];
+                            cur_sprite_en <= reg_wdata[22];
+                            sprite_ztest_done <= 1'b0;
                             remaining     <= reg_wdata[15:0];
                             cmd_issued    <= 1'b0;
                             seen_busy     <= 1'b0;
                             tex_addr_for_turb <= 1'b0;
+                            if (reg_wdata[20]) begin
+                                // Alias mode: load ptex pointer and stepping params
+                                cur_alias_ptex       <= alias_ptex_reg;
+                                cur_alias_ststep     <= alias_ststep_reg;
+                                cur_alias_sfrac      <= s_reg[15:0];
+                                cur_alias_sfrac_step <= alias_sfrac_step_reg;
+                                cur_alias_tfrac      <= t_reg[15:0];
+                                cur_alias_tfrac_step <= alias_tfrac_step_reg;
+                                cur_alias_skinwidth  <= alias_skinwidth_reg;
+                                cur_cmap_en          <= 1'b1;  // alias always uses colormap
+                            end
                             if (reg_wdata[19]) begin
                                 cur_z_addr_comb <= z_addr_reg;
                                 cur_izi_comb    <= zi_reg;
@@ -941,8 +1073,16 @@ always @(posedge clk or negedge reset_n) begin
                                 persp_tdivz_cur <= persp_tdivz_reg;
                                 persp_zi_cur    <= persp_zi_reg;
                                 persp_total_remaining <= reg_wdata[15:0];
+                                persp_more_chunks <= |reg_wdata[15:0];
                                 persp_is_initial <= 1'b1;
+                                persp_pre_advanced <= 1'b0;
+                                if (reg_wdata[22]) begin
+                                    z_cache_valid <= 1'b0;
+                                end
                                 state <= ST_PERSP_INIT;
+                            end else if (reg_wdata[20] && reg_wdata[19] && !reg_wdata[21]) begin
+                                z_cache_valid <= 1'b0;
+                                state <= ST_ZTEST_READ;
                             end else begin
                                 state <= ST_TEX_ADDR;
                             end
@@ -966,10 +1106,20 @@ always @(posedge clk or negedge reset_n) begin
                             fifo_persp_tdivz[fifo_wr_ptr] <= persp_tdivz_reg;
                             fifo_persp_zi[fifo_wr_ptr]    <= persp_zi_reg;
                             fifo_combined_z[fifo_wr_ptr]  <= reg_wdata[19];
+                            fifo_alias_en[fifo_wr_ptr]   <= reg_wdata[20];
+                            fifo_noz_en[fifo_wr_ptr]     <= reg_wdata[21];
+                            fifo_sprite_en[fifo_wr_ptr]  <= reg_wdata[22];
                             if (reg_wdata[19]) begin
                                 fifo_zaddr[fifo_wr_ptr]   <= z_addr_reg;
                                 fifo_izi[fifo_wr_ptr]     <= zi_reg;
                                 fifo_zistep[fifo_wr_ptr]  <= zistep_reg;
+                            end
+                            if (reg_wdata[20]) begin
+                                fifo_alias_ptex[fifo_wr_ptr]       <= alias_ptex_reg;
+                                fifo_alias_ststep[fifo_wr_ptr]     <= alias_ststep_reg;
+                                fifo_alias_sfrac_step[fifo_wr_ptr] <= alias_sfrac_step_reg;
+                                fifo_alias_tfrac_step[fifo_wr_ptr] <= alias_tfrac_step_reg;
+                                fifo_alias_skinwidth[fifo_wr_ptr]  <= alias_skinwidth_reg;
                             end
                             fifo_wr_ptr <= ~fifo_wr_ptr;
                             did_enqueue = 1'b1;
@@ -982,13 +1132,6 @@ always @(posedge clk or negedge reset_n) begin
                 6'd13: light_reg    <= reg_wdata;
                 6'd14: lightstep_reg <= reg_wdata;
                 6'd15: turb_phase_reg <= reg_wdata[6:0];
-
-                6'd23: begin
-                    // Write-clear all perf counters
-                    perf_cache_hits  <= 32'd0;
-                    perf_cache_misses <= 32'd0;
-                    perf_pixels      <= 32'd0;
-                end
 
                 6'd9:  z_addr_reg   <= reg_wdata;
                 6'd10: zi_reg       <= reg_wdata;
@@ -1074,6 +1217,11 @@ always @(posedge clk or negedge reset_n) begin
                 6'd34: persp_bbextents_reg  <= reg_wdata;
                 6'd35: persp_bbextentt_reg  <= reg_wdata;
 
+                6'd36: alias_ptex_reg       <= reg_wdata;
+                6'd37: alias_ststep_reg     <= reg_wdata;
+                6'd38: begin alias_skinwidth_reg <= reg_wdata[31:16]; alias_sfrac_step_reg <= reg_wdata[15:0]; end
+                6'd39: alias_tfrac_step_reg <= reg_wdata[15:0];
+
                 default: ;
             endcase
         end
@@ -1121,6 +1269,10 @@ always @(posedge clk or negedge reset_n) begin
                         cur_turb_en   <= fifo_turb_en[fifo_rd_ptr];
                         cur_persp_en  <= fifo_is_persp[fifo_rd_ptr];
                         cur_combined_z <= fifo_combined_z[fifo_rd_ptr];
+                        cur_alias_en  <= fifo_alias_en[fifo_rd_ptr];
+                        cur_noz_en    <= fifo_noz_en[fifo_rd_ptr];
+                        cur_sprite_en <= fifo_sprite_en[fifo_rd_ptr];
+                        sprite_ztest_done <= 1'b0;
                         remaining     <= fifo_count_f[fifo_rd_ptr];
                         cmd_issued    <= 1'b0;
                         seen_busy     <= 1'b0;
@@ -1132,13 +1284,31 @@ always @(posedge clk or negedge reset_n) begin
                             z_pair_has_lo   <= 1'b0;
                             z_pending_valid <= 1'b0;
                         end
+                        if (fifo_alias_en[fifo_rd_ptr]) begin
+                            cur_alias_ptex       <= fifo_alias_ptex[fifo_rd_ptr];
+                            cur_alias_ststep     <= fifo_alias_ststep[fifo_rd_ptr];
+                            cur_alias_sfrac      <= fifo_s[fifo_rd_ptr][15:0];
+                            cur_alias_sfrac_step <= fifo_alias_sfrac_step[fifo_rd_ptr];
+                            cur_alias_tfrac      <= fifo_t[fifo_rd_ptr][15:0];
+                            cur_alias_tfrac_step <= fifo_alias_tfrac_step[fifo_rd_ptr];
+                            cur_alias_skinwidth  <= fifo_alias_skinwidth[fifo_rd_ptr];
+                            cur_cmap_en          <= 1'b1;
+                        end
                         if (fifo_is_persp[fifo_rd_ptr]) begin
                             persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
                             persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
                             persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
                             persp_total_remaining <= fifo_count_f[fifo_rd_ptr];
+                            persp_more_chunks <= 1'b1;
                             persp_is_initial <= 1'b1;
+                            persp_pre_advanced <= 1'b0;
+                            if (fifo_sprite_en[fifo_rd_ptr]) begin
+                                z_cache_valid <= 1'b0;
+                            end
                             state <= ST_PERSP_INIT;
+                        end else if (fifo_alias_en[fifo_rd_ptr] && fifo_combined_z[fifo_rd_ptr] && !fifo_noz_en[fifo_rd_ptr]) begin
+                            z_cache_valid <= 1'b0;
+                            state <= ST_ZTEST_READ;
                         end else begin
                             state <= ST_TEX_ADDR;
                         end
@@ -1177,11 +1347,6 @@ always @(posedge clk or negedge reset_n) begin
                 // Register cache hit/data for ST_PIXEL / ST_TURB_FETCH.
                 cache_hit_r  <= cache_hit_comb;
                 cache_data_r <= cache_hit_data;
-                // Performance counters: cache hit/miss deferred to next cycle
-                // (breaks cache tag compare → 32-bit counter add critical path)
-                perf_counter_pending <= 1'b1;
-                if (!tex_addr_for_turb)
-                    perf_pixels <= perf_pixels + 32'd1;
                 state <= tex_addr_for_turb ? ST_TURB_FETCH : ST_PIXEL;
             end
 
@@ -1196,7 +1361,40 @@ always @(posedge clk or negedge reset_n) begin
                         // Cache hit + colormap: present cmap address, wait for BRAM
                         cmap_byte_sel_r <= cached_byte[1:0];
                         state <= ST_CMAP_WAIT;
-                    end else begin
+                    end else if (sprite_ztest_en && !sprite_ztest_done && cached_byte == 8'd255) begin
+                        // Sprite transparent pixel: skip entirely (no z-test, no write)
+                        cur_s           <= next_s_clamped;
+                        cur_t           <= next_t_clamped;
+                        cur_izi_comb    <= cur_izi_comb + cur_zistep;
+                        cur_z_addr_comb <= cur_z_addr_comb + 32'd2;
+                        cur_fb          <= cur_fb + 32'd1;
+                        remaining       <= remaining - 16'd1;
+                        if (fb_byte_sel == 2'd3 || remaining == 16'd1) begin
+                            if (acc_strb != 4'b0000) begin
+                                cmd_issued <= 1'b0;
+                                seen_busy  <= 1'b0;
+                                state      <= ST_FB_WRITE;
+                            end else if (remaining == 16'd1) begin
+                                if (cur_persp_en && persp_more_chunks) begin
+                                    cur_s <= persp_s_saved;
+                                    cur_t <= persp_t_saved;
+                                    state <= persp_pre_advanced ? ST_PERSP_INIT : ST_PERSP_ACCUM;
+                                end else begin
+                                    state <= z_pending_valid ? ST_Z_FLUSH : ST_IDLE;
+                                end
+                            end else begin
+                                tex_addr_for_turb <= 1'b0;
+                                state <= ST_TEX_ADDR;
+                            end
+                        end else begin
+                            tex_addr_for_turb <= 1'b0;
+                            state <= ST_TEX_ADDR;
+                        end
+                    end else if (sprite_ztest_en && !sprite_ztest_done) begin
+                        // Sprite opaque pixel: need z-test before writing
+                        sprite_ztest_done <= 1'b1;
+                        state <= ST_ZTEST_READ;
+                    end else if (!comb_z_would_stall) begin
                         // Cache hit, no colormap: accumulate directly (1 cycle per pixel)
                         case (fb_byte_sel)
                             2'd0: acc_data[7:0]   <= cached_byte;
@@ -1208,19 +1406,40 @@ always @(posedge clk or negedge reset_n) begin
                         if (acc_strb == 4'b0000)
                             acc_addr <= fb_word_addr;
                         cur_fb    <= cur_fb + 32'd1;
-                        cur_s     <= next_s_clamped;
-                        cur_t     <= next_t_clamped;
+                        if (cur_alias_en) begin
+                            cur_alias_ptex  <= alias_ptex_next;
+                            cur_alias_sfrac <= alias_sfrac_sum[15:0];
+                            cur_alias_tfrac <= alias_tfrac_sum[15:0];
+                        end else begin
+                            cur_s <= next_s_clamped;
+                            cur_t <= next_t_clamped;
+                        end
                         remaining <= remaining - 16'd1;
+                        if (sprite_ztest_done)
+                            sprite_ztest_done <= 1'b0;
 
                         // Combined z accumulation (fire-and-forget SRAM writes)
-                        if (cur_combined_z) begin
-                            if (!comb_z_half) begin
+                        if (cur_combined_z && !cur_noz_en) begin
+                            if (sprite_ztest_en) begin
+                                // Sprite: individual z-write (no pairing, z-test gaps)
+                                if (comb_zw_direct) begin
+                                    sram_wr    <= 1'b1;
+                                    sram_addr  <= comb_z_waddr;
+                                    sram_wdata <= comb_z_half ? {comb_z_val, 16'd0} : {16'd0, comb_z_val};
+                                    sram_wstrb <= comb_z_half ? 4'b1100 : 4'b0011;
+                                end else begin
+                                    z_pending_data  <= comb_z_half ? {comb_z_val, 16'd0} : {16'd0, comb_z_val};
+                                    z_pending_strb  <= comb_z_half ? 4'b1100 : 4'b0011;
+                                    z_pending_addr  <= comb_z_waddr;
+                                    z_pending_valid <= 1'b1;
+                                end
+                            end else if (!comb_z_half) begin
                                 // Low half: accumulate into z_pair
                                 z_pair_lo     <= comb_z_val;
                                 z_pair_waddr  <= comb_z_waddr;
                                 z_pair_has_lo <= 1'b1;
                                 // Last pixel of entire span with dangling low half → flush
-                                if (remaining == 16'd1 && (!cur_persp_en || persp_total_remaining == 16'd0)) begin
+                                if (remaining == 16'd1 && (!cur_persp_en || !persp_more_chunks)) begin
                                     z_pending_data  <= {16'd0, comb_z_val};
                                     z_pending_strb  <= 4'b0011;
                                     z_pending_addr  <= comb_z_waddr;
@@ -1255,6 +1474,7 @@ always @(posedge clk or negedge reset_n) begin
                             state <= ST_TEX_ADDR;
                         end
                     end
+                    // else: comb_z_would_stall — stay in ST_PIXEL until pending drains
                 end else begin
                     state <= ST_TEX_READ;
                 end
@@ -1307,6 +1527,7 @@ always @(posedge clk or negedge reset_n) begin
             end
 
             ST_CMAP_WAIT: begin
+                if (!comb_z_would_stall) begin
                 // Colormap BRAM data ready (1 cycle after address presented)
                 case (fb_byte_sel)
                     2'd0: acc_data[7:0]   <= cmap_result_byte;
@@ -1318,38 +1539,59 @@ always @(posedge clk or negedge reset_n) begin
                 if (acc_strb == 4'b0000)
                     acc_addr <= fb_word_addr;
                 cur_fb    <= cur_fb + 32'd1;
-                cur_s     <= next_s_clamped;
-                cur_t     <= next_t_clamped;
+                if (cur_alias_en) begin
+                    cur_alias_ptex  <= alias_ptex_next;
+                    cur_alias_sfrac <= alias_sfrac_sum[15:0];
+                    cur_alias_tfrac <= alias_tfrac_sum[15:0];
+                end else begin
+                    cur_s <= next_s_clamped;
+                    cur_t <= next_t_clamped;
+                end
                 cur_light <= cur_light + cur_lightstep;
                 remaining <= remaining - 16'd1;
 
                 // Combined z accumulation (fire-and-forget SRAM writes)
-                if (cur_combined_z) begin
-                    if (!comb_z_half) begin
-                        z_pair_lo     <= comb_z_val;
-                        z_pair_waddr  <= comb_z_waddr;
-                        z_pair_has_lo <= 1'b1;
-                        if (remaining == 16'd1 && (!cur_persp_en || persp_total_remaining == 16'd0)) begin
-                            z_pending_data  <= {16'd0, comb_z_val};
-                            z_pending_strb  <= 4'b0011;
-                            z_pending_addr  <= comb_z_waddr;
-                            z_pending_valid <= 1'b1;
-                            z_pair_has_lo   <= 1'b0;
-                        end
-                    end else begin
-                        // High half: complete pair or odd-start single
+                if (cur_combined_z && !cur_noz_en) begin
+                    if (alias_ztest_en) begin
+                        // Individual z-write (no pairing, handles z-test gaps)
                         if (comb_zw_direct) begin
                             sram_wr    <= 1'b1;
-                            sram_addr  <= comb_zw_addr;
-                            sram_wdata <= comb_zw_data;
-                            sram_wstrb <= comb_zw_strb;
+                            sram_addr  <= comb_z_waddr;
+                            sram_wdata <= comb_z_half ? {comb_z_val, 16'd0} : {16'd0, comb_z_val};
+                            sram_wstrb <= comb_z_half ? 4'b1100 : 4'b0011;
                         end else begin
-                            z_pending_data  <= comb_zw_data;
-                            z_pending_strb  <= comb_zw_strb;
-                            z_pending_addr  <= comb_zw_addr;
+                            z_pending_data  <= comb_z_half ? {comb_z_val, 16'd0} : {16'd0, comb_z_val};
+                            z_pending_strb  <= comb_z_half ? 4'b1100 : 4'b0011;
+                            z_pending_addr  <= comb_z_waddr;
                             z_pending_valid <= 1'b1;
                         end
-                        z_pair_has_lo <= 1'b0;
+                    end else begin
+                        if (!comb_z_half) begin
+                            z_pair_lo     <= comb_z_val;
+                            z_pair_waddr  <= comb_z_waddr;
+                            z_pair_has_lo <= 1'b1;
+                            if (remaining == 16'd1 && (!cur_persp_en || !persp_more_chunks)) begin
+                                z_pending_data  <= {16'd0, comb_z_val};
+                                z_pending_strb  <= 4'b0011;
+                                z_pending_addr  <= comb_z_waddr;
+                                z_pending_valid <= 1'b1;
+                                z_pair_has_lo   <= 1'b0;
+                            end
+                        end else begin
+                            // High half: complete pair or odd-start single
+                            if (comb_zw_direct) begin
+                                sram_wr    <= 1'b1;
+                                sram_addr  <= comb_zw_addr;
+                                sram_wdata <= comb_zw_data;
+                                sram_wstrb <= comb_zw_strb;
+                            end else begin
+                                z_pending_data  <= comb_zw_data;
+                                z_pending_strb  <= comb_zw_strb;
+                                z_pending_addr  <= comb_zw_addr;
+                                z_pending_valid <= 1'b1;
+                            end
+                            z_pair_has_lo <= 1'b0;
+                        end
                     end
                     cur_izi_comb    <= cur_izi_comb + cur_zistep;
                     cur_z_addr_comb <= cur_z_addr_comb + 32'd2;
@@ -1361,8 +1603,9 @@ always @(posedge clk or negedge reset_n) begin
                     state      <= ST_FB_WRITE;
                 end else begin
                     tex_addr_for_turb <= 1'b0;
-                    state <= ST_TEX_ADDR;
+                    state <= alias_ztest_en ? ST_ZTEST_READ : ST_TEX_ADDR;
                 end
+                end // !comb_z_would_stall (else: stay in ST_CMAP_WAIT)
             end
 
             ST_TURB_CALC: begin
@@ -1383,7 +1626,7 @@ always @(posedge clk or negedge reset_n) begin
                     if (cur_cmap_en) begin
                         cmap_byte_sel_r <= cached_byte[1:0];
                         state <= ST_CMAP_WAIT;
-                    end else begin
+                    end else if (!comb_z_would_stall) begin
                         case (fb_byte_sel)
                             2'd0: acc_data[7:0]   <= cached_byte;
                             2'd1: acc_data[15:8]  <= cached_byte;
@@ -1399,7 +1642,7 @@ always @(posedge clk or negedge reset_n) begin
                         remaining <= remaining - 16'd1;
 
                         // Combined z accumulation (fire-and-forget SRAM writes)
-                        if (cur_combined_z) begin
+                        if (cur_combined_z && !cur_noz_en) begin
                             if (!comb_z_half) begin
                                 z_pair_lo     <= comb_z_val;
                                 z_pair_waddr  <= comb_z_waddr;
@@ -1438,6 +1681,7 @@ always @(posedge clk or negedge reset_n) begin
                             state <= ST_TEX_ADDR;
                         end
                     end
+                    // else: comb_z_would_stall — stay in ST_TURB_FETCH
                 end else begin
                     state <= ST_TEX_READ;
                 end
@@ -1453,13 +1697,13 @@ always @(posedge clk or negedge reset_n) begin
                         // Write-behind: continue pixel processing while SDRAM handles write
                         acc_strb          <= 4'b0000;
                         tex_addr_for_turb <= 1'b0;
-                        state             <= ST_TEX_ADDR;
-                    end else if (cur_persp_en && persp_total_remaining > 16'd0) begin
+                        state             <= alias_ztest_en ? ST_ZTEST_READ : ST_TEX_ADDR;
+                    end else if (cur_persp_en && persp_more_chunks) begin
                         // Perspective chunk done, more chunks remain
                         acc_strb  <= 4'b0000;
                         cur_s     <= persp_s_saved;
                         cur_t     <= persp_t_saved;
-                        state     <= ST_PERSP_ACCUM;
+                        state     <= persp_pre_advanced ? ST_PERSP_INIT : ST_PERSP_ACCUM;
                     end else begin
                         // Last write of span: need ST_FB_WAIT for B response + dequeue
                         state       <= ST_FB_WAIT;
@@ -1479,13 +1723,13 @@ always @(posedge clk or negedge reset_n) begin
                 if (m_axi_bvalid) begin
                     acc_strb   <= 4'b0000;
 
-                    if (remaining == 16'd0 && cur_persp_en && persp_total_remaining > 16'd0) begin
+                    if (remaining == 16'd0 && cur_persp_en && persp_more_chunks) begin
                         // Perspective chunk done, more chunks remain
                         cur_s <= persp_s_saved;
                         cur_t <= persp_t_saved;
-                        state <= ST_PERSP_ACCUM;
+                        state <= persp_pre_advanced ? ST_PERSP_INIT : ST_PERSP_ACCUM;
                     end else if (remaining == 16'd0) begin
-                        if (cur_combined_z && z_pending_valid) begin
+                        if (cur_combined_z && !cur_noz_en && z_pending_valid) begin
                             // Combined z has pending SRAM write — wait for flush
                             state <= ST_Z_FLUSH;
                         end else if (surf_block_active && surf_rows_remaining > 5'd0) begin
@@ -1530,6 +1774,10 @@ always @(posedge clk or negedge reset_n) begin
                                     cur_turb_en   <= fifo_turb_en[fifo_rd_ptr];
                                     cur_persp_en  <= fifo_is_persp[fifo_rd_ptr];
                                     cur_combined_z <= fifo_combined_z[fifo_rd_ptr];
+                                    cur_alias_en  <= fifo_alias_en[fifo_rd_ptr];
+                                    cur_noz_en    <= fifo_noz_en[fifo_rd_ptr];
+                                    cur_sprite_en <= fifo_sprite_en[fifo_rd_ptr];
+                                    sprite_ztest_done <= 1'b0;
                                     remaining     <= fifo_count_f[fifo_rd_ptr];
                                     seen_busy     <= 1'b0;
                                     tex_addr_for_turb <= 1'b0;
@@ -1540,13 +1788,31 @@ always @(posedge clk or negedge reset_n) begin
                                         z_pair_has_lo   <= 1'b0;
                                         z_pending_valid <= 1'b0;
                                     end
+                                    if (fifo_alias_en[fifo_rd_ptr]) begin
+                                        cur_alias_ptex       <= fifo_alias_ptex[fifo_rd_ptr];
+                                        cur_alias_ststep     <= fifo_alias_ststep[fifo_rd_ptr];
+                                        cur_alias_sfrac      <= fifo_s[fifo_rd_ptr][15:0];
+                                        cur_alias_sfrac_step <= fifo_alias_sfrac_step[fifo_rd_ptr];
+                                        cur_alias_tfrac      <= fifo_t[fifo_rd_ptr][15:0];
+                                        cur_alias_tfrac_step <= fifo_alias_tfrac_step[fifo_rd_ptr];
+                                        cur_alias_skinwidth  <= fifo_alias_skinwidth[fifo_rd_ptr];
+                                        cur_cmap_en          <= 1'b1;
+                                    end
                                     if (fifo_is_persp[fifo_rd_ptr]) begin
                                         persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
                                         persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
                                         persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
                                         persp_total_remaining <= fifo_count_f[fifo_rd_ptr];
+                                        persp_more_chunks <= 1'b1;
                                         persp_is_initial <= 1'b1;
+                                        persp_pre_advanced <= 1'b0;
+                                        if (fifo_sprite_en[fifo_rd_ptr]) begin
+                                            z_cache_valid <= 1'b0;
+                                        end
                                         state <= ST_PERSP_INIT;
+                                    end else if (fifo_alias_en[fifo_rd_ptr] && fifo_combined_z[fifo_rd_ptr] && !fifo_noz_en[fifo_rd_ptr]) begin
+                                        z_cache_valid <= 1'b0;
+                                        state <= ST_ZTEST_READ;
                                     end else begin
                                         state <= ST_TEX_ADDR;
                                     end
@@ -1559,13 +1825,13 @@ always @(posedge clk or negedge reset_n) begin
                         end
                     end else begin
                         tex_addr_for_turb <= 1'b0;
-                        state <= ST_TEX_ADDR;
+                        state <= alias_ztest_en ? ST_ZTEST_READ : ST_TEX_ADDR;
                     end
                 end
             end
 
             ST_Z_WRITE: begin
-                if (!sram_busy) begin
+                if (!sram_busy_eff) begin
                     sram_wr    <= 1'b1;
                     sram_addr  <= {6'd0, cur_zaddr[17:2]};  // SRAM word addr (256KB range)
                     if (z_can_pair) begin
@@ -1634,6 +1900,10 @@ always @(posedge clk or negedge reset_n) begin
                                     cur_turb_en   <= fifo_turb_en[fifo_rd_ptr];
                                     cur_persp_en  <= fifo_is_persp[fifo_rd_ptr];
                                     cur_combined_z <= fifo_combined_z[fifo_rd_ptr];
+                                    cur_alias_en  <= fifo_alias_en[fifo_rd_ptr];
+                                    cur_noz_en    <= fifo_noz_en[fifo_rd_ptr];
+                                    cur_sprite_en <= fifo_sprite_en[fifo_rd_ptr];
+                                    sprite_ztest_done <= 1'b0;
                                     remaining     <= fifo_count_f[fifo_rd_ptr];
                                     seen_busy     <= 1'b0;
                                     tex_addr_for_turb <= 1'b0;
@@ -1644,13 +1914,31 @@ always @(posedge clk or negedge reset_n) begin
                                         z_pair_has_lo   <= 1'b0;
                                         z_pending_valid <= 1'b0;
                                     end
+                                    if (fifo_alias_en[fifo_rd_ptr]) begin
+                                        cur_alias_ptex       <= fifo_alias_ptex[fifo_rd_ptr];
+                                        cur_alias_ststep     <= fifo_alias_ststep[fifo_rd_ptr];
+                                        cur_alias_sfrac      <= fifo_s[fifo_rd_ptr][15:0];
+                                        cur_alias_sfrac_step <= fifo_alias_sfrac_step[fifo_rd_ptr];
+                                        cur_alias_tfrac      <= fifo_t[fifo_rd_ptr][15:0];
+                                        cur_alias_tfrac_step <= fifo_alias_tfrac_step[fifo_rd_ptr];
+                                        cur_alias_skinwidth  <= fifo_alias_skinwidth[fifo_rd_ptr];
+                                        cur_cmap_en          <= 1'b1;
+                                    end
                                     if (fifo_is_persp[fifo_rd_ptr]) begin
                                         persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
                                         persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
                                         persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
                                         persp_total_remaining <= fifo_count_f[fifo_rd_ptr];
+                                        persp_more_chunks <= 1'b1;
                                         persp_is_initial <= 1'b1;
+                                        persp_pre_advanced <= 1'b0;
+                                        if (fifo_sprite_en[fifo_rd_ptr]) begin
+                                            z_cache_valid <= 1'b0;
+                                        end
                                         state <= ST_PERSP_INIT;
+                                    end else if (fifo_alias_en[fifo_rd_ptr] && fifo_combined_z[fifo_rd_ptr] && !fifo_noz_en[fifo_rd_ptr]) begin
+                                        z_cache_valid <= 1'b0;
+                                        state <= ST_ZTEST_READ;
                                     end else begin
                                         state <= ST_TEX_ADDR;
                                     end
@@ -1706,6 +1994,10 @@ always @(posedge clk or negedge reset_n) begin
                                     cur_turb_en   <= fifo_turb_en[fifo_rd_ptr];
                                     cur_persp_en  <= fifo_is_persp[fifo_rd_ptr];
                                     cur_combined_z <= fifo_combined_z[fifo_rd_ptr];
+                                    cur_alias_en  <= fifo_alias_en[fifo_rd_ptr];
+                                    cur_noz_en    <= fifo_noz_en[fifo_rd_ptr];
+                                    cur_sprite_en <= fifo_sprite_en[fifo_rd_ptr];
+                                    sprite_ztest_done <= 1'b0;
                                     remaining     <= fifo_count_f[fifo_rd_ptr];
                                     seen_busy     <= 1'b0;
                                     tex_addr_for_turb <= 1'b0;
@@ -1716,13 +2008,31 @@ always @(posedge clk or negedge reset_n) begin
                                         z_pair_has_lo   <= 1'b0;
                                         z_pending_valid <= 1'b0;
                                     end
+                                    if (fifo_alias_en[fifo_rd_ptr]) begin
+                                        cur_alias_ptex       <= fifo_alias_ptex[fifo_rd_ptr];
+                                        cur_alias_ststep     <= fifo_alias_ststep[fifo_rd_ptr];
+                                        cur_alias_sfrac      <= fifo_s[fifo_rd_ptr][15:0];
+                                        cur_alias_sfrac_step <= fifo_alias_sfrac_step[fifo_rd_ptr];
+                                        cur_alias_tfrac      <= fifo_t[fifo_rd_ptr][15:0];
+                                        cur_alias_tfrac_step <= fifo_alias_tfrac_step[fifo_rd_ptr];
+                                        cur_alias_skinwidth  <= fifo_alias_skinwidth[fifo_rd_ptr];
+                                        cur_cmap_en          <= 1'b1;
+                                    end
                                     if (fifo_is_persp[fifo_rd_ptr]) begin
                                         persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
                                         persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
                                         persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
                                         persp_total_remaining <= fifo_count_f[fifo_rd_ptr];
+                                        persp_more_chunks <= 1'b1;
                                         persp_is_initial <= 1'b1;
+                                        persp_pre_advanced <= 1'b0;
+                                        if (fifo_sprite_en[fifo_rd_ptr]) begin
+                                            z_cache_valid <= 1'b0;
+                                        end
                                         state <= ST_PERSP_INIT;
+                                    end else if (fifo_alias_en[fifo_rd_ptr] && fifo_combined_z[fifo_rd_ptr] && !fifo_noz_en[fifo_rd_ptr]) begin
+                                        z_cache_valid <= 1'b0;
+                                        state <= ST_ZTEST_READ;
                                     end else begin
                                         state <= ST_TEX_ADDR;
                                     end
@@ -1769,9 +2079,14 @@ always @(posedge clk or negedge reset_n) begin
                 cur_t         <= 32'd0;
                 cur_sstep     <= 32'h00010000;  // 1.0 in 16.16
                 cur_tstep     <= 32'd0;
-                cur_cmap_en   <= 1'b1;
-                cur_turb_en   <= 1'b0;
-                remaining     <= surf_blocksize;
+                cur_cmap_en    <= 1'b1;
+                cur_turb_en    <= 1'b0;
+                cur_alias_en   <= 1'b0;
+                cur_combined_z <= 1'b0;
+                cur_noz_en     <= 1'b0;
+                cur_persp_en   <= 1'b0;
+                cur_sprite_en  <= 1'b0;
+                remaining      <= surf_blocksize;
 
                 // Computed light for this row
                 cur_light     <= surf_row_hw_light;
@@ -1796,15 +2111,27 @@ always @(posedge clk or negedge reset_n) begin
             ST_PERSP_INIT: begin
                 // CLZ of zi_cur only — registered for use next cycle
                 // (splitting CLZ from barrel shift breaks the critical path)
-                persp_lz <= clz32(persp_zi_cur);
+                //
+                // Clamp zi_cur to positive minimum: for edge-on surfaces the
+                // fixed-point zi accumulator can drift through zero across long
+                // spans.  Negative zi poisons the CLZ→reciprocal LUT→multiply
+                // pipeline, producing garbage s/t.  The software path handles
+                // this naturally (float 1/zi → huge z → s/t clamped to bounds).
+                // Clamping here gives identical visual behaviour.
+                if (persp_zi_cur[47] || persp_zi_cur == 48'd0) begin
+                    persp_zi_cur <= 48'd256;  // ~0.004 in Q16.16: safely positive
+                    persp_lz <= clz48(48'd256);
+                end else begin
+                    persp_lz <= clz48(persp_zi_cur);
+                end
                 state <= ST_PERSP_LUT;
             end
 
             ST_PERSP_LUT: begin
                 // Use registered persp_lz to compute normalized LUT address
-                recip_lut_addr <= (persp_zi_cur << persp_lz) >> 21;
+                recip_lut_addr <= (persp_zi_cur << persp_lz) >> 37;
                 // Pre-compute barrel shift amount (used in MUL_T and CLAMP)
-                persp_shift_amt <= 5'd30 - persp_lz;
+                persp_shift_amt <= 6'd46 - persp_lz;
                 state <= ST_PERSP_LUT2;
             end
 
@@ -1834,7 +2161,7 @@ always @(posedge clk or negedge reset_n) begin
             ST_PERSP_MUL_T: begin
                 // persp_product = sdivz * recip (now valid after 3-cycle DSP latency)
                 // Register barrel-shifted value (defer add to break shift→add→clamp path)
-                persp_shifted_r <= persp_product >>> persp_shift_amt;
+                persp_shifted_r <= sat_asr65(persp_product, persp_shift_amt);
                 // Set DSP multiply inputs for tdivz × recip
                 persp_mul_a <= persp_tdivz_cur;
                 persp_mul_b <= {1'b0, persp_recip_raw};
@@ -1855,7 +2182,7 @@ always @(posedge clk or negedge reset_n) begin
             ST_PERSP_CLAMP: begin
                 // persp_product = tdivz * recip (now valid after 3-cycle DSP latency)
                 // Register barrel-shifted value (defer add+clamp to CLAMP2)
-                persp_shifted_r <= persp_product >>> persp_shift_amt;
+                persp_shifted_r <= sat_asr65(persp_product, persp_shift_amt);
                 state <= ST_PERSP_CLAMP2;
             end
 
@@ -2007,7 +2334,7 @@ always @(posedge clk or negedge reset_n) begin
                 // Compute sstep/tstep for this chunk and launch pixel drawing
                 if (persp_is_last_chunk && persp_chunk_count > 5'd2) begin
                     // Last chunk (3+ pixels): use inv_lut for non-power-of-2 step
-                    persp_mul_a <= persp_s_saved - cur_s;
+                    persp_mul_a <= persp_s_saved - $signed(cur_s);
                     persp_mul_b <= {1'b0, inv_lut(persp_chunk_count - 5'd1)};
                     state <= ST_PERSP_INV_W;
                 end else if (persp_is_last_chunk && persp_chunk_count == 5'd2) begin
@@ -2016,6 +2343,7 @@ always @(posedge clk or negedge reset_n) begin
                     cur_tstep <= persp_t_saved - cur_t;
                     remaining <= 16'd2;
                     persp_total_remaining <= persp_total_remaining - 16'd2;
+                    persp_more_chunks <= 1'b0;  // Last chunk exhausted
                     cmd_issued <= 1'b0;
                     seen_busy  <= 1'b0;
                     tex_addr_for_turb <= 1'b0;
@@ -2026,6 +2354,7 @@ always @(posedge clk or negedge reset_n) begin
                     cur_tstep <= 32'd0;
                     remaining <= {11'd0, persp_chunk_count};
                     persp_total_remaining <= persp_total_remaining - {11'd0, persp_chunk_count};
+                    persp_more_chunks <= 1'b0;  // Last chunk exhausted
                     cmd_issued <= 1'b0;
                     seen_busy  <= 1'b0;
                     tex_addr_for_turb <= 1'b0;
@@ -2036,6 +2365,19 @@ always @(posedge clk or negedge reset_n) begin
                     cur_tstep <= (persp_t_saved - $signed(cur_t)) >>> 4;
                     remaining <= {11'd0, persp_chunk_count};
                     persp_total_remaining <= persp_total_remaining - {11'd0, persp_chunk_count};
+                    persp_more_chunks <= (persp_total_remaining > {11'd0, persp_chunk_count});
+                    // Pre-advance divz/zi for next chunk when next is also full
+                    // (saves 2 cycles: skips ACCUM + ADVANCE after pixel loop)
+                    if (persp_total_remaining >= 16'd32) begin
+                        persp_sdivz_cur <= persp_sdivz_cur + persp_sdivz_step_reg;
+                        persp_tdivz_cur <= persp_tdivz_cur + persp_tdivz_step_reg;
+                        persp_zi_cur    <= persp_zi_cur + persp_zi_step_reg;
+                        persp_chunk_count <= 5'd16;
+                        persp_is_last_chunk <= 1'b0;
+                        persp_pre_advanced <= 1'b1;
+                    end else begin
+                        persp_pre_advanced <= 1'b0;
+                    end
                     cmd_issued <= 1'b0;
                     seen_busy  <= 1'b0;
                     tex_addr_for_turb <= 1'b0;
@@ -2057,7 +2399,7 @@ always @(posedge clk or negedge reset_n) begin
                 // DSP product = (snext-s) * inv_lut (valid after 3-cycle latency)
                 // Capture sstep, set DSP inputs for t multiply
                 cur_sstep <= persp_product >>> 16;
-                persp_mul_a <= persp_t_saved - cur_t;
+                persp_mul_a <= persp_t_saved - $signed(cur_t);
                 persp_mul_b <= {1'b0, inv_lut(persp_chunk_count - 5'd1)};
                 state <= ST_PERSP_INV2_W;
             end
@@ -2078,10 +2420,84 @@ always @(posedge clk or negedge reset_n) begin
                 cur_tstep <= persp_product >>> 16;
                 remaining <= {11'd0, persp_chunk_count};
                 persp_total_remaining <= persp_total_remaining - {11'd0, persp_chunk_count};
+                persp_more_chunks <= 1'b0;  // Last chunk (inv_lut path = 3+ pixel last chunk)
                 cmd_issued <= 1'b0;
                 seen_busy  <= 1'b0;
                 tex_addr_for_turb <= 1'b0;
                 state <= ST_TEX_ADDR;
+            end
+
+            ST_ZTEST_READ: begin
+                if (z_cache_hit) begin
+                    // Cache hit: immediate z-test
+                    if (z_test_pass) begin
+                        // PASS: update cache with new z-value
+                        if (comb_z_half) z_cache_data[31:16] <= comb_z_val;
+                        else             z_cache_data[15:0]  <= comb_z_val;
+                        if (sprite_ztest_en) begin
+                            // Sprite: return to ST_PIXEL for pixel write
+                            state <= ST_PIXEL;
+                        end else begin
+                            // Alias: proceed to texture fetch
+                            tex_addr_for_turb <= 1'b0;
+                            state <= ST_TEX_ADDR;
+                        end
+                    end else begin
+                        // FAIL: skip pixel entirely
+                        if (sprite_ztest_en) begin
+                            // Sprite: advance standard affine counters
+                            cur_s           <= cur_s + cur_sstep;
+                            cur_t           <= cur_t + cur_tstep;
+                            sprite_ztest_done <= 1'b0;
+                        end else begin
+                            // Alias: advance alias texture stepping
+                            cur_alias_ptex  <= alias_ptex_next;
+                            cur_alias_sfrac <= alias_sfrac_sum[15:0];
+                            cur_alias_tfrac <= alias_tfrac_sum[15:0];
+                            cur_light       <= cur_light + cur_lightstep;
+                        end
+                        cur_izi_comb    <= cur_izi_comb + cur_zistep;
+                        cur_z_addr_comb <= cur_z_addr_comb + 32'd2;
+                        cur_fb          <= cur_fb + 32'd1;
+                        remaining       <= remaining - 16'd1;
+                        if (fb_byte_sel == 2'd3 || remaining == 16'd1) begin
+                            if (acc_strb != 4'b0000) begin
+                                cmd_issued <= 1'b0;
+                                seen_busy  <= 1'b0;
+                                state      <= ST_FB_WRITE;
+                            end else if (remaining == 16'd1) begin
+                                if (sprite_ztest_en && cur_persp_en && persp_more_chunks) begin
+                                    cur_s <= persp_s_saved;
+                                    cur_t <= persp_t_saved;
+                                    state <= persp_pre_advanced ? ST_PERSP_INIT : ST_PERSP_ACCUM;
+                                end else begin
+                                    state <= ST_Z_FLUSH;
+                                end
+                            end else begin
+                                state <= sprite_ztest_en ? ST_TEX_ADDR : ST_ZTEST_READ;
+                            end
+                        end else begin
+                            state <= sprite_ztest_en ? ST_TEX_ADDR : ST_ZTEST_READ;
+                        end
+                    end
+                end else if (!sram_busy_eff) begin
+                    // Cache miss: issue SRAM read
+                    sram_rd   <= 1'b1;
+                    sram_addr <= comb_z_waddr;
+                    state     <= ST_ZTEST_WAIT;
+                end
+                // else: SRAM busy, stay in ST_ZTEST_READ (retry next cycle)
+            end
+
+            ST_ZTEST_WAIT: begin
+                if (sram_rdata_valid) begin
+                    // Cache the z-word and re-enter ST_ZTEST_READ (guaranteed hit)
+                    z_cache_data  <= sram_rdata;
+                    z_cache_addr  <= sram_addr;
+                    z_cache_valid <= 1'b1;
+                    state         <= ST_ZTEST_READ;
+                end
+                // else: wait for SRAM read to complete
             end
 
             ST_Z_FLUSH: begin

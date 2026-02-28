@@ -113,7 +113,7 @@ if ![info exists QSYS_SIMDIR] {
 }
 
 if ![info exists QUARTUS_INSTALL_DIR] { 
-  set QUARTUS_INSTALL_DIR "/home/alberto/altera_lite/25.1std/quartus/"
+  set QUARTUS_INSTALL_DIR "$::env(HOME)/altera_lite/25.1std/quartus/"
 }
 
 if ![info exists USER_DEFINED_COMPILE_OPTIONS] { 

@@ -4,6 +4,17 @@
         "data_slots": [
             {
                 "id": 0,
+                "name": "Quake Binary",
+                "required": true,
+                "parameters": 0,
+                "extensions": [
+                    "bin"
+                ],
+                "filename": "quake.bin",
+                "deferload": true
+            },
+            {
+                "id": 1,
                 "name": "PAK Data",
                 "required": true,
                 "parameters": 0,
@@ -14,15 +25,270 @@
                 "deferload": true
             },
             {
-                "id": 1,
-                "name": "Quake Binary",
-                "required": true,
+                "id": 2,
+                "name": "PAK1 Data",
+                "required": false,
                 "parameters": 0,
                 "extensions": [
-                    "bin"
+                    "pak"
                 ],
-                "filename": "quake.bin",
-                "address": "0x00200000"
+                "filename": "pak1.pak",
+                "deferload": true
+            },
+            {
+                "id": 3,
+                "name": "Config",
+                "required": false,
+                "parameters": 0,
+                "extensions": [
+                    "cfg"
+                ],
+                "filename": "config.cfg",
+                "deferload": true
+            },
+            {
+                "id": 4,
+                "name": "Autoexec",
+                "required": false,
+                "parameters": 0,
+                "extensions": [
+                    "cfg"
+                ],
+                "filename": "autoexec.cfg",
+                "deferload": true
+            },
+            {
+                "id": 10,
+                "name": "CD Track 02",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "filename": "cd/Quake (USA) (Track 02).bin",
+                "deferload": true
+            },
+            {
+                "id": 11,
+                "name": "CD Track 03",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "filename": "cd/Quake (USA) (Track 03).bin",
+                "deferload": true
+            },
+            {
+                "id": 12,
+                "name": "CD Track 04",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "filename": "cd/Quake (USA) (Track 04).bin",
+                "deferload": true
+            },
+            {
+                "id": 13,
+                "name": "CD Track 05",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "filename": "cd/Quake (USA) (Track 05).bin",
+                "deferload": true
+            },
+            {
+                "id": 14,
+                "name": "CD Track 06",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "filename": "cd/Quake (USA) (Track 06).bin",
+                "deferload": true
+            },
+            {
+                "id": 15,
+                "name": "CD Track 07",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "filename": "cd/Quake (USA) (Track 07).bin",
+                "deferload": true
+            },
+            {
+                "id": 16,
+                "name": "CD Track 08",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "filename": "cd/Quake (USA) (Track 08).bin",
+                "deferload": true
+            },
+            {
+                "id": 17,
+                "name": "CD Track 09",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "filename": "cd/Quake (USA) (Track 09).bin",
+                "deferload": true
+            },
+            {
+                "id": 18,
+                "name": "CD Track 10",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "filename": "cd/Quake (USA) (Track 10).bin",
+                "deferload": true
+            },
+            {
+                "id": 19,
+                "name": "CD Track 11",
+                "required": false,
+                "parameters": 0,
+                "extensions": ["bin"],
+                "filename": "cd/Quake (USA) (Track 11).bin",
+                "deferload": true
+            },
+            {
+                "id": 20,
+                "name": "Save 0",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s0.sav",
+                "address": "0x03C00000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 21,
+                "name": "Save 1",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s1.sav",
+                "address": "0x03C20000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 22,
+                "name": "Save 2",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s2.sav",
+                "address": "0x03C40000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 23,
+                "name": "Save 3",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s3.sav",
+                "address": "0x03C60000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 24,
+                "name": "Save 4",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s4.sav",
+                "address": "0x03C80000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 25,
+                "name": "Save 5",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s5.sav",
+                "address": "0x03CA0000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 26,
+                "name": "Save 6",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s6.sav",
+                "address": "0x03CC0000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 27,
+                "name": "Save 7",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s7.sav",
+                "address": "0x03CE0000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 28,
+                "name": "Save 8",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s8.sav",
+                "address": "0x03D00000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 29,
+                "name": "Save 9",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s9.sav",
+                "address": "0x03D20000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 30,
+                "name": "Save 10",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s10.sav",
+                "address": "0x03D40000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 31,
+                "name": "Save 11",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["sav"],
+                "filename": "s11.sav",
+                "address": "0x03D60000",
+                "size_maximum": "0x00020000"
+            },
+            {
+                "id": 32,
+                "name": "Config",
+                "required": false,
+                "parameters": "0x84",
+                "nonvolatile": true,
+                "extensions": ["cfg"],
+                "filename": "config.cfg",
+                "address": "0x03D80000",
+                "size_maximum": "0x00020000"
             }
         ]
     }

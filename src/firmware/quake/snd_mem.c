@@ -138,12 +138,10 @@ wavinfo_t GetWavinfo(char *name, byte *wav, int wavlength)
 // Resampling
 // ====================================================================
 
-static void ResampleSfx(sfx_t *sfx, int inrate, int inwidth, byte *data)
+static void ResampleSfx(sfx_t *sfx, int inrate, int inwidth, byte *data, int insamps)
 {
     int outcount;
-    int srcsample;
     int i;
-    int sample;
     int samplefrac, fracstep;
     sfxcache_t *sc;
 
@@ -151,22 +149,28 @@ static void ResampleSfx(sfx_t *sfx, int inrate, int inwidth, byte *data)
     if (!sc)
         return;
 
-    // outcount = number of output samples
+    short *out = (short *)sc->data;
     outcount = sc->length;
     fracstep = ((long long)inrate << 8) / shm->speed;
     samplefrac = 0;
 
     for (i = 0; i < outcount; i++) {
-        srcsample = samplefrac >> 8;
+        int srcsample = samplefrac >> 8;
+        int frac = samplefrac & 0xFF;
         samplefrac += fracstep;
 
-        if (inwidth == 2)
-            sample = ((short *)data)[srcsample];
-        else
-            sample = (int)((unsigned char)(data[srcsample]) - 128) << 8;
+        int s0, s1;
+        if (inwidth == 2) {
+            s0 = ((short *)data)[srcsample];
+            s1 = (srcsample + 1 < insamps) ? ((short *)data)[srcsample + 1] : s0;
+        } else {
+            s0 = ((int)((unsigned char)data[srcsample]) - 128) << 8;
+            s1 = (srcsample + 1 < insamps)
+                ? ((int)((unsigned char)data[srcsample + 1]) - 128) << 8 : s0;
+        }
 
-        // Store as 8-bit unsigned (Quake convention for cached sounds)
-        sc->data[i] = (sample >> 8) + 128;
+        // Linear interpolation, store as 16-bit signed
+        out[i] = (short)(s0 + (((s1 - s0) * frac) >> 8));
     }
 }
 
@@ -210,8 +214,8 @@ sfxcache_t *S_LoadSound(sfx_t *s)
         return NULL;
     }
 
-    // Allocate cache entry: header + 8-bit mono samples
-    sc = Cache_Alloc(&s->cache, sizeof(sfxcache_t) + len, s->name);
+    // Allocate cache entry: header + 16-bit mono samples
+    sc = Cache_Alloc(&s->cache, sizeof(sfxcache_t) + len * 2, s->name);
     if (!sc)
         return NULL;
 
@@ -220,10 +224,10 @@ sfxcache_t *S_LoadSound(sfx_t *s)
     if (sc->loopstart >= 0)
         sc->loopstart = (int)((long long)sc->loopstart * shm->speed / info.rate);
     sc->speed = shm->speed;
-    sc->width = 1; // Always resample to 8-bit
+    sc->width = 2;
     sc->stereo = 0;
 
-    ResampleSfx(s, info.rate, info.width, data + info.dataofs);
+    ResampleSfx(s, info.rate, info.width, data + info.dataofs, info.samples);
 
     return sc;
 }

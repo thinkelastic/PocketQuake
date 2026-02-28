@@ -1,71 +1,39 @@
 #!/bin/bash
-# Fitter seed sweep - tries multiple seeds and reports timing for each
-# Synthesis runs once; only fit+STA are repeated per seed.
-# Usage: ./seed_sweep.sh [start_seed] [end_seed]
-# Default: seeds 1 through 10
+# Seed sweep script for timing closure
+# Runs Quartus fitter + STA for each seed, reports worst slack
 
-QUARTUS_DIR=/home/alberto/altera_lite/25.1std/quartus/bin
-export PATH="$QUARTUS_DIR:$PATH"
+SEEDS="1 2 5 7 10 15 20 25 30"
+PROJECT="ap_core"
+RESULTS_FILE="/tmp/seed_sweep_results.txt"
 
-START=${1:-1}
-END=${2:-10}
-PROJECT=ap_core
-QSF="${PROJECT}.qsf"
-RESULTS_FILE="seed_sweep_results.txt"
+echo "Seed sweep starting at $(date)" > "$RESULTS_FILE"
+echo "---" >> "$RESULTS_FILE"
 
-echo "Seed sweep: $START to $END" | tee "$RESULTS_FILE"
-echo "========================================" | tee -a "$RESULTS_FILE"
+for SEED in $SEEDS; do
+    echo "=== Seed $SEED ===" | tee -a "$RESULTS_FILE"
 
-# Run synthesis once (seed-independent)
-echo ">>> Running synthesis (quartus_map)..."
-quartus_map "$PROJECT" > "output_files/seed_map.log" 2>&1
-map_status=$?
-if [ $map_status -ne 0 ]; then
-    echo "SYNTHESIS FAILED (exit code $map_status)" | tee -a "$RESULTS_FILE"
-    exit 1
-fi
-echo "Synthesis complete."
-echo ""
-
-printf "%-6s  %-12s %-12s %-12s %-12s\n" "Seed" "Warm Setup" "Cold Setup" "Warm Hold" "Cold Hold" | tee -a "$RESULTS_FILE"
-printf "%-6s  %-12s %-12s %-12s %-12s\n" "----" "----------" "----------" "---------" "---------" | tee -a "$RESULTS_FILE"
-
-for seed in $(seq $START $END); do
     # Update seed in QSF
-    sed -i "s/^set_global_assignment -name SEED .*/set_global_assignment -name SEED $seed/" "$QSF"
+    sed -i "s/^set_global_assignment -name SEED .*/set_global_assignment -name SEED $SEED/" ap_core.qsf
 
-    # Run fit + STA only
-    quartus_fit "$PROJECT" > "output_files/seed_${seed}_fit.log" 2>&1
-    fit_status=$?
-    if [ $fit_status -ne 0 ]; then
-        printf "%-6d  FAILED\n" "$seed" | tee -a "$RESULTS_FILE"
-        continue
-    fi
+    # Run fitter only (synthesis already done)
+    quartus_fit --read_settings_files=on --write_settings_files=off $PROJECT -c $PROJECT 2>&1 | tail -3
 
-    quartus_sta "$PROJECT" > "output_files/seed_${seed}_sta.log" 2>&1
+    # Run STA
+    quartus_sta $PROJECT -c $PROJECT 2>&1 | tail -3
 
-    # Extract slack from all 4 corners (first match = main PLL clock)
-    STA="output_files/${PROJECT}.sta.summary"
-    warm_setup=$(grep -A1 "Slow 1100mV 85C Model Setup" "$STA" | grep "Slack" | head -1 | awk '{print $NF}')
-    cold_setup=$(grep -A1 "Slow 1100mV 0C Model Setup" "$STA" | grep "Slack" | head -1 | awk '{print $NF}')
-    warm_hold=$(grep -A1 "Fast 1100mV 85C Model Hold" "$STA" | grep "Slack" | head -1 | awk '{print $NF}')
-    cold_hold=$(grep -A1 "Fast 1100mV 0C Model Hold" "$STA" | grep "Slack" | head -1 | awk '{print $NF}')
+    # Extract worst slack for RAM clock (setup)
+    SLACK_85C=$(grep -A1 "Slow 1100mV 85C Model Setup.*mp_ram" output_files/ap_core.sta.summary | grep "Slack" | awk '{print $3}')
+    SLACK_0C=$(grep -A1 "Slow 1100mV 0C Model Setup.*mp_ram" output_files/ap_core.sta.summary | grep "Slack" | awk '{print $3}')
+    SLACK_FAST=$(grep -A1 "Fast 1100mV 85C Model Setup.*mp_ram" output_files/ap_core.sta.summary | grep "Slack" | awk '{print $3}')
 
-    printf "%-6d  %-12s %-12s %-12s %-12s\n" "$seed" "$warm_setup" "$cold_setup" "$warm_hold" "$cold_hold" | tee -a "$RESULTS_FILE"
-
-    # Save STA summary for this seed
-    cp "$STA" "output_files/sta_seed_${seed}.summary"
-
-    # If both setup corners pass, save the SOF
-    warm_pass=$(python3 -c "print(1 if float('${warm_setup:-0}') >= 0 else 0)" 2>/dev/null)
-    cold_pass=$(python3 -c "print(1 if float('${cold_setup:-0}') >= 0 else 0)" 2>/dev/null)
-    if [ "$warm_pass" = "1" ] && [ "$cold_pass" = "1" ]; then
-        cp "output_files/${PROJECT}.sof" "output_files/${PROJECT}_seed${seed}.sof"
-        quartus_asm "$PROJECT" > /dev/null 2>&1
-        echo "  ^ PASSES — SOF saved" | tee -a "$RESULTS_FILE"
-    fi
+    echo "  Slow 85C: $SLACK_85C  Slow 0C: $SLACK_0C  Fast 85C: $SLACK_FAST" | tee -a "$RESULTS_FILE"
 done
 
+# Restore seed 3
+sed -i "s/^set_global_assignment -name SEED .*/set_global_assignment -name SEED 3/" ap_core.qsf
+
+echo "---" >> "$RESULTS_FILE"
+echo "Sweep complete at $(date)" >> "$RESULTS_FILE"
 echo ""
-echo "========================================" | tee -a "$RESULTS_FILE"
-echo "Sweep complete. Results in $RESULTS_FILE" | tee -a "$RESULTS_FILE"
+echo "=== SUMMARY ==="
+cat "$RESULTS_FILE"

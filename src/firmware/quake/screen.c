@@ -871,6 +871,14 @@ void SCR_UpdateScreen (void)
 	}
 
 //
+// wait for previous frame's buffer swap to complete (vsync),
+// then update vid.buffer to point at the new draw target.
+// Game logic ran during the vsync dead time between VID_Update and here.
+//
+	extern void VID_WaitSync(void);
+	VID_WaitSync();
+
+//
 // do 3D refresh drawing, and then update the screen
 //
 	D_EnableBackBufferAccess ();	// of all overlay stuff if drawing directly

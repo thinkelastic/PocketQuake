@@ -23,6 +23,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "r_local.h"
 #include "libc.h"
 
+// Epsilon for bmodel BSP clip side determination.
+// float32 (RISC-V) lacks the precision of x86 80-bit FPU, causing vertices
+// near BSP planes to end up on the wrong side, corrupting bmodel clipping.
+#define BMODEL_CLIP_EPSILON  0.1f
+
 /* Sub-profiling: R_RenderFace time within R_RecursiveWorldNode */
 unsigned int pq_prof_rw_renderface_cycles;
 extern cvar_t pq_cycleprof;
@@ -96,7 +101,7 @@ void R_RotateBmodel (void)
 
 // yaw
 	angle = currententity->angles[YAW];		
-	angle = angle * M_PI*2 / 360;
+	angle = angle * (float)(M_PI / 180.0);
 	s = sinf(angle);
 	c = cosf(angle);
 
@@ -112,8 +117,8 @@ void R_RotateBmodel (void)
 
 
 // pitch
-	angle = currententity->angles[PITCH];		
-	angle = angle * M_PI*2 / 360;
+	angle = currententity->angles[PITCH];
+	angle = angle * (float)(M_PI / 180.0);
 	s = sinf(angle);
 	c = cosf(angle);
 
@@ -130,8 +135,8 @@ void R_RotateBmodel (void)
 	R_ConcatRotations (temp2, temp1, temp3);
 
 // roll
-	angle = currententity->angles[ROLL];		
-	angle = angle * M_PI*2 / 360;
+	angle = currententity->angles[ROLL];
+	angle = angle * (float)(M_PI / 180.0);
 	s = sinf(angle);
 	c = cosf(angle);
 
@@ -164,7 +169,7 @@ void R_RotateBmodel (void)
 R_RecursiveClipBPoly
 ================
 */
-void R_RecursiveClipBPoly (bedge_t *pedges, mnode_t *pnode, msurface_t *psurf)
+PQ_FASTTEXT void R_RecursiveClipBPoly (bedge_t *pedges, mnode_t *pnode, msurface_t *psurf)
 {
 	bedge_t		*psideedges[2], *pnextedge, *ptedge;
 	int			i, side, lastside;
@@ -197,19 +202,31 @@ void R_RecursiveClipBPoly (bedge_t *pedges, mnode_t *pnode, msurface_t *psurf)
 		lastdist = DotProduct (plastvert->position, tplane.normal) -
 				   tplane.dist;
 
-		if (lastdist > 0)
+		// Use epsilon for side test to prevent float32 precision
+		// from creating spurious BSP splits on coplanar bmodel surfaces
+		if (lastdist > BMODEL_CLIP_EPSILON)
 			lastside = 0;
-		else
+		else if (lastdist < -BMODEL_CLIP_EPSILON)
 			lastside = 1;
+		else
+		{
+			lastdist = 0;
+			lastside = 0;  // tie-break: front side
+		}
 
 		pvert = pedges->v[1];
 
 		dist = DotProduct (pvert->position, tplane.normal) - tplane.dist;
 
-		if (dist > 0)
+		if (dist > BMODEL_CLIP_EPSILON)
 			side = 0;
-		else
+		else if (dist < -BMODEL_CLIP_EPSILON)
 			side = 1;
+		else
+		{
+			dist = 0;
+			side = 0;  // tie-break: front side (must match v[0] rule for consistency)
+		}
 
 		if (side != lastside)
 		{

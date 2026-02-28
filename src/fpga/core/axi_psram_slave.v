@@ -61,15 +61,15 @@ module axi_psram_slave (
 wire reset = ~reset_n;
 
 // FSM states
-localparam S_IDLE     = 3'd0;
-localparam S_RD_CMD   = 3'd1;  // Issue word_rd, wait for busy
-localparam S_RD_WAIT  = 3'd2;  // Wait for rdata_valid
-localparam S_RD_DAT   = 3'd3;  // Send R beat
-localparam S_WR_CMD   = 3'd4;  // Issue word_wr, wait for busy
-localparam S_WR_WAIT  = 3'd5;  // Wait for !busy (write done)
-localparam S_WR_NEXT  = 3'd6;  // Accept next W beat
+localparam S_IDLE       = 4'd0;
+localparam S_RD_CMD     = 4'd1;  // Issue word_rd, wait for busy
+localparam S_RD_WAIT    = 4'd2;  // Wait for rdata_valid (unused, kept for encoding)
+localparam S_RD_DAT     = 4'd3;  // Send R beat
+localparam S_WR_CMD     = 4'd4;  // Issue word_wr, wait for busy
+localparam S_WR_WAIT    = 4'd5;  // Wait for !busy (write done)
+localparam S_WR_NEXT    = 4'd6;  // Accept next W beat
 
-reg [2:0] state;
+reg [3:0] state;
 
 // Transaction tracking
 reg [7:0]  burst_len;
@@ -115,7 +115,6 @@ always @(posedge clk or posedge reset) begin
         s_axi_bvalid <= 0;
         psram_rd <= 0;
         psram_wr <= 0;
-
         case (state)
 
         S_IDLE: begin

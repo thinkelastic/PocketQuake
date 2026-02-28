@@ -20,7 +20,8 @@ volatile unsigned int pq_dbg_info = 0;
 #define CPU_FREQ         100000000  /* clk_cpu currently runs at 100 MHz */
 
 /* On-demand PAK reading via APF dataslot */
-#define PAK_SLOT_ID      0      /* data.json slot id for pak0.pak */
+#define PAK0_SLOT_ID     1      /* data.json slot id for pak0.pak */
+#define PAK1_SLOT_ID     2      /* data.json slot id for pak1.pak */
 #define PAK_MAX_SIZE     (48 * 1024 * 1024)  /* 48MB max */
 /* DMA_BUFFER and DMA_CHUNK_SIZE defined in dataslot.h */
 
@@ -78,7 +79,7 @@ static void Pak_Init(void)
         term_printf("Pre: %x %x %x %x\n", uc[0], uc[1], uc[2], uc[3]);
 
         /* DMA 64 bytes (not just 12) to check full word writes */
-        rc = dataslot_read(PAK_SLOT_ID, 0, (void *)DMA_BUFFER, 64);
+        rc = dataslot_read(PAK0_SLOT_ID, 0, (void *)DMA_BUFFER, 64);
         term_printf("DMA rc=%d\n", rc);
 
         /* Read back all 16 words via uncached alias */
@@ -86,7 +87,7 @@ static void Pak_Init(void)
         term_printf("    %x %x %x %x\n", uc[4], uc[5], uc[6], uc[7]);
 
         /* Second DMA to verify consistency */
-        rc = dataslot_read(PAK_SLOT_ID, 0, (void *)DMA_BUFFER, 64);
+        rc = dataslot_read(PAK0_SLOT_ID, 0, (void *)DMA_BUFFER, 64);
         term_printf("DMA2 rc=%d\n", rc);
         term_printf("UC2: %x %x %x %x\n", uc[0], uc[1], uc[2], uc[3]);
 
@@ -123,7 +124,7 @@ static void Pak_Init(void)
             int chunk = dir_bytes - done;
             if (chunk > DMA_CHUNK_SIZE)
                 chunk = DMA_CHUNK_SIZE;
-            rc = dataslot_read(PAK_SLOT_ID, hdr.dirofs + done,
+            rc = dataslot_read(PAK0_SLOT_ID, hdr.dirofs + done,
                                (void *)DMA_BUFFER, chunk);
             if (rc != 0)
                 break;
@@ -171,6 +172,7 @@ typedef struct {
     unsigned char *data;  /* NULL = on-demand PAK via dataslot_read */
     int length;
     int position;
+    int slot_id;          /* dataslot ID for on-demand reads */
 } syshandle_t;
 
 static syshandle_t sys_handles[MAX_HANDLES];
@@ -201,31 +203,40 @@ int Sys_FileOpenRead(char *path, int *hndl)
 
     i = findhandle();
 
-    /* Intercept requests for pak0.pak itself — return an on-demand handle */
+    /* Intercept requests for pak files — return an on-demand handle */
     {
         const char *p = path;
-        int found = 0;
+        int slot_id = -1;
         while (*p) {
-            if (p[0]=='p'&&p[1]=='a'&&p[2]=='k'&&p[3]=='0'&&
+            if (p[0]=='p'&&p[1]=='a'&&p[2]=='k'&&
                 p[4]=='.'&&p[5]=='p'&&p[6]=='a'&&p[7]=='k') {
-                found = 1; break;
+                if (p[3] == '0') { slot_id = PAK0_SLOT_ID; break; }
+                if (p[3] == '1') { slot_id = PAK1_SLOT_ID; break; }
             }
             p++;
         }
-        if (found) {
-            /* Do not depend on Pak_Init() here. COM_LoadPackFile will parse the
-             * header/directory via Sys_FileRead from this handle. */
+        if (slot_id >= 0) {
+            /* Probe slot: try reading PAK header to verify file exists.
+             * If the slot has no file, dataslot_read returns an error
+             * and we fall through to "not found" instead of crashing
+             * in COM_LoadPackFile with a bad header. */
+            int rc = dataslot_read(slot_id, 0, (void *)DMA_BUFFER, 12);
+            if (rc != 0) {
+                *hndl = -1;
+                return -1;
+            }
             sys_handles[i].used = 1;
             sys_handles[i].data = NULL;  /* on-demand: no memory-mapped data */
             sys_handles[i].length = PAK_MAX_SIZE;
             sys_handles[i].position = 0;
+            sys_handles[i].slot_id = slot_id;
             *hndl = i;
             return PAK_MAX_SIZE;
         }
     }
 
     /* File not found — Quake's COM_FindFile handles PAK contents by
-       opening pak0.pak (intercepted above) and seeking to offsets. */
+       opening pak files (intercepted above) and seeking to offsets. */
     *hndl = -1;
     return -1;
 }
@@ -314,7 +325,7 @@ int Sys_FileRead(int handle, void *dest, int count)
                 volatile unsigned int *buf = (volatile unsigned int *)SDRAM_UNCACHED(DMA_BUFFER);
                 buf[0] = DMA_SENTINEL;
 
-                int rc = dataslot_read(PAK_SLOT_ID, h->position + done,
+                int rc = dataslot_read(h->slot_id, h->position + done,
                                        (void *)DMA_BUFFER, chunk);
                 if (rc != 0) {
                     dma_total_errors++;
@@ -332,7 +343,7 @@ int Sys_FileRead(int handle, void *dest, int count)
                         term_printf("STALE! off=%x #%d\n",
                                     h->position + done, dma_total_calls);
                     /* Retry */
-                    rc = dataslot_read(PAK_SLOT_ID, h->position + done,
+                    rc = dataslot_read(h->slot_id, h->position + done,
                                        (void *)DMA_BUFFER, chunk);
                     if (rc != 0 || uc[0] == DMA_SENTINEL)
                         return done;
@@ -368,11 +379,27 @@ int Sys_FileWrite(int handle, void *data, int count)
     return 0;
 }
 
+/* Save region layout (must match file.c defines) */
+#define SAV_REGION_BASE  0x13C00000
+#define SAV_SLOT_SIZE    (128 * 1024)
+#define SAV_MAX_SLOTS    12
+
 int Sys_FileTime(char *path)
 {
     int offset, length;
     if (Pak_FindFile(path, &offset, &length))
         return 1;
+
+    /* Check config slot for persisted config.cfg (bridge auto-loaded SDRAM).
+     * Config is slot 12 (after 12 save slots) in the SDRAM region. */
+    int len = strlen(path);
+    if (len >= 4 && strcmp(path + len - 4, ".cfg") == 0) {
+        uint32_t cfg_addr = SAV_REGION_BASE + SAV_MAX_SLOTS * SAV_SLOT_SIZE;
+        uint32_t saved_size = *(volatile uint32_t *)SDRAM_UNCACHED(cfg_addr);
+        if (saved_size > 0 && saved_size < SAV_SLOT_SIZE)
+            return 1;
+    }
+
     return -1;
 }
 
@@ -500,73 +527,31 @@ void __attribute__((noinline, aligned(4))) quake_main(void)
     static quakeparms_t parms;
     float time, oldtime, newtime;
 
-    /* Debug markers: raw VRAM writes BEFORE any function calls.
-     * VRAM at 0x20000000, row 29, cols 5-6. */
-    ((volatile char *)0x20000000)[29 * 40 + 5] = 'Q';
-    ((volatile char *)0x20000000)[29 * 40 + 6] = '!';
-
-    /* Ultra-early canary: raw SDRAM write (no function calls) */
-    *(volatile unsigned int *)0x13E00000 = 0xAA55AA55;
-
-    /* Debug: print to terminal to confirm we reached quake_main */
-    term_printf("=== quake_main REACHED ===\n");
-
-    pq_dbg_stage = 0x1000;
-
-    pq_dbg_stage = 0x1001;
     /* Set up parameters */
     parms.basedir = ".";
     parms.cachedir = NULL;
     parms.argc = 1;
     parms.argv = quake_argv;
 
-    pq_dbg_stage = 0x1002;
     /* Set up heap - use the linker-defined heap region */
     parms.membase = (void *)_heap_start;
     parms.memsize = (int)(_heap_end - _heap_start);
 
-    pq_dbg_stage = 0x1020;
     /* Initialize Quake engine */
     Host_Init(&parms);
-    pq_dbg_stage = 0x1030;
 
     /* Main loop */
     oldtime = Sys_FloatTime();
-    {
-        volatile char *vram = (volatile char *)0x20000000;
-        int frame_num = 0;
-        while (1) {
-            /* VRAM row 27: frame counter (visible even if SDRAM hung) */
-            vram[27 * 40 + 0] = 'F';
-            vram[27 * 40 + 1] = '0' + ((frame_num / 1000) % 10);
-            vram[27 * 40 + 2] = '0' + ((frame_num / 100) % 10);
-            vram[27 * 40 + 3] = '0' + ((frame_num / 10) % 10);
-            vram[27 * 40 + 4] = '0' + (frame_num % 10);
+    while (1) {
+        newtime = Sys_FloatTime();
+        time = newtime - oldtime;
 
-            newtime = Sys_FloatTime();
-            time = newtime - oldtime;
+        if (time < 0.001)
+            continue;
+        if (time > 0.1f)
+            time = 0.1f;
 
-            /* Limit to reasonable frame time */
-            if (time < 0.001)
-                continue;
-            if (time > 0.1)
-                time = 0.1;
-
-            vram[27 * 40 + 6] = 'H';  /* about to call Host_Frame */
-            {
-                int dma_before = dma_total_calls;
-                Host_Frame(time);
-                int dma_after = dma_total_calls;
-                vram[27 * 40 + 6] = 'D';
-                /* Show DMA calls this frame */
-                int d = dma_after - dma_before;
-                vram[27 * 40 + 8] = 'D';
-                vram[27 * 40 + 9] = '0' + ((d / 100) % 10);
-                vram[27 * 40 + 10] = '0' + ((d / 10) % 10);
-                vram[27 * 40 + 11] = '0' + (d % 10);
-            }
-            frame_num++;
-            oldtime = newtime;
-        }
+        Host_Frame(time);
+        oldtime = newtime;
     }
 }

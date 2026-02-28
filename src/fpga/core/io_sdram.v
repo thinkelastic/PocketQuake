@@ -41,7 +41,7 @@ input   wire            word_wr,
 input   wire    [23:0]  word_addr,
 input   wire    [31:0]  word_data,
 input   wire    [3:0]   word_wstrb, // byte enables: [0]=byte0, [1]=byte1, [2]=byte2, [3]=byte3
-input   wire    [2:0]   word_burst_len, // 0=single word, N=N+1 words (for CPU cache line fills)
+input   wire    [3:0]   word_burst_len, // 0=single word, N=N+1 words (for CPU cache line fills)
 output  reg     [31:0]  word_q,
 output  reg             word_busy,
 output  reg             word_q_valid  // Pulses high for one cycle when word_q data is valid
@@ -65,13 +65,13 @@ assign {phy_ras, phy_cas, phy_we} = cmd;
     localparam      CMD_SELFENTER       = 3'b001;
     localparam      CMD_SELFEXIT        = 3'b111;
 
-    localparam      CAS                 =   4'd3;   // timings are for 100MHz (10.00ns)
+    localparam      CAS                 =   4'd3;   // timings are for 110MHz (9.09ns)
     localparam      TIMING_LMR          =   4'd2;   // tLMR = 2ck
-    localparam      TIMING_AUTOREFRESH  =   4'd8;   // tRFC = 80ns @ 100MHz = 8 cycles (80.0ns)
-    localparam      TIMING_PRECHARGE    =   4'd2;   // tRP = 15ns @ 100MHz = 2 cycles (20.0ns)
-    localparam      TIMING_ACT_ACT      =   4'd6;   // tRC = 60ns @ 100MHz = 6 cycles (60.0ns)
-    localparam      TIMING_ACT_RW       =   4'd2;   // tRCD = 15ns @ 100MHz = 2 cycles (20.0ns)
-    localparam      TIMING_ACT_PRECHG   =   4'd5;   // tRAS = 42ns @ 100MHz = 5 cycles (50.0ns)
+    localparam      TIMING_AUTOREFRESH  =   4'd9;   // tRFC = 80ns @ 110MHz = 9 cycles (81.8ns)
+    localparam      TIMING_PRECHARGE    =   4'd2;   // tRP = 15ns @ 110MHz = 2 cycles (18.2ns)
+    localparam      TIMING_ACT_ACT      =   4'd7;   // tRC = 60ns @ 110MHz = 7 cycles (63.6ns)
+    localparam      TIMING_ACT_RW       =   4'd2;   // tRCD = 15ns @ 110MHz = 2 cycles (18.2ns)
+    localparam      TIMING_ACT_PRECHG   =   4'd5;   // tRAS = 42ns @ 110MHz = 5 cycles (45.5ns)
     localparam      TIMING_WRITE        =   4'd2;   // tWR = 2ck
 
     reg     [5:0]   state;
@@ -141,7 +141,7 @@ synch_3 s1(reset_n, reset_n_s, controller_clk);
     reg [23:0] word_addr_captured;
     reg [31:0] word_data_captured;
     reg [3:0]  word_wstrb_captured;
-    reg [2:0]  word_burst_len_captured;
+    reg [3:0]  word_burst_len_captured;
 
     reg burst_rd_queue;
     reg burstwr_queue;
@@ -352,7 +352,7 @@ always @(posedge controller_clk) begin
             word_op <= 1;
             addr <= pending_addr;
             word_busy <= 1;
-            length <= {8'd0, word_burst_len_captured} + 11'd1;
+            length <= {7'd0, word_burst_len_captured} + 11'd1;
 
             if(pending_row_hit) begin
                 // ROW HIT: skip ACT+tRCD, go directly to READ

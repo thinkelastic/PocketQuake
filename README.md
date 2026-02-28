@@ -1,6 +1,6 @@
 # PocketQuake
 
-Quake (1996) running natively on the [Analogue Pocket](https://www.analogue.co/pocket) via a VexRiscv RISC-V soft CPU on the Cyclone V FPGA. No emulation — the id Software Quake engine runs as bare-metal firmware on a hardware CPU synthesized in the FPGA fabric.
+Quake (1996) running natively on the [Analogue Pocket](https://www.analogue.co/pocket) via a VexiiRiscv RISC-V soft CPU on the Cyclone V FPGA. No emulation — the id Software Quake engine runs as bare-metal firmware on a hardware CPU synthesized in the FPGA fabric.
 
 ## Installation
 
@@ -32,7 +32,9 @@ In menus, A and B act as confirm and D-pad up/down navigates.
 ## Features
 
 - **Full Quake engine** — Software-rendered Quake at 320x240, 8-bit indexed color with hardware palette lookup
-- **VexRiscv RISC-V CPU** — rv32imafc (integer, multiply/divide, atomics, single-precision FPU, compressed instructions) at 100 MHz
+- **VexiiRiscv RISC-V CPU** — rv32imafc (integer, multiply/divide, atomics, single-precision FPU, compressed instructions) at 100 MHz with branch prediction (BTB, GShare, RAS)
+- **16 KB I-cache + 128 KB D-cache** — Direct-mapped I-cache with next-line prefetch, 2-way set-associative D-cache with 32-entry store buffer, 64-byte cache lines
+- **PSRAM code execution** — Quake code runs from 16 MB CellularRAM in synchronous burst mode (37 cycles per 64-byte cache line fill)
 - **Hardware span rasterizer** — FPGA accelerator offloads textured span drawing, z-buffer writes (to dedicated SRAM), and surface block rendering from the CPU
 - **Dedicated SRAM z-buffer** — 256 KB external SRAM for z-buffer with parallel access alongside SDRAM texture/framebuffer operations
 - **DMA blit engine** — Hardware-accelerated framebuffer clears and block copies
@@ -50,11 +52,11 @@ In menus, A and B act as confirm and D-pad up/down navigates.
 +-----------------------------------------------------------------------+
 |                                                                       |
 |  +------------------------+   +-----------------------------------+   |
-|  |     VexRiscv CPU       |   |         Memory Subsystem          |   |
+|  |    VexiiRiscv CPU      |   |         Memory Subsystem          |   |
 |  |  rv32imafc @ 100 MHz   |   |                                   |   |
-|  |                        |   | +------+ +------+ +-----+ +----+ |   |
+|  |  BTB+GShare+RAS        |   | +------+ +------+ +-----+ +----+ |   |
 |  |  I$ 16KB (direct-map)  |   | | BRAM | | SDRAM| |PSRAM| |SRAM| |   |
-|  |  D$ 64KB (2-way)       |   | | 64KB | | 64MB | |16MB | |256K| |   |
+|  |  D$ 128KB (2-way)      |   | | 64KB | | 64MB | |16MB | |256K| |   |
 |  +------------+-----------+   | +------+ +------+ +-----+ +----+ |   |
 |               |               +---+--------+---------+-------+----+   |
 |               |                   |        |         |       |        |
@@ -89,9 +91,20 @@ In menus, A and B act as confirm and D-pad up/down navigates.
 +-----------------------------------------------------------------------+
 ```
 
+### CPU
+
+VexiiRiscv is a RISC-V CPU generated with SpinalHDL. The PocketQuake configuration uses:
+
+- **ISA:** rv32imafc — integer, hardware multiply/divide, atomics, single-precision FPU, compressed (RVC)
+- **Pipeline:** Multi-stage, in-order, single-issue
+- **Branch prediction:** BTB (512 sets, relaxed), GShare (4 KB), RAS (depth 4)
+- **I-cache:** 16 KB, 1-way, 256 sets, 64-byte lines, next-line hardware prefetch
+- **D-cache:** 128 KB, 2-way set-associative, 1024 sets, 64-byte lines, 32-entry store buffer
+- **Bus:** 3 AXI4 interfaces — FetchL1 (I-cache reads), LsuL1 (D-cache reads/writes), IO (uncached MMIO)
+
 ### AXI4 Bus Fabric
 
-The CPU's AXI4 bus is routed through a 3-way address decoder in `cpu_system.v`:
+The CPU's AXI4 buses are arbitrated and routed through a 3-way address decoder in `cpu_system.v`:
 
 - **SDRAM** (`0x10-0x13`, `0x50-0x53`) — Through a 3-port AXI4 arbiter shared with the span rasterizer and DMA engine
 - **PSRAM** (`0x30`) — Direct AXI4 slave, muxed with APF bridge writes
@@ -101,15 +114,15 @@ The CPU's AXI4 bus is routed through a 3-way address decoder in `cpu_system.v`:
 
 | Address Range             | Size   | Description                                          |
 |---------------------------|--------|------------------------------------------------------|
-| `0x00000000 - 0x0000FFFF` | 64 KB  | BRAM — bootloader, hot code (.fasttext), sin tables   |
+| `0x00000000 - 0x0000FFFF` | 64 KB  | BRAM -- bootloader, hot code (.fasttext), sin tables  |
 | `0x10000000 - 0x10012BFF` | 75 KB  | Framebuffer 0 (320x240, 8-bit indexed)               |
 | `0x10100000 - 0x10112BFF` | 75 KB  | Framebuffer 1 (double buffer)                        |
 | `0x10200000`              | ~2 MB  | quake.bin load address (LMA, copied to PSRAM)        |
 | `0x11000000`              | ~18 MB | pak0.pak game data (memory-mapped)                   |
 | `0x12400000`              | ~28 MB | BSS + heap                                           |
 | `0x20000000`              | 1.2 KB | Terminal VRAM (40x30 characters)                     |
-| `0x30000000 - 0x30FFFFFF` | 16 MB  | PSRAM/CRAM0 — Quake code + rodata + data (VMA)       |
-| `0x38000000 - 0x3803FFFF` | 256 KB | SRAM — Z-buffer (153 KB used for 320x240)            |
+| `0x30000000 - 0x30FFFFFF` | 16 MB  | PSRAM/CRAM0 -- Quake code + rodata + data (VMA)      |
+| `0x38000000 - 0x3803FFFF` | 256 KB | SRAM -- Z-buffer (153 KB used for 320x240)           |
 | `0x40000000`              | 256 B  | System registers                                     |
 | `0x44000000`              | 256 B  | DMA Clear/Blit registers                             |
 | `0x48000000`              | 256 B  | Span rasterizer registers                            |
@@ -154,19 +167,19 @@ The CPU's AXI4 bus is routed through a 3-way address decoder in `cpu_system.v`:
 
 The span rasterizer is an FPGA state machine that offloads the inner loops of Quake's software renderer. It handles:
 
-- **Textured span drawing** — Replaces `D_DrawSpans8`, fetching texels from SDRAM and writing 8-bit pixels to the framebuffer
-- **Z-buffer span writes** — Writes z-values directly to SRAM, freeing SDRAM bandwidth for textures and framebuffer
-- **Surface block rendering** — Processes entire surface vblocks with hardware bilinear light interpolation (replaces `R_DrawSurfaceBlock8_mip0-3`)
-- **Colormap lookup** — 16 KB BRAM stores the Quake colormap for light-level application
-- **Turbulence** — 128-entry sine LUT for water/lava/teleporter warping
+- **Textured span drawing** -- Replaces `D_DrawSpans8`, fetching texels from SDRAM and writing 8-bit pixels to the framebuffer
+- **Combined texture + z-buffer writes** -- Fire-and-forget SRAM z-writes alongside pixel processing, eliminating the separate `D_DrawZSpans` pass (~13 ms/frame savings)
+- **Surface block rendering** -- Processes entire surface vblocks with hardware bilinear light interpolation (replaces `R_DrawSurfaceBlock8_mip0-3`)
+- **Colormap lookup** -- 16 KB BRAM stores the Quake colormap for light-level application
+- **Turbulence** -- 128-entry sine LUT for water/lava/teleporter warping
 
-The rasterizer has a 3-deep command queue (1 active + 2-entry FIFO), a 16-entry direct-mapped texture cache backed by M10K block RAM, and non-blocking prefetch that predicts the next cache line during idle cycles.
+The rasterizer has a 3-deep command queue (1 active + 2-entry FIFO), a 16-entry direct-mapped texture cache backed by M10K block RAM, write-behind buffering that overlaps SDRAM writes with next-pixel computation, and non-blocking prefetch that predicts the next cache line during idle cycles.
 
 ### SRAM Z-Buffer
 
 The z-buffer lives in a dedicated 256 KB external SRAM chip, separate from SDRAM. This provides true parallel access: the span rasterizer writes z-values to SRAM while simultaneously reading textures and writing pixels via SDRAM. A 3-way combinational priority mux (CPU > Span rasterizer > sram_fill) arbitrates access to the SRAM controller.
 
-The **sram_fill engine** autonomously clears the z-buffer at the start of each frame, overlapping with CPU frame setup work. At 100 MHz with WAIT_CYCLES=5, a 153 KB z-clear takes ~6.9 ms while the CPU processes BSP traversal and edge setup in parallel.
+The **sram_fill engine** autonomously clears the z-buffer at the start of each frame, overlapping with CPU frame setup work.
 
 ### DMA Clear/Blit Engine
 
@@ -186,10 +199,10 @@ Fixed-function matrix-multiply-accumulate unit for transforming alias model vert
 
 ## Audio Pipeline
 
-- **Sample rate:** 48 kHz stereo, 16-bit signed
-- **I2S output:** MCLK 12.288 MHz, SCLK 3.072 MHz, LRCK 48 kHz
-- **FIFO:** 4096-entry dual-clock FIFO (CPU clock to audio clock)
-- **Mixing:** Quake mixes at 11,025 Hz, firmware upsamples to 48 kHz via Bresenham resampling
+- **Output:** 48 kHz stereo, 16-bit signed, I2S
+- **I2S clocks:** MCLK 12.288 MHz, SCLK 3.072 MHz, LRCK 48 kHz
+- **FIFO:** 2048-entry dual-clock FIFO (CPU clock to audio clock)
+- **Mixing:** 11,025 Hz mono (native Quake sample rate), upsampled to 48 kHz via Bresenham resampling, duplicated to both L/R channels
 - **Interface:** CPU writes 32-bit stereo samples `{L16, R16}` to MMIO 0x4C000000
 
 ## Link Cable Multiplayer
@@ -217,13 +230,13 @@ Fixed-function matrix-multiply-accumulate unit for transforming alias model vert
 |---|---|
 | **PQ_FASTTEXT** | ~40 hot rendering functions pinned to 64 KB BRAM for single-cycle access |
 | **LTO** | Link-time optimization across all Quake source files (saves ~12 KB code) |
-| **HW span accel** | Textured spans offloaded to FPGA rasterizer |
-| **HW z-span accel** | Z-buffer writes to dedicated SRAM via span rasterizer, freeing SDRAM bandwidth |
+| **HW span accel** | Textured spans offloaded to FPGA rasterizer with write-behind buffering |
+| **Combined z-writes** | Z-buffer writes interleaved with texture spans, eliminating separate D_DrawZSpans pass |
 | **Async z-clear** | sram_fill engine clears z-buffer autonomously while CPU does frame setup |
 | **HW surface blocks** | Surface vblock rendering offloaded to FPGA (9 MMIO writes vs 80 per-row) |
-| **Write-behind** | Rasterizer overlaps SDRAM writes with next pixel computation |
 | **Texture prefetch** | Non-blocking background SDRAM reads predict next cache line |
 | **M10K cache** | Texture cache data in M10K block RAM eliminates 16:1 combinational mux |
+| **PSRAM sync burst** | CellularRAM synchronous burst mode: 37 cycles per 64B line (vs 256 async) |
 | **Size culling** | BSP subtrees culled when projected bounding box smaller than `r_cullsize` pixels |
 | **Surface cache 2 MB** | Large surface cache reduces texture re-rasterization thrashing |
 | **Scanline alias models** | Alias models use faster scanline path instead of recursive subdivision |
@@ -232,10 +245,9 @@ Fixed-function matrix-multiply-accumulate unit for transforming alias model vert
 
 | Resource | Used | Available | Utilization |
 |----------|------|-----------|-------------|
-| ALMs     | 10,707 | 18,480 | 58% |
-| Registers | 17,015 | — | — |
-| M10K blocks | 225 | 308 | 73% |
-| DSP blocks | 17 | 66 | 26% |
+| ALMs     | ~16,000 | 18,480 | ~86% |
+| M10K blocks | ~301 | 308 | ~98% |
+| DSP blocks | ~15 | 66 | ~23% |
 | PLLs | 2 | 4 | 50% |
 
 ## Building
@@ -273,7 +285,7 @@ make program          # Program via JTAG (USB Blaster)
 ### Package Release
 
 ```bash
-make                  # From project root — packages release/ directory
+make                  # From project root -- packages release/ directory
 ```
 
 ### Quick Development Cycle
@@ -330,13 +342,13 @@ SD Card Root/
 |   +-- fpga/                      # FPGA design (Verilog)
 |   |   +-- core/
 |   |   |   +-- core_top.v         # Top-level wiring and clock generation
-|   |   |   +-- cpu_system.v       # VexRiscv + AXI4 bus router
+|   |   |   +-- cpu_system.v       # VexiiRiscv + AXI4 bus router
 |   |   |   +-- axi_periph_slave.v # AXI4 peripheral slave (BRAM, sysreg, etc.)
 |   |   |   +-- axi_sdram_arbiter.v # 3-port SDRAM AXI4 arbiter
 |   |   |   +-- axi_sdram_slave.v  # AXI4-to-SDRAM word protocol bridge
 |   |   |   +-- axi_psram_slave.v  # AXI4-to-PSRAM word protocol bridge
 |   |   |   +-- io_sdram.v         # SDRAM controller
-|   |   |   +-- psram_controller.v # PSRAM controller
+|   |   |   +-- psram_controller.v # PSRAM controller (sync burst + async)
 |   |   |   +-- sram_controller.v  # Async SRAM controller (32-bit word interface)
 |   |   |   +-- sram_fill.v        # SRAM fill engine (autonomous z-buffer clear)
 |   |   |   +-- span_rasterizer.v  # Hardware span/texture rasterizer
@@ -347,7 +359,7 @@ SD Card Root/
 |   |   |   +-- link_mmio.v        # Link cable serial transceiver
 |   |   |   +-- text_terminal.v    # Debug text overlay
 |   |   +-- vexriscv/
-|   |   |   +-- VexRiscv_Full.v    # Generated RISC-V CPU core
+|   |   |   +-- VexiiRiscv_Full.v  # Generated RISC-V CPU core
 |   |   |   +-- generate.sh        # SpinalHDL generation script
 |   |   +-- apf/                   # Analogue Pocket framework (bridge, I/O)
 |   |   +-- Makefile
@@ -371,11 +383,11 @@ SD Card Root/
 ## License
 
 - **Quake engine:** GPL-2.0 (id Software)
-- **VexRiscv:** MIT (SpinalHDL)
+- **VexiiRiscv:** MIT (SpinalHDL)
 - **PocketQuake (FPGA/firmware):** MIT
 
 ## Acknowledgments
 
-- [id Software](https://github.com/id-Software/Quake) — Original Quake source release
-- [SpinalHDL/VexRiscv](https://github.com/SpinalHDL/VexRiscv) — RISC-V CPU core
-- [Analogue](https://www.analogue.co/developer) — Pocket openFPGA development framework
+- [id Software](https://github.com/id-Software/Quake) -- Original Quake source release
+- [SpinalHDL/VexiiRiscv](https://github.com/SpinalHDL/VexiiRiscv) -- RISC-V CPU core
+- [Analogue](https://www.analogue.co/developer) -- Pocket openFPGA development framework
