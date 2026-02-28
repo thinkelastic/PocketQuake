@@ -21,6 +21,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "r_local.h"
+#include "libc.h"
+
+/* Sub-profiling: R_RenderFace time within R_RecursiveWorldNode */
+unsigned int pq_prof_rw_renderface_cycles;
+extern cvar_t pq_cycleprof;
 
 //
 // current entity info
@@ -456,6 +461,8 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 	msurface_t	*surf, **mark;
 	mleaf_t		*pleaf;
 	float		d, dot;
+	int			profiling = (int)pq_cycleprof.value;
+	unsigned int prof_t;
 
 	if (node->contents == CONTENTS_SOLID)
 		return;		// solid
@@ -530,7 +537,7 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 				clipflags &= ~(1<<i);
 		}
 	}
-	
+
 // if a leaf node, draw stuff
 	if (node->contents < 0)
 	{
@@ -579,7 +586,7 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 			dot = DotProduct (modelorg, plane->normal) - plane->dist;
 			break;
 		}
-	
+
 		if (dot >= 0)
 			side = 0;
 		else
@@ -594,6 +601,8 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 		if (c)
 		{
 			surf = cl.worldmodel->surfaces + node->firstsurface;
+
+			if (profiling) prof_t = SYS_CYCLE_LO;
 
 			if (dot < -BACKFACE_EPSILON)
 			{
@@ -619,6 +628,8 @@ PQ_FASTTEXT void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 					surf++;
 				} while (--c);
 			}
+
+			if (profiling) pq_prof_rw_renderface_cycles += SYS_CYCLE_LO - prof_t;
 
 		// all surfaces on the same node share the same sequence number
 			r_currentkey++;

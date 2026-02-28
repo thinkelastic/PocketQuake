@@ -119,6 +119,14 @@ _trap_entry:
     /* Store 0 at x0 position (for completeness) */
     sw zero, 0(sp)
 
+    /* Debug marker: write "T!" to VRAM row 29, cols 8-9
+     * Registers x1,x3 already saved above, safe to reuse */
+    lui x1, 0x20000         /* x1 = 0x20000000 (VRAM base) */
+    li  x3, 0x54            /* x3 = 'T' */
+    sb  x3, 0x490(x1)       /* VRAM[29*40 + 8] = 'T' */
+    li  x3, 0x21            /* x3 = '!' */
+    sb  x3, 0x491(x1)       /* VRAM[29*40 + 9] = '!' */
+
     /* Save f0-f31 (floating-point registers) */
     fsw f0,  140(sp)
     fsw f1,  144(sp)
@@ -254,6 +262,49 @@ _fatal_trap:
 .global switch_to_runtime_stack_and_call
 switch_to_runtime_stack_and_call:
     mv sp, a1
+    /* Debug: write "S" then hex dump a0 to VRAM row 29 starting col 4
+     * Format: S XXXXXXXX (address we're about to jump to) */
+    lui t0, 0x20000         /* t0 = 0x20000000 (VRAM base) */
+    li  t1, 0x53            /* t1 = 'S' */
+    sb  t1, 0x48B(t0)       /* VRAM[29*40 + 3] = 'S' */
+
+    /* Hex dump a0 (8 nibbles) to VRAM row 29, cols 5-12 */
+    mv  t2, a0              /* t2 = address to dump */
+    addi t3, t0, 0x48D      /* t3 = &VRAM[29*40 + 5] */
+    li  t4, 8               /* 8 nibbles */
+.L_hexloop:
+    srli t1, t2, 28         /* top nibble */
+    slli t2, t2, 4          /* shift left for next nibble */
+    addi t5, t1, 0x30       /* assume '0'-'9' */
+    li  t6, 10
+    blt t1, t6, .L_hexstore
+    addi t5, t1, 0x37       /* 'A'-'F': 10+0x37=0x41='A' */
+.L_hexstore:
+    sb  t5, 0(t3)
+    addi t3, t3, 1
+    addi t4, t4, -1
+    bnez t4, .L_hexloop
+
+    /* Also load first word from target via D-bus and write to cols 14-21
+     * This confirms PSRAM has valid data at the jump target.
+     * Word-align the address since RVC may place quake_main at +2 */
+    andi t2, a0, -4          /* word-align: 0x3000c2c6 → 0x3000c2c4 */
+    lw  t2, 0(t2)            /* safe word-aligned D-bus read */
+    addi t3, t0, 0x496      /* t3 = &VRAM[29*40 + 14] */
+    li  t4, 8
+.L_hexloop2:
+    srli t1, t2, 28
+    slli t2, t2, 4
+    addi t5, t1, 0x30
+    li  t6, 10
+    blt t1, t6, .L_hexstore2
+    addi t5, t1, 0x37
+.L_hexstore2:
+    sb  t5, 0(t3)
+    addi t3, t3, 1
+    addi t4, t4, -1
+    bnez t4, .L_hexloop2
+
     jr a0
 1:
     j 1b

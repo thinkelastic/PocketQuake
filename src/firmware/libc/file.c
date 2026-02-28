@@ -42,9 +42,9 @@ static void free_file(FILE *f) {
     }
 }
 
-/* PAK file location in SDRAM (same as sys_pocket.c) */
-#define PAK_BASE_ADDR    0x11000000
-#define PAK_HEADER_MAGIC (('P') | ('A' << 8) | ('C' << 16) | ('K' << 24))
+/* PAK data slot ID (matches data.json) */
+#define PAK_SLOT_ID      0
+#define PAK_MAX_SIZE     (48 * 1024 * 1024)  /* 48MB max */
 
 /* Check if string ends with suffix */
 static int str_ends_with(const char *str, const char *suffix) {
@@ -54,11 +54,11 @@ static int str_ends_with(const char *str, const char *suffix) {
     return strcmp(str + str_len - suf_len, suffix) == 0;
 }
 
-/* Map filename to data slot ID, or -2 for memory-mapped PAK */
+/* Map filename to data slot ID, or -2 for on-demand PAK */
 static int filename_to_slot(const char *pathname) {
-    /* Check for pak0.pak - use memory-mapped PAK data */
+    /* Check for pak0.pak - on-demand reads via dataslot */
     if (str_ends_with(pathname, "pak0.pak") || str_ends_with(pathname, "PAK0.PAK")) {
-        return -2;  /* Special: use memory-mapped PAK */
+        return -2;  /* Special: on-demand PAK via dataslot_read */
     }
 
     /* Check for known filenames from other projects */
@@ -99,16 +99,10 @@ FILE *fopen(const char *pathname, const char *mode) {
     f->flags = 0;
 
     if (slot_id == -2) {
-        /* Memory-mapped PAK file - read directly from SDRAM */
-        typedef struct { int ident; int dirofs; int dirlen; } pakheader_t;
-        pakheader_t *hdr = (pakheader_t *)PAK_BASE_ADDR;
-        if (hdr->ident == PAK_HEADER_MAGIC) {
-            f->data = (void *)PAK_BASE_ADDR;
-            f->size = hdr->dirofs + hdr->dirlen;  /* Total PAK size */
-        } else {
-            free_file(f);
-            return NULL;  /* Invalid PAK header */
-        }
+        /* On-demand PAK file via dataslot_read */
+        f->slot_id = PAK_SLOT_ID;
+        f->data = NULL;
+        f->size = PAK_MAX_SIZE;
     } else {
         /* Get slot size from dataslot system */
         if (dataslot_get_size(slot_id, &f->size) != 0) {
@@ -157,13 +151,20 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
         return nmemb;
     }
 
-    /* Otherwise, load directly from data slot to provided buffer */
-    /* This is slower but works for non-mmap usage */
-    if (dataslot_read(stream->slot_id, stream->offset, ptr, total_bytes) != 0) {
-        return 0;
+    /* DMA to bounce buffer, then copy via uncacheable alias to avoid
+     * stale D-cache lines at the destination address. */
+    uint8_t *dest = (uint8_t *)ptr;
+    size_t remaining = total_bytes;
+    while (remaining > 0) {
+        size_t chunk = remaining > DMA_CHUNK_SIZE ? DMA_CHUNK_SIZE : remaining;
+        if (dataslot_read(stream->slot_id, stream->offset, (void *)DMA_BUFFER, chunk) != 0) {
+            return 0;
+        }
+        memcpy(dest, SDRAM_UNCACHED(DMA_BUFFER), chunk);
+        dest += chunk;
+        stream->offset += chunk;
+        remaining -= chunk;
     }
-
-    stream->offset += total_bytes;
     return nmemb;
 }
 
@@ -599,8 +600,19 @@ ssize_t read(int fd, void *buf, size_t count) {
         return 0;
     }
 
-    if (dataslot_read(slot_id, fd_offset[slot_id], buf, count) != 0) {
-        return -1;
+    /* DMA to bounce buffer, copy via uncacheable alias */
+    uint8_t *dest = (uint8_t *)buf;
+    size_t remaining = count;
+    uint32_t off = fd_offset[slot_id];
+    while (remaining > 0) {
+        size_t chunk = remaining > DMA_CHUNK_SIZE ? DMA_CHUNK_SIZE : remaining;
+        if (dataslot_read(slot_id, off, (void *)DMA_BUFFER, chunk) != 0) {
+            return -1;
+        }
+        memcpy(dest, SDRAM_UNCACHED(DMA_BUFFER), chunk);
+        dest += chunk;
+        off += chunk;
+        remaining -= chunk;
     }
 
     fd_offset[slot_id] += count;
@@ -751,10 +763,21 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
         return MAP_FAILED;
     }
 
-    /* Load data from data slot */
-    if (dataslot_read(slot_id, offset, ptr, length) != 0) {
-        free(ptr);
-        return MAP_FAILED;
+    /* DMA to bounce buffer in chunks, copy via uncacheable alias to
+     * avoid stale D-cache lines at the malloc'd destination. */
+    uint8_t *dest = (uint8_t *)ptr;
+    size_t remaining = length;
+    uint32_t slot_off = (uint32_t)offset;
+    while (remaining > 0) {
+        size_t chunk = remaining > DMA_CHUNK_SIZE ? DMA_CHUNK_SIZE : remaining;
+        if (dataslot_read(slot_id, slot_off, (void *)DMA_BUFFER, chunk) != 0) {
+            free(ptr);
+            return MAP_FAILED;
+        }
+        memcpy(dest, SDRAM_UNCACHED(DMA_BUFFER), chunk);
+        dest += chunk;
+        slot_off += chunk;
+        remaining -= chunk;
     }
 
     return ptr;

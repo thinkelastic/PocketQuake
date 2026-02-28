@@ -24,6 +24,13 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "r_local.h"
 #include "d_local.h"	// FIXME: shouldn't need to include this
 
+/* Inline ceiling for non-negative floats (avoids PSRAM ceilf call) */
+static inline int pq_ceilf_int(float v)
+{
+	int i = (int)v;
+	return i + (v > (float)i);
+}
+
 #define MAXLEFTCLIPEDGES		100
 
 // !!! if these are changed, they must be changed in asm_draw.h too !!!
@@ -123,7 +130,7 @@ PQ_FASTTEXT void R_EmitEdge (mvertex_t *pv0, mvertex_t *pv1)
 		if (v0 > r_refdef.fvrectbottom_adj)
 			v0 = r_refdef.fvrectbottom_adj;
 	
-		ceilv0 = (int) ceilf(v0);
+		ceilv0 = pq_ceilf_int(v0);
 	}
 
 	world = &pv1->position[0];
@@ -163,7 +170,7 @@ PQ_FASTTEXT void R_EmitEdge (mvertex_t *pv0, mvertex_t *pv1)
 
 	r_emitted = 1;
 
-	r_ceilv1 = (int) ceilf(r_v1);
+	r_ceilv1 = pq_ceilf_int(r_v1);
 
 
 // create the edge
@@ -248,6 +255,9 @@ PQ_FASTTEXT void R_EmitEdge (mvertex_t *pv0, mvertex_t *pv1)
 
 	edge->nextremove = removeedges[v2];
 	removeedges[v2] = edge;
+
+	// Store v_end in edge->prev (unused by array-based AET, same cache line)
+	*(unsigned short *)&edge->prev = (unsigned short)v2;
 }
 
 

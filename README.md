@@ -32,8 +32,11 @@ In menus, A and B act as confirm and D-pad up/down navigates.
 ## Features
 
 - **Full Quake engine** — Software-rendered Quake at 320x240, 8-bit indexed color with hardware palette lookup
-- **VexRiscv RISC-V CPU** — rv32imaf (integer, multiply/divide, atomics, single-precision FPU) at 110 MHz
-- **Hardware span rasterizer** — FPGA accelerator offloads textured span drawing, z-buffer operations, and surface block rendering from the CPU
+- **VexRiscv RISC-V CPU** — rv32imafc (integer, multiply/divide, atomics, single-precision FPU, compressed instructions) at 100 MHz
+- **Hardware span rasterizer** — FPGA accelerator offloads textured span drawing, z-buffer writes (to dedicated SRAM), and surface block rendering from the CPU
+- **Dedicated SRAM z-buffer** — 256 KB external SRAM for z-buffer with parallel access alongside SDRAM texture/framebuffer operations
+- **DMA blit engine** — Hardware-accelerated framebuffer clears and block copies
+- **Alias transform MAC** — Fixed-function matrix-multiply accumulator for alias model vertex transformation
 - **48 kHz stereo audio** — I2S output with 11,025 Hz mix rate upsampled via Bresenham
 - **2-player link cable multiplayer** — GBC link cable at 256 kHz, full-duplex serial protocol
 - **Dock support** — HDMI output when docked
@@ -46,29 +49,53 @@ In menus, A and B act as confirm and D-pad up/down navigates.
 |                     (Cyclone V 5CEBA4F23C8)                           |
 +-----------------------------------------------------------------------+
 |                                                                       |
-|  +-----------------------+    +-----------------------------------+   |
-|  |    VexRiscv CPU       |    |        Memory Subsystem            |   |
-|  |  rv32imaf @ 110 MHz   |    |                                   |   |
-|  |                       |    |  +--------+  +--------+  +------+ |   |
-|  |  I$ 32KB  (2-way)     |    |  | BRAM   |  | SDRAM  |  | PSRAM| |   |
-|  |  D$ 128KB (2-way)     |    |  | 64KB   |  | 64MB   |  | 16MB | |   |
-|  +-----------+-----------+    |  +--------+  +--------+  +------+ |   |
-|              |                |              +--------+            |   |
-|              |                |              | SRAM   |            |   |
-|              |                |              | 256KB  |            |   |
-|              |                +---+----------+--------+-----------++   |
-|              |                    |                                    |
-|  +-----------+--------------------+----------------------------+      |
-|  |                    VexRiscv AXI Bus                         |      |
-|  +----+--------+----------+---------+---------+--------+------++      |
-|       |        |          |         |         |        |       |      |
-|  +----+--+ +---+----+ +--+---+ +---+---+ +---+--+ +---+--+ +-+----+ |
-|  | Video | | Audio  | | Span | | Link  | | Sys  | | SRAM | | Cmap | |
-|  |Scanout| | Output | | Rast | | MMIO  | | Regs | | Fill | | BRAM | |
-|  +-------+ +--------+ +------+ +-------+ +------+ +------+ +------+ |
+|  +------------------------+   +-----------------------------------+   |
+|  |     VexRiscv CPU       |   |         Memory Subsystem          |   |
+|  |  rv32imafc @ 100 MHz   |   |                                   |   |
+|  |                        |   | +------+ +------+ +-----+ +----+ |   |
+|  |  I$ 16KB (direct-map)  |   | | BRAM | | SDRAM| |PSRAM| |SRAM| |   |
+|  |  D$ 64KB (2-way)       |   | | 64KB | | 64MB | |16MB | |256K| |   |
+|  +------------+-----------+   | +------+ +------+ +-----+ +----+ |   |
+|               |               +---+--------+---------+-------+----+   |
+|               |                   |        |         |       |        |
+|  +------------+-------------------+--------+---------+--+    |        |
+|  |                 AXI4 Bus Fabric (cpu_system.v)       |    |        |
+|  |  iBus/dBus arbiter -> 3-way decode {SDRAM,PSRAM,Lcl} |    |        |
+|  +----+-----------+-------------------+-----------------+    |        |
+|       |           |                   |                      |        |
+|       v           v                   v                      |        |
+|  +---------+ +---------+  +------------------------------+   |        |
+|  | SDRAM   | | PSRAM   |  |  AXI Peripheral Slave        |   |        |
+|  | Arbiter | | Slave   |  |  (axi_periph_slave.v)        |   |        |
+|  | 3-port  | |         |  |                              |   |        |
+|  +---------+ +---------+  |  BRAM, Colormap, Sys Regs,   |   |        |
+|   M0 M1 M2               |  Terminal, CDC, Periph Mux    |   |        |
+|   |  |  |                 +-+---+---+---+---+---+---+----+   |        |
+|   |  |  |                   |   |   |   |   |   |   |        |        |
+|  +--++--++--+           +---+-+-+-+-+-+-+-+-+-+-+-+-+-+--+   |        |
+|  |Span|DMA|CPU|         |Span|DMA|ATM|Audio|Link|Cmap|  |   |        |
+|  |Rast|Blt|   |         |Regs|Reg|Reg|FIFO |MMIO|BRAM|  |   |        |
+|  +--+-+---+---+         +----+---+---+-----+----+----+  |   |        |
+|     |                                                    |   |        |
+|     |  +---------------------------------------------+   |   |        |
+|     |  |     SRAM 3-Way Mux (CPU > Span > Fill)      |<--+---+        |
+|     |  +---------+-----------+-----------+-----------+                |
+|     |            |           |           |                            |
+|     +------------+    +------+----+ +----+------+                     |
+|      (z-writes)       | sram_fill | | sram_ctrl | --> SRAM pins       |
+|                       | (z-clear) | | (async)   |                     |
+|                       +-----------+ +-----------+                     |
 |                                                                       |
 +-----------------------------------------------------------------------+
 ```
+
+### AXI4 Bus Fabric
+
+The CPU's AXI4 bus is routed through a 3-way address decoder in `cpu_system.v`:
+
+- **SDRAM** (`0x10-0x13`, `0x50-0x53`) — Through a 3-port AXI4 arbiter shared with the span rasterizer and DMA engine
+- **PSRAM** (`0x30`) — Direct AXI4 slave, muxed with APF bridge writes
+- **Local** (everything else) — AXI4 peripheral slave handling BRAM, system registers, terminal, SRAM z-buffer, and all peripheral register dispatch
 
 ## Memory Map
 
@@ -82,15 +109,16 @@ In menus, A and B act as confirm and D-pad up/down navigates.
 | `0x12400000`              | ~28 MB | BSS + heap                                           |
 | `0x20000000`              | 1.2 KB | Terminal VRAM (40x30 characters)                     |
 | `0x30000000 - 0x30FFFFFF` | 16 MB  | PSRAM/CRAM0 — Quake code + rodata + data (VMA)       |
-| `0x38000000 - 0x3803FFFF` | 256 KB | SRAM — Z-buffer (153 KB used)                        |
+| `0x38000000 - 0x3803FFFF` | 256 KB | SRAM — Z-buffer (153 KB used for 320x240)            |
 | `0x40000000`              | 256 B  | System registers                                     |
+| `0x44000000`              | 256 B  | DMA Clear/Blit registers                             |
 | `0x48000000`              | 256 B  | Span rasterizer registers                            |
 | `0x4C000000`              | 8 B    | Audio FIFO (write samples / read status)             |
 | `0x4D000000`              | 256 B  | Link cable MMIO registers                            |
 | `0x50000000 - 0x53FFFFFF` | 64 MB  | SDRAM uncached alias (bypasses D-cache)              |
 | `0x54000000`              | 16 KB  | Colormap BRAM                                        |
 | `0x58000000`              | 8 KB   | Alias Transform MAC (registers + normal table)       |
-| `0x5C000000`              | 16 B   | SRAM fill engine registers                           |
+| `0x5C000000`              | 32 B   | SRAM fill engine registers (async z-buffer clear)    |
 
 ## System Registers (0x40000000)
 
@@ -103,8 +131,22 @@ In menus, A and B act as confirm and D-pad up/down navigates.
 | 0x10   | FB_DISPLAY     | Display framebuffer address (25-bit word addr) |
 | 0x14   | FB_DRAW        | Draw framebuffer address (25-bit word addr)    |
 | 0x18   | FB_SWAP        | Write 1 to swap on next vsync                 |
+| 0x20   | DS_SLOT_ID     | Target dataslot ID (16-bit)                    |
+| 0x24   | DS_SLOT_OFFSET | Target dataslot offset                         |
+| 0x28   | DS_BRIDGE_ADDR | Bridge destination/source address               |
+| 0x2C   | DS_LENGTH      | Transfer length in bytes                       |
+| 0x30   | DS_PARAM_ADDR  | Parameter struct address (for openfile)         |
+| 0x34   | DS_RESP_ADDR   | Response struct address                        |
+| 0x38   | DS_COMMAND     | Write to trigger: 1=read, 2=write, 3=openfile |
+| 0x3C   | DS_STATUS      | [0] ack, [1] done, [4:2] err                  |
 | 0x40   | PAL_INDEX      | Palette write index (auto-increment)           |
 | 0x44   | PAL_DATA       | Palette entry (RGB888, triggers write)         |
+| 0x50   | CONT1_KEY      | Controller 1 key bitmap (read-only)            |
+| 0x54   | CONT1_JOY      | Controller 1 joystick axes (read-only)         |
+| 0x58   | CONT1_TRIG     | Controller 1 triggers (read-only)              |
+| 0x5C   | CONT2_KEY      | Controller 2 key bitmap (read-only)            |
+| 0x60   | CONT2_JOY      | Controller 2 joystick axes (read-only)         |
+| 0x64   | CONT2_TRIG     | Controller 2 triggers (read-only)              |
 
 ## Hardware Accelerators
 
@@ -113,20 +155,26 @@ In menus, A and B act as confirm and D-pad up/down navigates.
 The span rasterizer is an FPGA state machine that offloads the inner loops of Quake's software renderer. It handles:
 
 - **Textured span drawing** — Replaces `D_DrawSpans8`, fetching texels from SDRAM and writing 8-bit pixels to the framebuffer
-- **Z-span writing** — Writes z-buffer values to SRAM (`D_DrawZSpans`)
+- **Z-buffer span writes** — Writes z-values directly to SRAM, freeing SDRAM bandwidth for textures and framebuffer
 - **Surface block rendering** — Processes entire surface vblocks with hardware bilinear light interpolation (replaces `R_DrawSurfaceBlock8_mip0-3`)
 - **Colormap lookup** — 16 KB BRAM stores the Quake colormap for light-level application
 - **Turbulence** — 128-entry sine LUT for water/lava/teleporter warping
 
 The rasterizer has a 3-deep command queue (1 active + 2-entry FIFO), a 16-entry direct-mapped texture cache backed by M10K block RAM, and non-blocking prefetch that predicts the next cache line during idle cycles.
 
-### SRAM Fill Engine
+### SRAM Z-Buffer
 
-Autonomously clears the z-buffer in SRAM while the CPU performs frame setup work, eliminating a ~153 KB memset per frame.
+The z-buffer lives in a dedicated 256 KB external SRAM chip, separate from SDRAM. This provides true parallel access: the span rasterizer writes z-values to SRAM while simultaneously reading textures and writing pixels via SDRAM. A 3-way combinational priority mux (CPU > Span rasterizer > sram_fill) arbitrates access to the SRAM controller.
 
-### SRAM Arbitration
+The **sram_fill engine** autonomously clears the z-buffer at the start of each frame, overlapping with CPU frame setup work. At 100 MHz with WAIT_CYCLES=5, a 153 KB z-clear takes ~6.9 ms while the CPU processes BSP traversal and edge setup in parallel.
 
-Three-way priority mux for SRAM access: CPU > span rasterizer > fill engine.
+### DMA Clear/Blit Engine
+
+Hardware DMA for framebuffer clears and memory block copies, with its own AXI4 master port to SDRAM. Frees the CPU from large memset/memcpy operations.
+
+### Alias Transform MAC
+
+Fixed-function matrix-multiply-accumulate unit for transforming alias model vertices. Includes a 512-entry normal vector lookup table in block RAM.
 
 ## Video Pipeline
 
@@ -134,7 +182,7 @@ Three-way priority mux for SRAM access: CPU > span rasterizer > fill engine.
 - **Color depth:** 8-bit indexed with 256-entry RGB888 hardware palette
 - **Scanout:** Burst reads from SDRAM (80 bursts x BL=2 = 320 pixels/line)
 - **Double buffered:** CPU draws to back buffer, `FB_SWAP` swaps on vsync
-- **Clock domain crossing:** Dual-clock FIFO between pixel clock (12.288 MHz) and SDRAM clock (110 MHz)
+- **Clock domain crossing:** Dual-clock FIFO between pixel clock (12.288 MHz) and SDRAM clock (100 MHz)
 
 ## Audio Pipeline
 
@@ -169,10 +217,9 @@ Three-way priority mux for SRAM access: CPU > span rasterizer > fill engine.
 |---|---|
 | **PQ_FASTTEXT** | ~40 hot rendering functions pinned to 64 KB BRAM for single-cycle access |
 | **LTO** | Link-time optimization across all Quake source files (saves ~12 KB code) |
-| **8-pixel spans** | `D_DrawSpans8` processes 8 pixels per perspective-correct step |
 | **HW span accel** | Textured spans offloaded to FPGA rasterizer |
-| **HW z-span accel** | Z-buffer writes offloaded to FPGA via SRAM port |
-| **HW z-clear** | SRAM fill engine clears z-buffer while CPU does frame setup |
+| **HW z-span accel** | Z-buffer writes to dedicated SRAM via span rasterizer, freeing SDRAM bandwidth |
+| **Async z-clear** | sram_fill engine clears z-buffer autonomously while CPU does frame setup |
 | **HW surface blocks** | Surface vblock rendering offloaded to FPGA (9 MMIO writes vs 80 per-row) |
 | **Write-behind** | Rasterizer overlaps SDRAM writes with next pixel computation |
 | **Texture prefetch** | Non-blocking background SDRAM reads predict next cache line |
@@ -185,16 +232,17 @@ Three-way priority mux for SRAM access: CPU > span rasterizer > fill engine.
 
 | Resource | Used | Available | Utilization |
 |----------|------|-----------|-------------|
-| ALMs     | ~9,875 | 18,480 | ~53% |
-| Registers | ~15,466 | — | — |
-| M10K blocks | 306 | 308 | 99% |
+| ALMs     | 10,707 | 18,480 | 58% |
+| Registers | 17,015 | — | — |
+| M10K blocks | 225 | 308 | 73% |
+| DSP blocks | 17 | 66 | 26% |
 | PLLs | 2 | 4 | 50% |
 
 ## Building
 
 ### Prerequisites
 
-- **RISC-V toolchain:** `riscv64-elf-gcc` with rv32imaf support
+- **RISC-V toolchain:** `riscv64-elf-gcc` with rv32imafc support
 - **Intel Quartus Prime:** 25.1 or later (Lite edition sufficient)
 - **Analogue Pocket:** Firmware 2.2 or later
 
@@ -202,8 +250,7 @@ Three-way priority mux for SRAM access: CPU > span rasterizer > fill engine.
 # Arch Linux
 sudo pacman -S riscv64-elf-gcc riscv64-elf-newlib
 
-# The firmware uses -march=rv32imaf -mabi=ilp32f
-# A custom libgcc without RVC is included (libgcc_norvc.a)
+# The firmware uses -march=rv32imafc -mabi=ilp32f
 ```
 
 ### Build Firmware
@@ -272,6 +319,9 @@ SD Card Root/
 |   |   |   +-- d_scan.c           # Span drawing (HW accelerated)
 |   |   |   +-- r_surf.c           # Surface rendering (HW accelerated)
 |   |   |   +-- r_edge.c           # Edge/span processing
+|   |   |   +-- span_accel.h       # Span rasterizer MMIO definitions
+|   |   |   +-- dma_accel.h        # DMA blit engine MMIO definitions
+|   |   |   +-- sram_fill_accel.h  # SRAM fill engine MMIO definitions
 |   |   |   +-- ...
 |   |   +-- libc/                  # Minimal C library
 |   |   +-- linker.ld              # Linker script (BRAM/PSRAM/SDRAM layout)
@@ -279,13 +329,22 @@ SD Card Root/
 |   |
 |   +-- fpga/                      # FPGA design (Verilog)
 |   |   +-- core/
-|   |   |   +-- core_top.v         # Top-level: CPU + bus + peripherals
+|   |   |   +-- core_top.v         # Top-level wiring and clock generation
+|   |   |   +-- cpu_system.v       # VexRiscv + AXI4 bus router
+|   |   |   +-- axi_periph_slave.v # AXI4 peripheral slave (BRAM, sysreg, etc.)
+|   |   |   +-- axi_sdram_arbiter.v # 3-port SDRAM AXI4 arbiter
+|   |   |   +-- axi_sdram_slave.v  # AXI4-to-SDRAM word protocol bridge
+|   |   |   +-- axi_psram_slave.v  # AXI4-to-PSRAM word protocol bridge
 |   |   |   +-- io_sdram.v         # SDRAM controller
+|   |   |   +-- psram_controller.v # PSRAM controller
+|   |   |   +-- sram_controller.v  # Async SRAM controller (32-bit word interface)
+|   |   |   +-- sram_fill.v        # SRAM fill engine (autonomous z-buffer clear)
 |   |   |   +-- span_rasterizer.v  # Hardware span/texture rasterizer
-|   |   |   +-- video_scanout_indexed.v  # 8-bit indexed video scanout
+|   |   |   +-- dma_clear_blit.v   # DMA framebuffer clear/blit engine
+|   |   |   +-- alias_transform_mac.v # Alias model vertex transform MAC
+|   |   |   +-- video_scanout_indexed.v # 8-bit indexed video scanout
 |   |   |   +-- audio_output.v     # I2S audio output with FIFO
 |   |   |   +-- link_mmio.v        # Link cable serial transceiver
-|   |   |   +-- sram_fill.v        # Z-buffer clear engine
 |   |   |   +-- text_terminal.v    # Debug text overlay
 |   |   +-- vexriscv/
 |   |   |   +-- VexRiscv_Full.v    # Generated RISC-V CPU core
@@ -308,7 +367,6 @@ SD Card Root/
 
 - **JTAG programming loses SDRAM data.** After JTAG programming, the Pocket must reload `quake.bin` and `pak0.pak` from the SD card. Always deploy both firmware and bitstream to the SD card for testing.
 - **Firmware and FPGA must match.** The BRAM initialization (MIF) is compiled into the bitstream. If `quake.bin` on the SD card doesn't match the MIF in the FPGA, `.fasttext` function calls will jump to wrong addresses and crash.
-- **RVC is disabled** for timing closure at 110 MHz. The firmware links against a custom `libgcc_norvc.a`.
 
 ## License
 

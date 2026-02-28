@@ -21,6 +21,24 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "r_local.h"
+#include "libc.h"
+#include "scanline_accel.h"
+
+/* Sub-profiling for R_ScanEdges breakdown */
+unsigned int pq_prof_se_insert_cycles;
+unsigned int pq_prof_se_generate_cycles;
+unsigned int pq_prof_se_step_cycles;
+unsigned int pq_prof_se_draw_cycles;
+unsigned int pq_prof_hw_spans_total;
+unsigned int pq_prof_hw_spans_linked;
+unsigned int pq_dbg_hw_nspans;
+unsigned int pq_dbg_hw_raw[3];
+unsigned int pq_dbg_hw_edges;
+unsigned int pq_dbg_hw_first_edge;
+unsigned int pq_dbg_hw_state;
+unsigned int pq_dbg_hw_edges_reg;
+static int pq_dbg_hw_captured;
+extern cvar_t pq_cycleprof;
 
 #if 0
 // FIXME
@@ -57,6 +75,7 @@ int	current_iv;
 int	edge_head_u_shift20, edge_tail_u_shift20;
 
 static void (*pdrawfunc)(void);
+static void (*pdrawfunc_array)(void);
 
 edge_t	edge_head;
 edge_t	edge_tail;
@@ -65,12 +84,42 @@ edge_t	edge_sentinel;
 
 float	fv;
 
+/*
+==============
+Array-based Active Edge Table (AET)
+Contiguous sorted array of 16-byte entries replaces linked-list AET.
+==============
+*/
+typedef struct {
+	fixed16_t       u;          // 12.20 fixed-point x position
+	fixed16_t       u_step;     // per-scanline x step
+	unsigned short  surfs[2];   // surface indices [0]=trailing [1]=leading
+	unsigned short  v_end;      // last scanline this edge is active
+	unsigned short  pad;        // pad to 16 bytes
+} aet_entry_t;
+
+static aet_entry_t aet[NUMSTACKEDGES];
+static int aet_count;
+
+// Store v_end in edge_t->prev (unused by array-based AET, same cache line as u/surfs)
+#define EDGE_V_END(e)  (*(unsigned short *)&(e)->prev)
+
 void R_GenerateSpans (void);
 void R_GenerateSpansBackward (void);
 
 void R_LeadingEdge (edge_t *edge);
 void R_LeadingEdgeBackwards (edge_t *edge);
 void R_TrailingEdge (surf_t *surf, edge_t *edge);
+
+// Array-based AET functions
+void R_InsertNewEdges_Array (edge_t *edgestoadd);
+void R_RemoveEdges_Array (int iv);
+void R_StepActiveU_Array (void);
+void R_GenerateSpans_Array (void);
+void R_GenerateSpansBackward_Array (void);
+void R_TrailingEdge_A (surf_t *surf, int u);
+void R_LeadingEdge_A (int surf_idx, int u);
+void R_LeadingEdgeBackwards_A (int surf_idx, int u);
 
 
 //=============================================================================
@@ -140,12 +189,14 @@ PQ_FASTTEXT void R_BeginEdgeFrame (void)
 	if (r_draworder.value)
 	{
 		pdrawfunc = R_GenerateSpansBackward;
+		pdrawfunc_array = R_GenerateSpansBackward_Array;
 		surfaces[1].key = 0;
 		r_currentkey = 1;
 	}
 	else
 	{
 		pdrawfunc = R_GenerateSpans;
+		pdrawfunc_array = R_GenerateSpans_Array;
 		surfaces[1].key = 0x7FFFFFFF;
 		r_currentkey = 0;
 	}
@@ -646,6 +697,476 @@ PQ_FASTTEXT void R_GenerateSpansBackward (void)
 
 
 /*
+==============================================================================
+Array-based AET functions
+==============================================================================
+*/
+
+/*
+==============
+R_InsertNewEdges_Array
+
+Merge sorted newedges linked list into sorted aet[] array.
+==============
+*/
+PQ_FASTTEXT void R_InsertNewEdges_Array (edge_t *edgestoadd)
+{
+	edge_t *rev, *next;
+	int new_count, i, k;
+
+	// Reverse linked list to get descending u order for right-to-left merge.
+	// newedges[iv] is only traversed here, so in-place reversal is safe.
+	rev = NULL;
+	new_count = 0;
+	while (edgestoadd)
+	{
+		next = edgestoadd->next;
+		edgestoadd->next = rev;
+		rev = edgestoadd;
+		new_count++;
+		edgestoadd = next;
+	}
+
+	// Right-to-left merge: aet[0..aet_count-1] ascending, rev list descending.
+	// Merge into aet[0..aet_count+new_count-1]. No temp buffer needed.
+	i = aet_count - 1;
+	k = aet_count + new_count - 1;
+
+	while (rev)
+	{
+		if (i >= 0 && aet[i].u > rev->u)
+		{
+			aet[k--] = aet[i--];
+		}
+		else
+		{
+			aet[k].u       = rev->u;
+			aet[k].u_step  = rev->u_step;
+			aet[k].surfs[0] = rev->surfs[0];
+			aet[k].surfs[1] = rev->surfs[1];
+			aet[k].v_end   = EDGE_V_END(rev);
+			k--;
+			rev = rev->next;
+		}
+	}
+
+	aet_count += new_count;
+}
+
+
+/*
+==============
+R_RemoveEdges_Array
+
+Compact out entries whose v_end == current scanline.
+==============
+*/
+PQ_FASTTEXT void R_RemoveEdges_Array (int iv)
+{
+	int i, j;
+
+	for (i = 0, j = 0; i < aet_count; i++)
+	{
+		if (aet[i].v_end != iv)
+		{
+			if (i != j)
+				aet[j] = aet[i];
+			j++;
+		}
+	}
+	aet_count = j;
+}
+
+
+/*
+==============
+R_StepActiveU_Array
+
+Step all u values, then insertion sort (nearly sorted -> ~O(n)).
+==============
+*/
+PQ_FASTTEXT void R_StepActiveU_Array (void)
+{
+	int i;
+
+	// Step
+	for (i = 0; i < aet_count; i++)
+		aet[i].u += aet[i].u_step;
+
+	// Insertion sort (nearly sorted, few swaps expected)
+	for (i = 1; i < aet_count; i++)
+	{
+		if (aet[i].u < aet[i-1].u)
+		{
+			aet_entry_t tmp = aet[i];
+			int j = i - 1;
+			while (j >= 0 && aet[j].u > tmp.u)
+			{
+				aet[j+1] = aet[j];
+				j--;
+			}
+			aet[j+1] = tmp;
+		}
+	}
+}
+
+
+/*
+==============
+R_TrailingEdge_A
+
+Array variant: takes surface pointer and u value directly.
+==============
+*/
+PQ_FASTTEXT void R_TrailingEdge_A (surf_t *surf, int u)
+{
+	espan_t		*span;
+	int			iu;
+
+	if (--surf->spanstate == 0)
+	{
+		if (surf->insubmodel)
+			r_bmodelactive--;
+
+		if (surf == surfaces[1].next)
+		{
+			iu = u >> 20;
+			if (iu > surf->last_u)
+			{
+				span = span_p++;
+				span->u = surf->last_u;
+				span->count = iu - span->u;
+				span->v = current_iv;
+				span->pnext = surf->spans;
+				surf->spans = span;
+			}
+
+			surf->next->last_u = iu;
+		}
+
+		surf->prev->next = surf->next;
+		surf->next->prev = surf->prev;
+	}
+}
+
+
+/*
+==============
+R_LeadingEdge_A
+
+Array variant: takes surface index and u value directly.
+==============
+*/
+PQ_FASTTEXT void R_LeadingEdge_A (int surf_idx, int u)
+{
+	espan_t		*span;
+	surf_t		*surf, *surf2;
+	int			iu;
+	float		fu, newzi, testzi, newzitop, newzibottom;
+
+	if (surf_idx)
+	{
+		surf = &surfaces[surf_idx];
+
+		if (++surf->spanstate == 1)
+		{
+			if (surf->insubmodel)
+				r_bmodelactive++;
+
+			surf2 = surfaces[1].next;
+
+			if (surf->key < surf2->key)
+				goto newtop;
+
+			if (surf->insubmodel && (surf->key == surf2->key))
+			{
+				fu = (float)(u - 0xFFFFF) * (1.0 / 0x100000);
+				newzi = surf->d_ziorigin + fv*surf->d_zistepv +
+						fu*surf->d_zistepu;
+				newzibottom = newzi * 0.99;
+
+				testzi = surf2->d_ziorigin + fv*surf2->d_zistepv +
+						fu*surf2->d_zistepu;
+
+				if (newzibottom >= testzi)
+					goto newtop;
+
+				newzitop = newzi * 1.01;
+				if (newzitop >= testzi)
+				{
+					if (surf->d_zistepu >= surf2->d_zistepu)
+						goto newtop;
+				}
+			}
+
+continue_search:
+			do
+			{
+				surf2 = surf2->next;
+			} while (surf->key > surf2->key);
+
+			if (surf->key == surf2->key)
+			{
+				if (!surf->insubmodel)
+					goto continue_search;
+
+				fu = (float)(u - 0xFFFFF) * (1.0 / 0x100000);
+				newzi = surf->d_ziorigin + fv*surf->d_zistepv +
+						fu*surf->d_zistepu;
+				newzibottom = newzi * 0.99;
+
+				testzi = surf2->d_ziorigin + fv*surf2->d_zistepv +
+						fu*surf2->d_zistepu;
+
+				if (newzibottom >= testzi)
+					goto gotposition;
+
+				newzitop = newzi * 1.01;
+				if (newzitop >= testzi)
+				{
+					if (surf->d_zistepu >= surf2->d_zistepu)
+						goto gotposition;
+				}
+
+				goto continue_search;
+			}
+
+			goto gotposition;
+
+newtop:
+			iu = u >> 20;
+
+			if (iu > surf2->last_u)
+			{
+				span = span_p++;
+				span->u = surf2->last_u;
+				span->count = iu - span->u;
+				span->v = current_iv;
+				span->pnext = surf2->spans;
+				surf2->spans = span;
+			}
+
+			surf->last_u = iu;
+
+gotposition:
+			surf->next = surf2;
+			surf->prev = surf2->prev;
+			surf2->prev->next = surf;
+			surf2->prev = surf;
+		}
+	}
+}
+
+
+/*
+==============
+R_LeadingEdgeBackwards_A
+
+Array variant: takes surface index and u value directly.
+==============
+*/
+PQ_FASTTEXT void R_LeadingEdgeBackwards_A (int surf_idx, int u)
+{
+	espan_t		*span;
+	surf_t		*surf, *surf2;
+	int			iu;
+
+	surf = &surfaces[surf_idx];
+
+	if (++surf->spanstate == 1)
+	{
+		surf2 = surfaces[1].next;
+
+		if (surf->key > surf2->key)
+			goto newtop;
+
+		if (surf->insubmodel && (surf->key == surf2->key))
+			goto newtop;
+
+continue_search:
+		do
+		{
+			surf2 = surf2->next;
+		} while (surf->key < surf2->key);
+
+		if (surf->key == surf2->key)
+		{
+			if (!surf->insubmodel)
+				goto continue_search;
+		}
+
+		goto gotposition;
+
+newtop:
+		iu = u >> 20;
+
+		if (iu > surf2->last_u)
+		{
+			span = span_p++;
+			span->u = surf2->last_u;
+			span->count = iu - span->u;
+			span->v = current_iv;
+			span->pnext = surf2->spans;
+			surf2->spans = span;
+		}
+
+		surf->last_u = iu;
+
+gotposition:
+		surf->next = surf2;
+		surf->prev = surf2->prev;
+		surf2->prev->next = surf;
+		surf2->prev = surf;
+	}
+}
+
+
+#if HW_SCANLINE_ACCEL
+/*
+==============
+R_GenerateSpans_HW
+
+Feed sorted AET edges to hardware scanline engine, read back spans.
+==============
+*/
+PQ_FASTTEXT void R_GenerateSpans_HW (void)
+{
+	int i;
+	int hw_count;
+
+	r_bmodelactive = 0;
+
+	// Cap to edge buffer size (256 entries)
+	hw_count = aet_count;
+	if (hw_count > 256)
+		hw_count = 256;
+
+	// Write edge count (also resets HW edge buffer write pointer)
+	SCAN_EDGE_COUNT = hw_count;
+
+	// Feed all AET edges to hardware
+	for (i = 0; i < hw_count; i++) {
+		int iu = aet[i].u >> 20;
+		// Clamp to valid range — negative u from edge stepping would
+		// produce garbage in the unsigned 9-bit iu field
+		if (iu < 0) iu = 0;
+		else if (iu > 511) iu = 511;
+		SCAN_EDGE_DATA = ((unsigned int)iu << 23) |
+		                 ((unsigned int)aet[i].surfs[1] << 10) |
+		                 (unsigned int)aet[i].surfs[0];
+	}
+
+	// Start processing (bit 0 = start, bit 1 = backward mode)
+	SCAN_CONTROL = r_draworder.value ? 0x3 : 0x1;
+	scanline_wait();
+
+	// Read span results from hardware
+	{
+		int nspans = SCAN_SPAN_COUNT;
+		int max_si = surface_p - surfaces;
+		int do_capture = (!pq_dbg_hw_captured && hw_count > 0);
+		pq_prof_hw_spans_total += nspans;
+
+		if (do_capture) {
+			pq_dbg_hw_captured = 1;
+			pq_dbg_hw_nspans = nspans;
+			pq_dbg_hw_edges = hw_count;
+			pq_dbg_hw_first_edge = SCAN_DBG_FIRST_EDGE;
+			pq_dbg_hw_state = SCAN_DBG_STATE;
+			pq_dbg_hw_edges_reg = SCAN_DBG_EDGES;
+		}
+
+		if (nspans > 512)
+			nspans = 0;  // garbage — HW not responding correctly
+		for (i = 0; i < nspans; i++) {
+			unsigned int hw = SCAN_SPAN_DATA;
+			int si  = hw & 0x3FF;
+			int u   = (hw >> 10) & 0x3FF;
+			int cnt = (hw >> 20) & 0x3FF;
+
+			if (do_capture && i < 3)
+				pq_dbg_hw_raw[i] = hw;
+
+			if (si < 1 || si >= max_si || cnt == 0)
+				continue;  // skip invalid spans
+			{
+				espan_t *span = span_p++;
+				span->u = u;
+				span->count = cnt;
+				span->v = current_iv;
+				span->pnext = surfaces[si].spans;
+				surfaces[si].spans = span;
+				pq_prof_hw_spans_linked++;
+			}
+		}
+	}
+}
+#endif
+
+
+/*
+==============
+R_GenerateSpans_Array
+
+Walk sorted aet[] array instead of linked list.
+==============
+*/
+PQ_FASTTEXT void R_GenerateSpans_Array (void)
+{
+	int i;
+
+	r_bmodelactive = 0;
+
+	surfaces[1].next = surfaces[1].prev = &surfaces[1];
+	surfaces[1].last_u = edge_head_u_shift20;
+
+	for (i = 0; i < aet_count; i++)
+	{
+		if (aet[i].surfs[0])
+		{
+			R_TrailingEdge_A (&surfaces[aet[i].surfs[0]], aet[i].u);
+
+			if (!aet[i].surfs[1])
+				continue;
+		}
+
+		R_LeadingEdge_A (aet[i].surfs[1], aet[i].u);
+	}
+
+	R_CleanupSpan ();
+}
+
+
+/*
+==============
+R_GenerateSpansBackward_Array
+
+Walk sorted aet[] array instead of linked list (backward variant).
+==============
+*/
+PQ_FASTTEXT void R_GenerateSpansBackward_Array (void)
+{
+	int i;
+
+	r_bmodelactive = 0;
+
+	surfaces[1].next = surfaces[1].prev = &surfaces[1];
+	surfaces[1].last_u = edge_head_u_shift20;
+
+	for (i = 0; i < aet_count; i++)
+	{
+		if (aet[i].surfs[0])
+			R_TrailingEdge_A (&surfaces[aet[i].surfs[0]], aet[i].u);
+
+		if (aet[i].surfs[1])
+			R_LeadingEdgeBackwards_A (aet[i].surfs[1], aet[i].u);
+	}
+
+	R_CleanupSpan ();
+}
+
+
+/*
 ==============
 R_ScanEdges
 
@@ -664,6 +1185,17 @@ PQ_FASTTEXT void R_ScanEdges (void)
 	byte	basespans[MAXSPANS*sizeof(espan_t)+CACHE_SIZE];
 	espan_t	*basespan_p;
 	surf_t	*s;
+	int profiling = (int)pq_cycleprof.value;
+	unsigned int prof_t;
+
+	if (profiling) {
+		pq_prof_se_insert_cycles = 0;
+		pq_prof_se_generate_cycles = 0;
+		pq_prof_se_step_cycles = 0;
+		pq_prof_se_draw_cycles = 0;
+		pq_prof_hw_spans_total = 0;
+		pq_prof_hw_spans_linked = 0;
+	}
 
 	basespan_p = (espan_t *)
 			((long)(basespans + CACHE_SIZE - 1) & ~(CACHE_SIZE - 1));
@@ -671,32 +1203,28 @@ PQ_FASTTEXT void R_ScanEdges (void)
 
 	span_p = basespan_p;
 
-// clear active edges to just the background edges around the whole screen
-// FIXME: most of this only needs to be set up once
+// set up background edge u values (used by R_CleanupSpan and GenerateSpans)
 	edge_head.u = r_refdef.vrect.x << 20;
 	edge_head_u_shift20 = edge_head.u >> 20;
-	edge_head.u_step = 0;
-	edge_head.prev = NULL;
-	edge_head.next = &edge_tail;
-	edge_head.surfs[0] = 0;
-	edge_head.surfs[1] = 1;
-
 	edge_tail.u = (r_refdef.vrectright << 20) + 0xFFFFF;
 	edge_tail_u_shift20 = edge_tail.u >> 20;
-	edge_tail.u_step = 0;
-	edge_tail.prev = &edge_head;
-	edge_tail.next = &edge_aftertail;
-	edge_tail.surfs[0] = 1;
-	edge_tail.surfs[1] = 0;
 
-	edge_aftertail.u = -1;		// force a move
-	edge_aftertail.u_step = 0;
-	edge_aftertail.next = &edge_sentinel;
-	edge_aftertail.prev = &edge_tail;
+// clear array-based AET
+	aet_count = 0;
 
-// FIXME: do we need this now that we clamp x in r_draw.c?
-	edge_sentinel.u = 2000 << 24;		// make sure nothing sorts past this
-	edge_sentinel.prev = &edge_aftertail;
+#if HW_SCANLINE_ACCEL
+// Frame setup: clear HW spanstate BRAM and load surface keys
+	SCAN_FRAME_INIT = 1;
+	scanline_wait();
+	for (s = &surfaces[1] ; s<surface_p ; s++)
+		scanline_load_surface(s - surfaces, s->key, s->insubmodel);
+	SCAN_EDGE_HEAD_U = edge_head_u_shift20;
+	SCAN_EDGE_TAIL_U = edge_tail_u_shift20;
+	// Debug: read scanline regs (now at 0x60, no ATM collision)
+	pq_dbg_hw_state = SCAN_STATUS;
+	pq_dbg_hw_edges_reg = SCAN_DBG_EDGES;
+	pq_dbg_hw_first_edge = SCAN_DBG_FIRST_EDGE;
+#endif
 
 //
 // process all scan lines
@@ -713,25 +1241,31 @@ PQ_FASTTEXT void R_ScanEdges (void)
 
 		if (newedges[iv])
 		{
-			R_InsertNewEdges (newedges[iv], edge_head.next);
+			if (profiling) prof_t = SYS_CYCLE_LO;
+			R_InsertNewEdges_Array (newedges[iv]);
+			if (profiling) pq_prof_se_insert_cycles += SYS_CYCLE_LO - prof_t;
 		}
 
-		R_GenerateSpans ();
+		if (profiling) prof_t = SYS_CYCLE_LO;
+#if HW_SCANLINE_ACCEL
+		R_GenerateSpans_HW ();
+#else
+		(*pdrawfunc_array) ();
+#endif
+		if (profiling) pq_prof_se_generate_cycles += SYS_CYCLE_LO - prof_t;
 
 	// flush the span list if we can't be sure we have enough spans left for
 	// the next scan
-			if (span_p >= max_span_p)
-			{
-				/* PocketQuake: skip mid-render audio extra update for stability. */
+		if (span_p >= max_span_p)
+		{
+			if (profiling) prof_t = SYS_CYCLE_LO;
 
-				if (r_drawculledpolys)
-				{
+			if (r_drawculledpolys)
 				R_DrawCulledPolys ();
-			}
 			else
-			{
 				D_DrawSurfaces ();
-			}
+
+			if (profiling) pq_prof_se_draw_cycles += SYS_CYCLE_LO - prof_t;
 
 		// clear the surface span pointers
 			for (s = &surfaces[1] ; s<surface_p ; s++)
@@ -740,11 +1274,12 @@ PQ_FASTTEXT void R_ScanEdges (void)
 			span_p = basespan_p;
 		}
 
-		if (removeedges[iv])
-			R_RemoveEdges (removeedges[iv]);
+		R_RemoveEdges_Array (iv);
 
-		if (edge_head.next != &edge_tail)
-			R_StepActiveU (edge_head.next);
+		if (profiling) prof_t = SYS_CYCLE_LO;
+		if (aet_count > 0)
+			R_StepActiveU_Array ();
+		if (profiling) pq_prof_se_step_cycles += SYS_CYCLE_LO - prof_t;
 	}
 
 // do the last scan (no need to step or sort or remove on the last scan)
@@ -756,9 +1291,13 @@ PQ_FASTTEXT void R_ScanEdges (void)
 	surfaces[1].spanstate = 1;
 
 	if (newedges[iv])
-		R_InsertNewEdges (newedges[iv], edge_head.next);
+		R_InsertNewEdges_Array (newedges[iv]);
 
-	(*pdrawfunc) ();
+#if HW_SCANLINE_ACCEL
+	R_GenerateSpans_HW ();
+#else
+	(*pdrawfunc_array) ();
+#endif
 
 // draw whatever's left in the span list
 	if (r_drawculledpolys)

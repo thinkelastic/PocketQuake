@@ -155,7 +155,7 @@ LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -Wl,-Map=$(TARGET).map
 LDFLAGS += -flto
 
-# Standard libgcc for rv32imafc/ilp32f (includes compressed instructions)
+# System libgcc with compressed instruction support (RVC enabled)
 LIBGCC = $(shell $(CC) -march=$(ARCH) -mabi=$(ABI) -print-libgcc-file-name)
 LIBS = $(LIBGCC)
 

@@ -247,7 +247,7 @@ void CL_Record_f (void)
 	cls.demofile = fopen (name, "wb");
 	if (!cls.demofile)
 	{
-		Con_Printf ("ERROR: couldn't open.\n");
+		Con_Printf ("ERROR: couldn't open %s\n", name);
 		return;
 	}
 
@@ -295,7 +295,7 @@ void CL_PlayDemo_f (void)
 	COM_FOpenFile (name, &cls.demofile);
 	if (!cls.demofile)
 	{
-		Con_Printf ("ERROR: couldn't open.\n");
+		Con_Printf ("ERROR: couldn't open %s\n", name);
 		cls.demonum = -1;		// stop demo loop
 		return;
 	}
@@ -364,4 +364,3 @@ void CL_TimeDemo_f (void)
 	cls.td_startframe = host_framecount;
 	cls.td_lastframe = -1;		// get a new message this frame
 }
-

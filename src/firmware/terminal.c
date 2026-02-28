@@ -8,9 +8,9 @@
 /* Terminal VRAM address */
 #define TERM_VRAM   ((volatile char *)0x20000000)
 
-/* Cursor position */
-static int cursor_row = 0;
-static int cursor_col = 0;
+/* Cursor position — placed in BRAM BSS so clear_qbss() doesn't reset them */
+static int cursor_row __attribute__((section(".bss.boot"))) = 0;
+static int cursor_col __attribute__((section(".bss.boot"))) = 0;
 
 void term_init(void) {
     cursor_row = 0;

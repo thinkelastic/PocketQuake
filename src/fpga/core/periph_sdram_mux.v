@@ -36,7 +36,11 @@ module periph_sdram_mux (
     output wire [31:0] mux_wdata,
     output wire [3:0]  mux_wstrb,
     output wire [2:0]  mux_burst_len,
-    output wire        mux_active       // Any peripheral is active
+    output wire        mux_active,      // Any peripheral is active
+
+    // Accepted feedback from arbiter (active-high pulse)
+    input wire         accepted,
+    output wire        span_accepted    // Forwarded to span rasterizer
 );
 
 // DMA has priority, but only one should be active at a time.
@@ -48,5 +52,8 @@ assign mux_wdata = dma_active ? dma_wdata : span_wdata;
 assign mux_wstrb     = dma_active ? dma_wstrb : span_wstrb;
 assign mux_burst_len = dma_active ? 3'd0      : span_burst_len;
 assign mux_active = dma_active | span_active;
+
+// Route accepted back to span only when DMA is not active
+assign span_accepted = accepted & ~dma_active;
 
 endmodule

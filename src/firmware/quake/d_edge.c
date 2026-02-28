@@ -21,6 +21,15 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "d_local.h"
+#include "libc.h"
+
+extern int	pq_combined_z_active;
+
+/* Sub-profiling for D_DrawSurfaces breakdown */
+unsigned int pq_prof_ds_calcgrad_cycles;
+unsigned int pq_prof_ds_cachesurf_cycles;
+unsigned int pq_prof_ds_sky_cycles;
+extern cvar_t pq_cycleprof;
 
 static int	miplevel;
 
@@ -178,6 +187,8 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 	surfcache_t		*pcurrentcache;
 	vec3_t			world_transformed_modelorg;
 	vec3_t			local_modelorg;
+	int profiling = (int)pq_cycleprof.value;
+	unsigned int prof_t;
 
 	currententity = &cl_entities[0];
 	TransformVector (modelorg, transformed_modelorg);
@@ -219,8 +230,10 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 					R_MakeSky ();
 				}
 
+				if (profiling) prof_t = SYS_CYCLE_LO;
 				D_DrawSkyScans8 (s->spans);
-				D_DrawZSpans (s->spans);
+				if (profiling) pq_prof_ds_sky_cycles += SYS_CYCLE_LO - prof_t;
+				// Sky z-writes skipped: z-buffer cleared to 0, sky izi ≈ 0 (redundant)
 			}
 			else if (s->flags & SURF_DRAWBACKGROUND)
 			{
@@ -256,9 +269,13 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 										// make entity passed in
 				}
 
+				if (profiling) prof_t = SYS_CYCLE_LO;
 				D_CalcGradients (pface);
+				if (profiling) pq_prof_ds_calcgrad_cycles += SYS_CYCLE_LO - prof_t;
 				Turbulent8 (s->spans);
-				D_DrawZSpans (s->spans);
+				if (!pq_combined_z_active)
+					D_DrawZSpans (s->spans);
+				pq_combined_z_active = 0;
 
 				if (s->insubmodel)
 				{
@@ -297,16 +314,22 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 				* pface->texinfo->mipadjust);
 
 			// FIXME: make this passed in to D_CacheSurface
+				if (profiling) prof_t = SYS_CYCLE_LO;
 				pcurrentcache = D_CacheSurface (pface, miplevel);
+				if (profiling) pq_prof_ds_cachesurf_cycles += SYS_CYCLE_LO - prof_t;
 
 				cacheblock = (pixel_t *)pcurrentcache->data;
 				cachewidth = pcurrentcache->width;
 
+				if (profiling) prof_t = SYS_CYCLE_LO;
 				D_CalcGradients (pface);
+				if (profiling) pq_prof_ds_calcgrad_cycles += SYS_CYCLE_LO - prof_t;
 
 				(*d_drawspans) (s->spans);
 
-				D_DrawZSpans (s->spans);
+				if (!pq_combined_z_active)
+					D_DrawZSpans (s->spans);
+				pq_combined_z_active = 0;
 
 				if (s->insubmodel)
 				{

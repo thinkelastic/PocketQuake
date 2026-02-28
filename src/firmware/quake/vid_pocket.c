@@ -25,9 +25,8 @@ extern viddef_t vid;
 #define VID_PIXELS          (BASEWIDTH * BASEHEIGHT)
 #define SURFCACHE_SIZE      (2 * 1024 * 1024)
 
-/* Surface cache and z-buffer in BSS (cacheable SDRAM) */
+/* Surface cache in BSS (cacheable SDRAM) */
 static byte surfcache_storage[SURFCACHE_SIZE];
-static short zbuffer_storage[BASEWIDTH * BASEHEIGHT];
 
 unsigned short d_8to16table[256];
 unsigned d_8to24table[256];
@@ -84,8 +83,8 @@ void VID_Init(unsigned char *palette)
 
     Sys_Printf("VID_Init: buffer=%x\n", (unsigned)vid.buffer);
 
-    /* Z-buffer in cacheable SDRAM (BSS) for fast D-cache access */
-    d_pzbuffer = zbuffer_storage;
+    /* Z-buffer in external SRAM (parallel to SDRAM, no contention) */
+    d_pzbuffer = (short *)0x38000000;
     D_InitCaches(surfcache_storage, SURFCACHE_SIZE);
 
     VID_SetPalette(palette);
@@ -136,7 +135,7 @@ void VID_Init(unsigned char *palette)
     }
 #endif
 
-    SYS_DISPLAY_MODE = 1;  /* 1 = framebuffer only */
+    // SYS_DISPLAY_MODE = 1;  /* DISABLED: keep terminal visible for debug */
     Sys_Printf("VID_Init: done\n");
 }
 

@@ -1,9 +1,9 @@
 /*
  * VexRiscv generation for PocketQuake
  *
- * RV32IMAFC with Wishbone bus, no MMU, no debug.
- *   I-cache: 32KB (2-way, 32B lines)
- *   D-cache: 128KB (2-way, 32B lines)
+ * RV32IMAF with AXI4 bus, no MMU, no debug.
+ *   I-cache: 16KB (1-way, 32B lines)
+ *   D-cache: 64KB (2-way, 32B lines)
  *
  * Usage:
  *   1. Clone VexRiscv: git clone https://github.com/SpinalHDL/VexRiscv.git
@@ -27,14 +27,14 @@ object GenPocketQuake extends App {
     plugins = List(
       new IBusCachedPlugin(
         resetVector = null,           // creates externalResetVector input
-        compressedGen = true,         // RVC enabled for smaller code / better I$ hit rate
+        compressedGen = true,         // RVC enabled
         injectorStage = true,         // extra pipeline stage for timing
         relaxedPcCalculation = true,
-        prediction = DYNAMIC,
+        prediction = STATIC,
         config = InstructionCacheConfig(
-          cacheSize = 32768,          // 32 KB
+          cacheSize = 16384,          // 16 KB
           bytePerLine = 32,
-          wayCount = 2,
+          wayCount = 1,               // direct-mapped for timing
           addressWidth = 32,
           cpuDataWidth = 32,
           memDataWidth = 32,
@@ -42,12 +42,13 @@ object GenPocketQuake extends App {
           catchAccessFault = true,
           asyncTagMemory = false,
           twoCycleRam = true,
-          twoCycleCache = true
+          twoCycleCache = true,
+          twoCycleRamInnerMux = true  // register way mux for timing
         )
       ),
       new DBusCachedPlugin(
         config = new DataCacheConfig(
-          cacheSize = 131072,         // 128 KB
+          cacheSize = 65536,          // 64 KB
           bytePerLine = 32,
           wayCount = 2,               // 2-way associative
           addressWidth = 32,
@@ -57,10 +58,11 @@ object GenPocketQuake extends App {
           catchIllegal = true,
           catchUnaligned = true
         ),
-        dBusCmdMasterPipe = true      // required for Wishbone
+        dBusCmdMasterPipe = true      // pipeline register on command output (timing)
       ),
       // Cacheable: 0x1X (SDRAM), 0x30-0x37 (PSRAM)
       // Uncacheable: 0x0X (BRAM — already fast), 0x38-0x3F (SRAM — HW writes bypass cache), all IO
+      // Note: DMA coherency for dataslot_read handled by fence + SDRAM_UNCACHED() alias
       new StaticMemoryTranslatorPlugin(
         ioRange = addr => addr(31 downto 28) =/= 0x1 &&
                           !(addr(31 downto 28) === 0x3 && !addr(27))
@@ -110,16 +112,16 @@ object GenPocketQuake extends App {
     val cpu = new VexRiscv(config)
     cpu.setDefinitionName("VexRiscv")
 
-    // Convert internal buses to Wishbone
+    // Convert internal buses to AXI4
     cpu.rework {
       for (plugin <- config.plugins) plugin match {
         case plugin: IBusCachedPlugin => {
           plugin.iBus.setAsDirectionLess()
-          master(plugin.iBus.toWishbone()).setName("iBusWishbone")
+          master(plugin.iBus.toAxi4ReadOnly()).setName("iBusAxi")
         }
         case plugin: DBusCachedPlugin => {
           plugin.dBus.setAsDirectionLess()
-          master(plugin.dBus.toWishbone()).setName("dBusWishbone")
+          master(plugin.dBus.toAxi4Shared().toAxi4()).setName("dBusAxi")
         }
         case _ =>
       }

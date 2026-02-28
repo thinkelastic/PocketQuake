@@ -20,6 +20,21 @@
 #define SYS_CYCLE_LO    (*(volatile uint32_t*)(SYSREG_BASE + 0x04))
 #define SYS_CYCLE_HI    (*(volatile uint32_t*)(SYSREG_BASE + 0x08))
 
+/* Hardware performance counters (sysreg) */
+#define SYS_PERF_SPAN       (*(volatile uint32_t*)(SYSREG_BASE + 0x70))
+#define SYS_PERF_DMA        (*(volatile uint32_t*)(SYSREG_BASE + 0x74))
+#define SYS_PERF_SRAMFILL   (*(volatile uint32_t*)(SYSREG_BASE + 0x78))
+#define SYS_PERF_SRAM_BUSY  (*(volatile uint32_t*)(SYSREG_BASE + 0x7C))
+#define SYS_PERF_SDRAM      (*(volatile uint32_t*)(SYSREG_BASE + 0x80))
+#define SYS_PERF_SDRAM_SPAN (*(volatile uint32_t*)(SYSREG_BASE + 0x84))
+#define SYS_PERF_SDRAM_DMA  (*(volatile uint32_t*)(SYSREG_BASE + 0x88))
+#define SYS_PERF_SDRAM_CPU  (*(volatile uint32_t*)(SYSREG_BASE + 0x8C))
+
+/* Span rasterizer performance counters (write-clear via SPAN_PERF_CACHE_HITS) */
+#define SPAN_PERF_CACHE_HITS   (*(volatile uint32_t*)0x4800005C)
+#define SPAN_PERF_CACHE_MISSES (*(volatile uint32_t*)0x48000060)
+#define SPAN_PERF_PIXELS       (*(volatile uint32_t*)0x48000064)
+
 /* Status bits */
 #define SYS_STATUS_SDRAM_READY          0x01
 #define SYS_STATUS_DATASLOT_COMPLETE    0x02

@@ -11,9 +11,9 @@
 // Audio MMIO registers (FPGA audio_output module)
 // ============================================
 #define AUDIO_SAMPLE    (*(volatile unsigned int *)0x4C000000)  // Write: push {L16, R16}
-#define AUDIO_STATUS    (*(volatile unsigned int *)0x4C000004)  // Read: [11:0]=fifo level, [12]=full
+#define AUDIO_STATUS    (*(volatile unsigned int *)0x4C000004)  // Read: [10:0]=fifo level, [11]=full
 
-#define AUDIO_FIFO_SIZE 4096
+#define AUDIO_FIFO_SIZE 2048
 #define SND_RATE        22050
 
 // DMA buffer: 16384 mono samples (~743ms at 22050 Hz)
@@ -77,7 +77,7 @@ void SNDDMA_Submit(void)
         return;
 
     // Check available FIFO space
-    fifo_level = AUDIO_STATUS & 0xFFF;
+    fifo_level = AUDIO_STATUS & 0x7FF;
     fifo_space = AUDIO_FIFO_SIZE - fifo_level - 16; // Leave margin
     if (fifo_space <= 0)
         return;

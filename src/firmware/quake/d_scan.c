@@ -40,6 +40,8 @@ extern cvar_t	r_hwspan;
 extern cvar_t	r_hwzspan;
 extern cvar_t	r_hwspan_queue;
 
+int		pq_combined_z_active;  /* Set by D_DrawSpans8 when HW combined z mode used */
+
 void D_DrawTurbulent8Span (void);
 
 
@@ -135,7 +137,10 @@ void Turbulent8 (espan_t *pspan)
 	fixed16_t		snext, tnext;
 	float			sdivz, tdivz, zi, z, du, dv, spancountminus1;
 	float			sdivz16stepu, tdivz16stepu, zi16stepu;
-	
+#if HW_TURB_ACCEL && HW_COMBINED_Z
+	int				izistep;
+#endif
+
 	r_turb_turb = sintable + ((int)(cl.time*SPEED)&(CYCLE-1));
 
 	r_turb_sstep = 0;	// keep compiler happy
@@ -147,6 +152,11 @@ void Turbulent8 (espan_t *pspan)
 	span_set_turb_phase((int)(cl.time * SPEED));
 	SPAN_TEX_ADDR  = (unsigned int)r_turb_pbase;
 	SPAN_TEX_WIDTH = 64 | (64 << 16);
+#if HW_COMBINED_Z
+	izistep = (int)(d_zistepu * 0x8000 * 0x10000);
+	SPAN_ZISTEP = (unsigned int)izistep;
+	pq_combined_z_active = 1;
+#endif
 #endif
 
 	sdivz16stepu = d_sdivzstepu * 32;
@@ -168,6 +178,11 @@ void Turbulent8 (espan_t *pspan)
 		tdivz = d_tdivzorigin + dv*d_tdivzstepv + du*d_tdivzstepu;
 		zi = d_ziorigin + dv*d_zistepv + du*d_zistepu;
 		z = (float)0x10000 / zi;	// prescale to 16.16 fixed-point
+
+#if HW_TURB_ACCEL && HW_COMBINED_Z
+		int cur_izi = (int)(zi * 0x8000 * 0x10000);
+		short *pzbuf = d_pzbuffer + (d_zwidth * pspan->v) + pspan->u;
+#endif
 
 		r_turb_s = (int)(sdivz * z) + sadjust;
 		if (r_turb_s > bbextents)
@@ -254,10 +269,20 @@ void Turbulent8 (espan_t *pspan)
 
 #if HW_TURB_ACCEL
 			while (!span_can_accept()) ;
+#if HW_COMBINED_Z
+			span_draw_turb_z((unsigned int)r_turb_pdest,
+			                 r_turb_s, r_turb_t,
+			                 r_turb_sstep, r_turb_tstep,
+			                 r_turb_spancount,
+			                 (unsigned int)pzbuf, cur_izi);
+			pzbuf += r_turb_spancount;
+			cur_izi += izistep * r_turb_spancount;
+#else
 			span_draw_turb((unsigned int)r_turb_pdest,
 			               r_turb_s, r_turb_t,
 			               r_turb_sstep, r_turb_tstep,
 			               r_turb_spancount);
+#endif
 			r_turb_pdest += r_turb_spancount;
 #else
 			D_DrawTurbulent8Span ();
@@ -285,22 +310,83 @@ D_DrawSpans8
 */
 PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 {
-	int				count, spancount;
+	int				count;
 	unsigned char	*pbase, *pdest;
-	fixed16_t		s, t, snext, tnext, sstep, tstep;
-	float			sdivz, tdivz, zi, z, du, dv, spancountminus1;
-	float			sdivzNstepu, tdivzNstepu, ziNstepu;
+	float			sdivz, tdivz, zi, du, dv;
 	unsigned int	prof_start = 0;
+#if !HW_PERSP_ACCEL
+	int				spancount;
+	fixed16_t		s, t, snext, tnext, sstep, tstep;
+	float			z, spancountminus1;
+	float			sdivzNstepu, tdivzNstepu, ziNstepu;
+#endif
 
 	if (pq_cycleprof.value) {
 		prof_start = SYS_CYCLE_LO;
 		pq_prof_spans8_calls_frame++;
 	}
 
+	pbase = (unsigned char *)cacheblock;
+
+#if HW_PERSP_ACCEL
+	// HW perspective: dispatch entire spans to hardware, which internally
+	// subdivides into 16-pixel affine chunks with reciprocal approximation.
+	span_set_texture((unsigned int)pbase, cachewidth, (bbextentt >> 16) + 1);
+	span_set_perspective(d_sdivzstepu, d_tdivzstepu, d_zistepu,
+	                     sadjust, tadjust, bbextents, bbextentt);
+
+#if HW_COMBINED_Z
+	{
+	int izistep = (int)(d_zistepu * 0x8000 * 0x10000);
+	SPAN_ZISTEP = (unsigned int)izistep;
+	pq_combined_z_active = 1;
+
+	do
+	{
+		pdest = (unsigned char *)((byte *)d_viewbuffer +
+				(screenwidth * pspan->v) + pspan->u);
+		count = pspan->count;
+
+		du = (float)pspan->u;
+		dv = (float)pspan->v;
+
+		sdivz = d_sdivzorigin + dv*d_sdivzstepv + du*d_sdivzstepu;
+		tdivz = d_tdivzorigin + dv*d_tdivzstepv + du*d_tdivzstepu;
+		zi = d_ziorigin + dv*d_zistepv + du*d_zistepu;
+
+		int izi = (int)(zi * 0x8000 * 0x10000);
+		short *pzbuf = d_pzbuffer + (d_zwidth * pspan->v) + pspan->u;
+
+		while (!span_can_accept()) ;
+		span_draw_persp_z((unsigned int)pdest, sdivz, tdivz, zi,
+		                  (unsigned int)pzbuf, izi, count);
+
+	} while ((pspan = pspan->pnext) != NULL);
+	}
+#else
+	do
+	{
+		pdest = (unsigned char *)((byte *)d_viewbuffer +
+				(screenwidth * pspan->v) + pspan->u);
+		count = pspan->count;
+
+		du = (float)pspan->u;
+		dv = (float)pspan->v;
+
+		sdivz = d_sdivzorigin + dv*d_sdivzstepv + du*d_sdivzstepu;
+		tdivz = d_tdivzorigin + dv*d_tdivzstepv + du*d_tdivzstepu;
+		zi = d_ziorigin + dv*d_zistepv + du*d_zistepu;
+
+		while (!span_can_accept()) ;
+		span_draw_persp((unsigned int)pdest, sdivz, tdivz, zi, count);
+
+	} while ((pspan = pspan->pnext) != NULL);
+#endif
+
+	span_wait();
+#else /* !HW_PERSP_ACCEL */
 	sstep = 0;	// keep compiler happy
 	tstep = 0;	// ditto
-
-	pbase = (unsigned char *)cacheblock;
 
 	sdivzNstepu = d_sdivzstepu * 16;
 	tdivzNstepu = d_tdivzstepu * 16;
@@ -453,6 +539,7 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 	if (r_hwspan.value)
 		span_wait();  // ensure last span is done
 #endif
+#endif /* HW_PERSP_ACCEL */
 
 	if (pq_cycleprof.value)
 		pq_prof_spans8_cycles_frame += (SYS_CYCLE_LO - prof_start);

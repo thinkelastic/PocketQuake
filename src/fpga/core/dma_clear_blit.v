@@ -23,19 +23,39 @@ module dma_clear_blit (
     input wire [31:0] reg_wdata,       // Write data
     output reg [31:0] reg_rdata,       // Read data (active same cycle)
 
-    // SDRAM word interface (active for 1 cycle each)
-    output reg        sdram_rd,
-    output reg        sdram_wr,
-    output reg [23:0] sdram_addr,      // 24-bit word address (byte_addr >> 2)
-    output reg [31:0] sdram_wdata,
-    output reg [3:0]  sdram_wstrb,
-    input wire [31:0] sdram_rdata,
-    input wire        sdram_busy,
-    input wire        sdram_rdata_valid,
+    // AXI4 Master interface (to axi_sdram_arbiter)
+    output reg         m_axi_arvalid,
+    input  wire        m_axi_arready,
+    output reg  [31:0] m_axi_araddr,
+    output wire [7:0]  m_axi_arlen,     // Always 0 (single-beat reads)
+
+    input  wire        m_axi_rvalid,
+    input  wire [31:0] m_axi_rdata,
+    input  wire [1:0]  m_axi_rresp,
+    input  wire        m_axi_rlast,
+
+    output reg         m_axi_awvalid,
+    input  wire        m_axi_awready,
+    output reg  [31:0] m_axi_awaddr,
+    output wire [7:0]  m_axi_awlen,     // Always 0 (single-beat writes)
+
+    output reg         m_axi_wvalid,
+    input  wire        m_axi_wready,
+    output reg  [31:0] m_axi_wdata,
+    output reg  [3:0]  m_axi_wstrb,
+    output wire        m_axi_wlast,     // Always 1 (single-beat writes)
+
+    input  wire        m_axi_bvalid,
+    input  wire [1:0]  m_axi_bresp,
 
     // Status
     output wire       active           // DMA is running (blocks CPU SDRAM access)
 );
+
+// Static AXI4 ties — single-beat only
+assign m_axi_arlen = 8'd0;
+assign m_axi_awlen = 8'd0;
+assign m_axi_wlast = 1'b1;
 
 // Configuration registers
 reg [31:0] src_addr_reg;    // Source byte address
@@ -58,8 +78,6 @@ reg [31:0] cur_src;         // Current source byte address
 reg [31:0] cur_dst;         // Current destination byte address
 reg [31:0] remaining;       // Remaining bytes to transfer
 reg [31:0] copy_buf;        // Temporary buffer for copy read data
-reg        cmd_issued;      // Command was issued, waiting for busy to assert
-reg        seen_busy;       // Busy has asserted for current write command
 
 assign active = (state != ST_IDLE);
 
@@ -88,17 +106,18 @@ always @(posedge clk or negedge reset_n) begin
         cur_dst <= 32'd0;
         remaining <= 32'd0;
         copy_buf <= 32'd0;
-        cmd_issued <= 1'b0;
-        seen_busy <= 1'b0;
-        sdram_rd <= 1'b0;
-        sdram_wr <= 1'b0;
-        sdram_addr <= 24'd0;
-        sdram_wdata <= 32'd0;
-        sdram_wstrb <= 4'b0;
+        m_axi_arvalid <= 1'b0;
+        m_axi_araddr <= 32'd0;
+        m_axi_awvalid <= 1'b0;
+        m_axi_awaddr <= 32'd0;
+        m_axi_wvalid <= 1'b0;
+        m_axi_wdata <= 32'd0;
+        m_axi_wstrb <= 4'b0;
     end else begin
-        // Default: deassert single-cycle SDRAM signals
-        sdram_rd <= 1'b0;
-        sdram_wr <= 1'b0;
+        // AXI4 valid/ready handshake: deassert valid when ready fires
+        if (m_axi_arvalid && m_axi_arready) m_axi_arvalid <= 1'b0;
+        if (m_axi_awvalid && m_axi_awready) m_axi_awvalid <= 1'b0;
+        if (m_axi_wvalid && m_axi_wready)   m_axi_wvalid <= 1'b0;
 
         // Register writes (only when idle)
         if (reg_wr && !active) begin
@@ -114,8 +133,6 @@ always @(posedge clk or negedge reset_n) begin
                         cur_src <= src_addr_reg;
                         cur_dst <= dst_addr_reg;
                         remaining <= length_reg;
-                        cmd_issued <= 1'b0;
-                        seen_busy <= 1'b0;
                         if (reg_wdata[1])
                             state <= ST_COPY_READ;
                         else
@@ -134,25 +151,18 @@ always @(posedge clk or negedge reset_n) begin
 
             // ---- Fill mode ----
             ST_FILL_ISSUE: begin
-                if (!sdram_busy) begin
-                    sdram_wr <= 1'b1;
-                    sdram_addr <= cur_dst[25:2];
-                    sdram_wdata <= fill_data_reg;
-                    sdram_wstrb <= 4'b1111;
-                    cmd_issued <= 1'b1;
-                    seen_busy <= 1'b0;
-                    state <= ST_FILL_WAIT;
-                end
+                // Assert AW+W simultaneously for single-beat write
+                m_axi_awvalid <= 1'b1;
+                m_axi_awaddr  <= {6'b0, cur_dst[25:2], 2'b00};
+                m_axi_wvalid  <= 1'b1;
+                m_axi_wdata   <= fill_data_reg;
+                m_axi_wstrb   <= 4'b1111;
+                state <= ST_FILL_WAIT;
             end
 
             ST_FILL_WAIT: begin
-                // Wait for write to complete (must observe busy high then low)
-                if (sdram_busy) begin
-                    seen_busy <= 1'b1;
-                end
-                if (cmd_issued && seen_busy && !sdram_busy) begin
-                    // Write accepted and completed
-                    cmd_issued <= 1'b0;
+                // Wait for B response (write complete)
+                if (m_axi_bvalid) begin
                     cur_dst <= cur_dst + 32'd4;
                     remaining <= remaining - 32'd4;
                     if (remaining <= 32'd4)
@@ -164,40 +174,33 @@ always @(posedge clk or negedge reset_n) begin
 
             // ---- Copy mode ----
             ST_COPY_READ: begin
-                if (!sdram_busy) begin
-                    sdram_rd <= 1'b1;
-                    sdram_addr <= cur_src[25:2];
-                    cmd_issued <= 1'b1;
-                    state <= ST_COPY_RWAIT;
-                end
+                // Assert AR for single-beat read
+                m_axi_arvalid <= 1'b1;
+                m_axi_araddr  <= {6'b0, cur_src[25:2], 2'b00};
+                state <= ST_COPY_RWAIT;
             end
 
             ST_COPY_RWAIT: begin
-                if (sdram_rdata_valid) begin
-                    copy_buf <= sdram_rdata;
-                    cmd_issued <= 1'b0;
+                // Wait for R data
+                if (m_axi_rvalid) begin
+                    copy_buf <= m_axi_rdata;
                     state <= ST_COPY_WRITE;
                 end
             end
 
             ST_COPY_WRITE: begin
-                if (!sdram_busy) begin
-                    sdram_wr <= 1'b1;
-                    sdram_addr <= cur_dst[25:2];
-                    sdram_wdata <= copy_buf;
-                    sdram_wstrb <= 4'b1111;
-                    cmd_issued <= 1'b1;
-                    seen_busy <= 1'b0;
-                    state <= ST_COPY_WWAIT;
-                end
+                // Assert AW+W simultaneously for single-beat write
+                m_axi_awvalid <= 1'b1;
+                m_axi_awaddr  <= {6'b0, cur_dst[25:2], 2'b00};
+                m_axi_wvalid  <= 1'b1;
+                m_axi_wdata   <= copy_buf;
+                m_axi_wstrb   <= 4'b1111;
+                state <= ST_COPY_WWAIT;
             end
 
             ST_COPY_WWAIT: begin
-                if (sdram_busy) begin
-                    seen_busy <= 1'b1;
-                end
-                if (cmd_issued && seen_busy && !sdram_busy) begin
-                    cmd_issued <= 1'b0;
+                // Wait for B response (write complete)
+                if (m_axi_bvalid) begin
                     cur_src <= cur_src + 32'd4;
                     cur_dst <= cur_dst + 32'd4;
                     remaining <= remaining - 32'd4;

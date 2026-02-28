@@ -57,8 +57,8 @@ for seed in $(seq $START $END); do
     cp "$STA" "output_files/sta_seed_${seed}.summary"
 
     # If both setup corners pass, save the SOF
-    warm_pass=$(echo "${warm_setup:-0} >= 0" | bc -l 2>/dev/null)
-    cold_pass=$(echo "${cold_setup:-0} >= 0" | bc -l 2>/dev/null)
+    warm_pass=$(python3 -c "print(1 if float('${warm_setup:-0}') >= 0 else 0)" 2>/dev/null)
+    cold_pass=$(python3 -c "print(1 if float('${cold_setup:-0}') >= 0 else 0)" 2>/dev/null)
     if [ "$warm_pass" = "1" ] && [ "$cold_pass" = "1" ]; then
         cp "output_files/${PROJECT}.sof" "output_files/${PROJECT}_seed${seed}.sof"
         quartus_asm "$PROJECT" > /dev/null 2>&1

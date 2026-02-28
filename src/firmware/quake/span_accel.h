@@ -9,9 +9,11 @@
 
 /* Enable textured span offload on SDRAM-backed framebuffer path. */
 #define HW_SPAN_ACCEL 1
-#define HW_ZSPAN_ACCEL 0  /* Disabled: z-buffer now in cacheable SDRAM, not SRAM */
+#define HW_ZSPAN_ACCEL 1  /* Z-buffer in external SRAM, HW z-span writes */
 #define HW_TURB_ACCEL 1
 #define HW_SURFBLOCK_ACCEL 1
+#define HW_PERSP_ACCEL 1  /* HW perspective correction in span rasterizer */
+#define HW_COMBINED_Z 1   /* Combined texture + z-buffer write mode */
 
 #define SPAN_BASE       0x48000000
 #define SPAN_FB_ADDR    (*(volatile unsigned int *)(SPAN_BASE + 0x00))
@@ -31,6 +33,18 @@
 #define SPAN_LIGHTSTEP  (*(volatile unsigned int *)(SPAN_BASE + 0x38))
 #define SPAN_TURB_PHASE (*(volatile unsigned int *)(SPAN_BASE + 0x3C))
 
+/* Perspective correction registers (slots 26-35) */
+#define SPAN_PERSP_SDIVZ      (*(volatile unsigned int *)(SPAN_BASE + 0x68))
+#define SPAN_PERSP_TDIVZ      (*(volatile unsigned int *)(SPAN_BASE + 0x6C))
+#define SPAN_PERSP_ZI         (*(volatile unsigned int *)(SPAN_BASE + 0x70))
+#define SPAN_PERSP_SDIVZ_STEP (*(volatile unsigned int *)(SPAN_BASE + 0x74))
+#define SPAN_PERSP_TDIVZ_STEP (*(volatile unsigned int *)(SPAN_BASE + 0x78))
+#define SPAN_PERSP_ZI_STEP    (*(volatile unsigned int *)(SPAN_BASE + 0x7C))
+#define SPAN_PERSP_SADJUST    (*(volatile unsigned int *)(SPAN_BASE + 0x80))
+#define SPAN_PERSP_TADJUST    (*(volatile unsigned int *)(SPAN_BASE + 0x84))
+#define SPAN_PERSP_BBEXTENTS  (*(volatile unsigned int *)(SPAN_BASE + 0x88))
+#define SPAN_PERSP_BBEXTENTT  (*(volatile unsigned int *)(SPAN_BASE + 0x8C))
+
 /* Surface block registers */
 #define SURF_LIGHT_TL   (*(volatile unsigned int *)(SPAN_BASE + 0x40))
 #define SURF_LIGHT_TR   (*(volatile unsigned int *)(SPAN_BASE + 0x44))
@@ -45,6 +59,13 @@
 #define SPAN_STATUS_CAN_ACCEPT  0x04
 #define SPAN_STATUS_OVERFLOW    0x08
 
+/* Block until span completes */
+static inline void span_wait(void)
+{
+    while (SPAN_STATUS & SPAN_STATUS_BUSY)
+        ;
+}
+
 /* Start a textured span draw (non-blocking).
  * fb_addr/tex_addr are CPU byte addresses (0x10xxxxxx or 0x50xxxxxx SDRAM alias).
  * s, t, sstep, tstep are 16.16 fixed-point.
@@ -53,6 +74,7 @@ static inline void span_draw(unsigned int fb_addr, unsigned int tex_addr,
                               int tex_width, int tex_height, int s, int t,
                               int sstep, int tstep, int count)
 {
+    span_wait();
     SPAN_FB_ADDR   = fb_addr;
     SPAN_TEX_ADDR  = tex_addr;
     SPAN_TEX_WIDTH = (unsigned int)tex_width | ((unsigned int)tex_height << 16);
@@ -75,6 +97,7 @@ static inline void span_set_texture(unsigned int tex_addr, int tex_width, int te
 static inline void span_draw_tex(unsigned int fb_addr, int s, int t,
                                  int sstep, int tstep, int count)
 {
+    span_wait();
     SPAN_FB_ADDR   = fb_addr;
     SPAN_S         = (unsigned int)s;
     SPAN_T         = (unsigned int)t;
@@ -91,6 +114,7 @@ static inline void span_draw_lit(unsigned int fb_addr, unsigned int tex_addr,
                                   int sstep, int tstep, int count,
                                   unsigned int light)
 {
+    span_wait();
     SPAN_FB_ADDR   = fb_addr;
     SPAN_TEX_ADDR  = tex_addr;
     SPAN_TEX_WIDTH = (unsigned int)tex_width | ((unsigned int)tex_height << 16);
@@ -114,6 +138,7 @@ static inline void span_set_light(unsigned int light)
 static inline void span_draw_tex_lit(unsigned int fb_addr, int s, int t,
                                       int sstep, int tstep, int count)
 {
+    span_wait();
     SPAN_FB_ADDR   = fb_addr;
     SPAN_S         = (unsigned int)s;
     SPAN_T         = (unsigned int)t;
@@ -140,6 +165,7 @@ static inline void span_draw_surface_row(unsigned int dest, unsigned int src,
                                           unsigned int light, unsigned int lightstep,
                                           int count)
 {
+    span_wait();
     SPAN_FB_ADDR   = dest;
     SPAN_TEX_ADDR  = src;
     SPAN_LIGHT     = light;
@@ -159,6 +185,7 @@ static inline void span_set_turb_phase(int phase)
 static inline void span_draw_turb(unsigned int fb_addr, int s, int t,
                                    int sstep, int tstep, int count)
 {
+    span_wait();
     SPAN_FB_ADDR = fb_addr;
     SPAN_S       = (unsigned int)s;
     SPAN_T       = (unsigned int)t;
@@ -167,11 +194,30 @@ static inline void span_draw_turb(unsigned int fb_addr, int s, int t,
     SPAN_CONTROL = (unsigned int)count | 0x20000;  /* bit 17 = turb enable */
 }
 
+/* Start a turbulent span with combined z-buffer write (non-blocking).
+ * Texture must already be set via SPAN_TEX_ADDR/SPAN_TEX_WIDTH.
+ * SPAN_ZISTEP must be set per-surface before the span loop.
+ * z_addr is byte address of short z-buffer, izi is starting fixed-point izi. */
+static inline void span_draw_turb_z(unsigned int fb_addr, int s, int t,
+                                     int sstep, int tstep, int count,
+                                     unsigned int z_addr, int izi)
+{
+    SPAN_Z_ADDR  = z_addr;
+    SPAN_ZI      = (unsigned int)izi;
+    SPAN_FB_ADDR = fb_addr;
+    SPAN_S       = (unsigned int)s;
+    SPAN_T       = (unsigned int)t;
+    SPAN_SSTEP   = (unsigned int)sstep;
+    SPAN_TSTEP   = (unsigned int)tstep;
+    SPAN_CONTROL = (unsigned int)count | 0xA0000;  /* bits 17+19 = turb + combined z */
+}
+
 /* Start a z-span draw (non-blocking).
  * z_addr is CPU byte address of short z-buffer destination.
  * Per pixel value written is (izi >> 16), then izi += izistep. */
 static inline void span_z_draw(unsigned int z_addr, int izi, int izistep, int count)
 {
+    span_wait();
     SPAN_Z_ADDR    = z_addr;
     SPAN_ZI        = (unsigned int)izi;
     SPAN_ZISTEP    = (unsigned int)izistep;
@@ -189,6 +235,7 @@ static inline void span_draw_surface_block(
     unsigned int tex_step, unsigned int dest_step,
     int blockdivshift)
 {
+    span_wait();
     SPAN_FB_ADDR    = dest;
     SPAN_TEX_ADDR   = src;
     SURF_LIGHT_TL   = light_tl;
@@ -212,11 +259,48 @@ static inline int span_can_accept(void)
     return SPAN_STATUS & SPAN_STATUS_CAN_ACCEPT;
 }
 
-/* Block until span completes */
-static inline void span_wait(void)
+/* Set sticky perspective parameters (call once per surface / D_DrawSpans8 call).
+ * Steps are d_*stepu float values; converted to 8.24 fixed-point * 16 internally.
+ * sadjust/tadjust and bbextents/bbextentt are 16.16 fixed-point integers. */
+static inline void span_set_perspective(float sdivzstepu, float tdivzstepu, float zistepu,
+                                         int sadjust_val, int tadjust_val,
+                                         int bbextents_val, int bbextentt_val)
 {
-    while (SPAN_STATUS & SPAN_STATUS_BUSY)
-        ;
+    SPAN_PERSP_SDIVZ_STEP = (unsigned int)(int)(sdivzstepu * 16.0f * 16777216.0f);
+    SPAN_PERSP_TDIVZ_STEP = (unsigned int)(int)(tdivzstepu * 16.0f * 16777216.0f);
+    SPAN_PERSP_ZI_STEP    = (unsigned int)(int)(zistepu * 16.0f * 16777216.0f);
+    SPAN_PERSP_SADJUST    = (unsigned int)sadjust_val;
+    SPAN_PERSP_TADJUST    = (unsigned int)tadjust_val;
+    SPAN_PERSP_BBEXTENTS  = (unsigned int)bbextents_val;
+    SPAN_PERSP_BBEXTENTT  = (unsigned int)bbextentt_val;
+}
+
+/* Dispatch entire span with HW perspective correction (non-blocking).
+ * sdivz/tdivz/zi are float values at span origin. count is total span pixels.
+ * Hardware internally subdivides into 16-pixel affine chunks. */
+static inline void span_draw_persp(unsigned int fb_addr, float sdivz, float tdivz,
+                                    float zi, int count)
+{
+    SPAN_FB_ADDR     = fb_addr;
+    SPAN_PERSP_SDIVZ = (unsigned int)(int)(sdivz * 16777216.0f);
+    SPAN_PERSP_TDIVZ = (unsigned int)(int)(tdivz * 16777216.0f);
+    SPAN_PERSP_ZI    = (unsigned int)(int)(zi * 16777216.0f);
+    SPAN_CONTROL     = (unsigned int)count | 0x40000;  /* bit 18 = perspective enable */
+}
+
+/* Dispatch span with HW perspective correction + combined z-buffer write.
+ * Writes z-values alongside textured pixels using the SRAM interface.
+ * z_addr is byte address of short z-buffer, izi is starting fixed-point izi. */
+static inline void span_draw_persp_z(unsigned int fb_addr, float sdivz, float tdivz,
+                                      float zi, unsigned int z_addr, int izi, int count)
+{
+    SPAN_Z_ADDR      = z_addr;
+    SPAN_ZI          = (unsigned int)izi;
+    SPAN_FB_ADDR     = fb_addr;
+    SPAN_PERSP_SDIVZ = (unsigned int)(int)(sdivz * 16777216.0f);
+    SPAN_PERSP_TDIVZ = (unsigned int)(int)(tdivz * 16777216.0f);
+    SPAN_PERSP_ZI    = (unsigned int)(int)(zi * 16777216.0f);
+    SPAN_CONTROL     = (unsigned int)count | 0xC0000;  /* bits 18+19 = persp + combined z */
 }
 
 #endif /* SPAN_ACCEL_H */

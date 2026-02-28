@@ -1818,6 +1818,8 @@ Host_Startdemos_f
 void Host_Startdemos_f (void)
 {
 	int		i, c;
+	int		demo_handle;
+	char	first_demo[MAX_QPATH];
 
 	if (cls.state == ca_dedicated)
 	{
@@ -1836,6 +1838,25 @@ void Host_Startdemos_f (void)
 
 	for (i=1 ; i<c+1 ; i++)
 		strncpy (cls.demos[i-1], Cmd_Argv(i), sizeof(cls.demos[0])-1);
+
+	/* PocketQuake: demo files are optional. If the first demo is missing,
+	 * skip demo loop and start the game map directly. */
+	if (c > 0)
+	{
+		strncpy (first_demo, cls.demos[0], sizeof(first_demo)-1);
+		first_demo[sizeof(first_demo)-1] = 0;
+		COM_DefaultExtension (first_demo, ".dem");
+		demo_handle = -1;
+		if (COM_OpenFile(first_demo, &demo_handle) == -1 || demo_handle == -1)
+		{
+			Con_Printf ("startdemos: %s missing, running map start\n", first_demo);
+			cls.demonum = -1;
+			if (!sv.active)
+				Cbuf_AddText ("map start\n");
+			return;
+		}
+		COM_CloseFile (demo_handle);
+	}
 
 	if (!sv.active && cls.demonum != -1 && !cls.demoplayback)
 	{

@@ -1,13 +1,20 @@
 #!/bin/bash
 # Generate VexRiscv with custom cache sizes for PocketQuake
-# Usage: ./generate.sh
+# Usage: ./generate.sh [path/to/GenPocketQuake.scala]
 #
+# If no argument is given, uses GenPocketQuake.scala from this directory.
 # Prerequisites: java, sbt
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VEXRISCV_DIR="$SCRIPT_DIR/VexRiscv"
+SCALA_FILE="${1:-$SCRIPT_DIR/GenPocketQuake.scala}"
+
+if [ ! -f "$SCALA_FILE" ]; then
+    echo "ERROR: Scala file not found: $SCALA_FILE"
+    exit 1
+fi
 
 # Clone VexRiscv if not already present
 if [ ! -d "$VEXRISCV_DIR" ]; then
@@ -16,10 +23,11 @@ if [ ! -d "$VEXRISCV_DIR" ]; then
 fi
 
 # Copy generation script into VexRiscv project
-cp "$SCRIPT_DIR/GenPocketQuake.scala" "$VEXRISCV_DIR/src/main/scala/vexriscv/demo/"
+echo "Using: $SCALA_FILE"
+cp "$SCALA_FILE" "$VEXRISCV_DIR/src/main/scala/vexriscv/demo/GenPocketQuake.scala"
 
 # Generate
-echo "Generating VexRiscv (32KB I$ + 128KB D$)..."
+echo "Generating VexRiscv..."
 cd "$VEXRISCV_DIR"
 sbt "runMain vexriscv.demo.GenPocketQuake"
 
@@ -33,8 +41,8 @@ if [ -f "$VEXRISCV_DIR/VexRiscv.v" ]; then
     cp "$VEXRISCV_DIR/VexRiscv.v" "$SCRIPT_DIR/VexRiscv_Full.v"
     echo "Copied generated VexRiscv.v -> VexRiscv_Full.v"
     echo ""
-    echo "Cacheable: 0x1X (SDRAM), 0x30-0x37 (PSRAM)"
-    echo "Uncacheable: 0x0X (BRAM), 0x38+ (SRAM), all IO"
+    echo "Cacheable: 0x3X (PSRAM+SRAM)"
+    echo "Uncacheable: 0x0X (BRAM), 0x1X (SDRAM — DMA coherency), all IO"
 else
     echo "ERROR: VexRiscv.v not found after generation"
     exit 1

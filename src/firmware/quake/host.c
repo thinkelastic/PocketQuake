@@ -102,6 +102,12 @@ void Host_EndGame (char *message, ...)
 
 	if (cls.state == ca_dedicated)
 		Sys_Error ("Host_EndGame: %s\n",string);	// dedicated servers exit
+
+	/* host_abortserver is initialized by setjmp() inside _Host_Frame().
+	 * If EndGame triggers before the frame loop starts, longjmp target is
+	 * undefined and can return to random code paths. */
+	if (!host_initialized)
+		Sys_Error ("Host_EndGame during init: %s\n", string);
 	
 	if (cls.demonum != -1)
 		CL_NextDemo ();
@@ -141,6 +147,11 @@ void Host_Error (char *error, ...)
 
 	if (cls.state == ca_dedicated)
 		Sys_Error ("Host_Error: %s\n",string);	// dedicated servers exit
+
+	/* host_abortserver is initialized by setjmp() inside _Host_Frame().
+	 * During init, route fatal errors to Sys_Error instead of longjmp. */
+	if (!host_initialized)
+		Sys_Error ("Host_Error during init: %s\n", string);
 
 	CL_Disconnect ();
 	cls.demonum = -1;
@@ -650,6 +661,13 @@ void _Host_Frame (float time)
 		return;			// something bad happened, or the server disconnected
 	pq_dbg_stage = 0x2001;
 
+	/* VRAM row 26: Host_Frame stage tracker (survives SDRAM hangs) */
+	{
+		volatile char *v = (volatile char *)0x20000000;
+		v[26 * 40 + 0] = 'S';  /* Stage */
+		v[26 * 40 + 1] = '0';  /* will update at each stage */
+	}
+
 #ifdef POCKET_QUAKE
 	if (first_frame_dbg < 32 && cls.signon == SIGNONS)
 	{
@@ -696,7 +714,9 @@ void _Host_Frame (float time)
 #endif
 
 // process console commands
+	((volatile char *)0x20000000)[26 * 40 + 1] = '1';  /* before Cbuf_Execute */
 	Cbuf_Execute ();
+	((volatile char *)0x20000000)[26 * 40 + 1] = '2';  /* after Cbuf_Execute */
 	pq_dbg_stage = 0x2005;
 
 #ifdef POCKET_QUAKE
@@ -724,8 +744,10 @@ void _Host_Frame (float time)
 	Host_GetConsoleCommands ();
 	pq_dbg_stage = 0x2008;
 	
+	((volatile char *)0x20000000)[26 * 40 + 1] = '3';  /* before ServerFrame */
 	if (sv.active)
 		Host_ServerFrame ();
+	((volatile char *)0x20000000)[26 * 40 + 1] = '4';  /* after ServerFrame */
 	pq_dbg_stage = 0x2009;
 
 //-------------------
@@ -755,13 +777,16 @@ void _Host_Frame (float time)
 	if (host_speeds.value)
 		time1 = Sys_FloatTime ();
 		
+	((volatile char *)0x20000000)[26 * 40 + 1] = '5';  /* before SCR_UpdateScreen */
 	SCR_UpdateScreen ();
+	((volatile char *)0x20000000)[26 * 40 + 1] = '6';  /* after SCR_UpdateScreen */
 	pq_dbg_stage = 0x200E;
 
 	if (host_speeds.value)
 		time2 = Sys_FloatTime ();
 		
 // update audio
+	((volatile char *)0x20000000)[26 * 40 + 1] = '7';  /* before S_Update */
 	if (cls.signon == SIGNONS)
 	{
 		pq_dbg_stage = 0x200F;
@@ -772,6 +797,7 @@ void _Host_Frame (float time)
 		S_Update (vec3_origin, vec3_origin, vec3_origin, vec3_origin);
 	pq_dbg_stage = 0x2010;
 	
+	((volatile char *)0x20000000)[26 * 40 + 1] = '8';  /* after S_Update */
 	CDAudio_Update();
 	pq_dbg_info = host_framecount;
 	pq_dbg_stage = 0x2011;
@@ -940,52 +966,80 @@ void Host_Init (quakeparms_t *parms)
 	Sys_Printf("Host_InitVCR...");
 	Host_InitVCR (parms);
 	Sys_Printf("OK\n");
+	/* VRAM row 28 progress markers: single chars at fixed position,
+	 * visible even if terminal scroll is stuck. */
+	#define VRAM_PROGRESS(ch) ((volatile char *)0x20000000)[28*40] = (ch)
+
 	Sys_Printf("COM_Init...");
+	VRAM_PROGRESS('c');
 	COM_Init (parms->basedir);
+	VRAM_PROGRESS('C');
 	Sys_Printf("OK\n");
+	{ extern void Sys_PrintDmaStats(void); Sys_PrintDmaStats(); }
 	Sys_Printf("Host_InitLocal\n");
+	VRAM_PROGRESS('h');
 	Host_InitLocal ();
+	VRAM_PROGRESS('H');
 	Sys_Printf("W_LoadWadFile\n");
+	VRAM_PROGRESS('w');
 	W_LoadWadFile ("gfx.wad");
+	VRAM_PROGRESS('W');
 	Sys_Printf("Key_Init\n");
 	Key_Init ();
 	Sys_Printf("Con_Init\n");
+	VRAM_PROGRESS('o');
 	Con_Init ();
+	VRAM_PROGRESS('O');
 	Sys_Printf("M_Init\n");
 	M_Init ();
 	Sys_Printf("PR_Init\n");
+	VRAM_PROGRESS('p');
 	PR_Init ();
+	VRAM_PROGRESS('P');
 	Sys_Printf("Mod_Init\n");
 	Mod_Init ();
 	Sys_Printf("NET_Init\n");
 	NET_Init ();
 	Sys_Printf("SV_Init\n");
 	SV_Init ();
+	VRAM_PROGRESS('S');
 
 	Con_Printf ("Exe: "__TIME__" "__DATE__"\n");
 	Con_Printf ("%4.1f megabyte heap\n",parms->memsize/ (1024*1024.0));
-	
+
 	R_InitTextures ();		// needed even for dedicated servers
- 
+	VRAM_PROGRESS('t');
+
 	if (cls.state != ca_dedicated)
 	{
+		Sys_Printf("palette.lmp\n");
+		VRAM_PROGRESS('1');
 		host_basepal = (byte *)COM_LoadHunkFile ("gfx/palette.lmp");
 		if (!host_basepal)
 			Sys_Error ("Couldn't load gfx/palette.lmp");
+		VRAM_PROGRESS('2');
+		Sys_Printf("colormap.lmp\n");
 		host_colormap = (byte *)COM_LoadHunkFile ("gfx/colormap.lmp");
 		if (!host_colormap)
 			Sys_Error ("Couldn't load gfx/colormap.lmp");
+		VRAM_PROGRESS('3');
 
 #ifndef _WIN32 // on non win32, mouse comes before video for security reasons
 		IN_Init ();
 #endif
+		Sys_Printf("VID_Init\n");
+		VRAM_PROGRESS('v');
 		VID_Init (host_basepal);
+		VRAM_PROGRESS('V');
 
 		Sys_Printf("Draw_Init\n");
+		VRAM_PROGRESS('d');
 		Draw_Init ();
+		VRAM_PROGRESS('D');
 		Sys_Printf("SCR_Init\n");
 		SCR_Init ();
 		Sys_Printf("R_Init\n");
+		VRAM_PROGRESS('r');
 		R_Init ();
 #ifndef	_WIN32
 	// on Win32, sound initialization has to come before video initialization, so we
@@ -1019,6 +1073,7 @@ void Host_Init (quakeparms_t *parms)
 
 	host_initialized = true;
 
+	{ extern void Sys_PrintDmaStats(void); Sys_PrintDmaStats(); }
 	Sys_Printf ("========Quake Initialized=========\n");
 }
 

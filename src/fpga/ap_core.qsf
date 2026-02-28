@@ -46,6 +46,7 @@ set_global_assignment -name LAST_QUARTUS_VERSION "25.1std.0 Lite Edition"
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
 set_global_assignment -name PRE_FLOW_SCRIPT_FILE "quartus_sh:apf/build_id_gen.tcl"
 set_global_assignment -name SMART_RECOMPILE ON
+set_global_assignment -name BLOCK_RAM_AND_MLAB_EQUIVALENT_PAUSED_READ_CAPABILITIES DONT_CARE
 
 # Pin & Location Assignments
 # ==========================
@@ -746,9 +747,18 @@ set_global_assignment -name MIF_FILE core/font_rom.mif
 set_global_assignment -name MIF_FILE core/vram_init.mif
 set_global_assignment -name MIF_FILE core/firmware.mif
 set_global_assignment -name VERILOG_FILE core/cpu_system.v
+set_global_assignment -name VERILOG_FILE core/axi_periph_slave.v
+set_global_assignment -name VERILOG_FILE core/axi_sdram_slave.v
+set_global_assignment -name VERILOG_FILE core/axi_psram_slave.v
+# axi_word_master.v removed — span/DMA now have native AXI4 master ports
+set_global_assignment -name VERILOG_FILE core/axi_sdram_arbiter.v
+set_global_assignment -name VERILOG_FILE core/axi_bridge_master.v
 set_global_assignment -name VERILOG_FILE core/io_sdram.v
 set_global_assignment -name VERILOG_FILE core/mf_pllram_133.v
 set_global_assignment -name VERILOG_FILE core/psram_controller.v
+set_global_assignment -name VERILOG_FILE core/sram_controller.v
+set_global_assignment -name VERILOG_FILE core/sram_fill.v
+set_global_assignment -name VERILOG_FILE core/scanline_engine.v
 set_global_assignment -name SYSTEMVERILOG_FILE core/psram.sv
 set_global_assignment -name VERILOG_FILE core/mf_linebuf.v
 set_global_assignment -name VERILOG_FILE vexriscv/VexRiscv_Full.v
@@ -759,7 +769,7 @@ set_global_assignment -name SIP_FILE core/mf_pllbase.sip
 set_global_assignment -name VERILOG_FILE core/video_scanout.v
 set_global_assignment -name VERILOG_FILE core/video_scanout_indexed.v
 set_global_assignment -name VERILOG_FILE core/dma_clear_blit.v
-set_global_assignment -name VERILOG_FILE core/periph_sdram_mux.v
+# periph_sdram_mux.v removed — replaced by axi_sdram_arbiter + axi_word_master
 set_global_assignment -name VERILOG_FILE core/span_rasterizer.v
 set_global_assignment -name VERILOG_FILE core/alias_transform_mac.v
 set_global_assignment -name VERILOG_FILE core/audio_output.v

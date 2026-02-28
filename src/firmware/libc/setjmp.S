@@ -1,6 +1,6 @@
 /*
- * setjmp / longjmp for RV32IM (ilp32 ABI - soft-float)
- * jmp_buf layout (14 x 32-bit words):
+ * setjmp / longjmp for RV32IMAF (ilp32f ABI)
+ * jmp_buf layout (26 x 32-bit words):
  *   [0]  ra   (return address)
  *   [1]  sp   (stack pointer)
  *   [2]  s0   (frame pointer)
@@ -15,6 +15,18 @@
  *   [11] s9
  *   [12] s10
  *   [13] s11
+ *   [14] fs0
+ *   [15] fs1
+ *   [16] fs2
+ *   [17] fs3
+ *   [18] fs4
+ *   [19] fs5
+ *   [20] fs6
+ *   [21] fs7
+ *   [22] fs8
+ *   [23] fs9
+ *   [24] fs10
+ *   [25] fs11
  */
 
 .section .text
@@ -38,6 +50,18 @@ setjmp:
     sw s9,  44(a0)
     sw s10, 48(a0)
     sw s11, 52(a0)
+    fsw fs0,  56(a0)
+    fsw fs1,  60(a0)
+    fsw fs2,  64(a0)
+    fsw fs3,  68(a0)
+    fsw fs4,  72(a0)
+    fsw fs5,  76(a0)
+    fsw fs6,  80(a0)
+    fsw fs7,  84(a0)
+    fsw fs8,  88(a0)
+    fsw fs9,  92(a0)
+    fsw fs10, 96(a0)
+    fsw fs11, 100(a0)
     li a0, 0         /* return 0 from setjmp */
     ret
 
@@ -58,6 +82,18 @@ longjmp:
     lw s9,  44(a0)
     lw s10, 48(a0)
     lw s11, 52(a0)
+    flw fs0,  56(a0)
+    flw fs1,  60(a0)
+    flw fs2,  64(a0)
+    flw fs3,  68(a0)
+    flw fs4,  72(a0)
+    flw fs5,  76(a0)
+    flw fs6,  80(a0)
+    flw fs7,  84(a0)
+    flw fs8,  88(a0)
+    flw fs9,  92(a0)
+    flw fs10, 96(a0)
+    flw fs11, 100(a0)
     mv a0, a1        /* return val */
     bnez a0, 1f
     li a0, 1         /* if val == 0, return 1 */
