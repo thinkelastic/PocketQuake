@@ -487,6 +487,8 @@ always @(*) begin
         6'b100011: sysreg_rdata = perf_ctr_sdram_cpu;    // 0x8C
         6'b100100: sysreg_rdata = {dbg_scanline_rd_hit, dbg_scanline_ar_hit}; // 0x90
         6'b100101: sysreg_rdata = dbg_periph_rd_capture;  // 0x94
+        6'b100110: sysreg_rdata = 32'h0;  // 0x98 (reserved)
+        6'b100111: sysreg_rdata = 32'h0; // 0x9C (reserved)
         default: sysreg_rdata = 32'h0;
     endcase
 end

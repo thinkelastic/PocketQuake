@@ -2,6 +2,10 @@
 // Targets Analogue Pocket external SRAM (128K x 16 = 256KB).
 // Tristate data bus is handled EXTERNALLY (at top level) to avoid
 // synthesis issues with inout ports through module hierarchy.
+//
+// WSTRB-based half-write skip: when only one 16-bit half of a 32-bit
+// word is written (e.g. 16-bit Z-buffer values), skip the unused half
+// to halve write latency.
 
 `default_nettype none
 
@@ -57,6 +61,10 @@ module sram_controller #(
     wire [16:0] latched_addr_lo = {latched_addr, 1'b0};
     wire [16:0] latched_addr_hi = {latched_addr, 1'b1};
 
+    // WSTRB-based half-write skip: avoid writing unused 16-bit halves
+    wire skip_lo = (latched_wstrb[1:0] == 2'b00);
+    wire skip_hi = (latched_wstrb[3:2] == 2'b00);
+
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             state <= ST_IDLE;
@@ -93,7 +101,15 @@ module sram_controller #(
                         latched_data <= word_data;
                         latched_wstrb <= word_wstrb;
                         latched_addr <= word_addr[15:0];
-                        state <= word_wr ? ST_WR_LO_SETUP : ST_RD_LO_SETUP;
+                        if (word_wr) begin
+                            // Skip unused half-writes based on WSTRB
+                            if (word_wstrb[1:0] == 2'b00)
+                                state <= ST_WR_HI_SETUP;
+                            else
+                                state <= ST_WR_LO_SETUP;
+                        end else begin
+                            state <= ST_RD_LO_SETUP;
+                        end
                     end
                 end
 
@@ -120,7 +136,12 @@ module sram_controller #(
                         sram_we_n <= 1'b1;
                         sram_ub_n <= 1'b1;
                         sram_lb_n <= 1'b1;
-                        state <= ST_WR_HI_SETUP;
+                        if (skip_hi) begin
+                            sram_dq_oe <= 1'b0;
+                            state <= ST_DONE;
+                        end else begin
+                            state <= ST_WR_HI_SETUP;
+                        end
                     end else begin
                         wait_cnt <= wait_cnt - 1'b1;
                     end

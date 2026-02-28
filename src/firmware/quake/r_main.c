@@ -216,6 +216,8 @@ static unsigned int pq_hw_snap_sdram;
 static unsigned int pq_hw_snap_sdram_span;
 static unsigned int pq_hw_snap_sdram_dma;
 static unsigned int pq_hw_snap_sdram_cpu;
+static unsigned int pq_hw_snap_sram_cache_hits;
+static unsigned int pq_hw_snap_sram_cache_misses;
 
 /* HW perf: per-frame deltas */
 static unsigned int pq_hw_span_frame;
@@ -229,6 +231,8 @@ static unsigned int pq_hw_sdram_cpu_frame;
 static unsigned int pq_hw_cache_hits_frame;
 static unsigned int pq_hw_cache_misses_frame;
 static unsigned int pq_hw_pixels_frame;
+static unsigned int pq_hw_sram_cache_hits_frame;
+static unsigned int pq_hw_sram_cache_misses_frame;
 
 /* HW perf: 64-frame accumulators */
 static unsigned int pq_hw_span_accum;
@@ -242,6 +246,8 @@ static unsigned int pq_hw_sdram_cpu_accum;
 static unsigned int pq_hw_cache_hits_accum;
 static unsigned int pq_hw_cache_misses_accum;
 static unsigned int pq_hw_pixels_accum;
+static unsigned int pq_hw_sram_cache_hits_accum;
+static unsigned int pq_hw_sram_cache_misses_accum;
 
 /* HW perf: averaged values */
 static unsigned int pq_hw_avg_span;
@@ -255,6 +261,8 @@ static unsigned int pq_hw_avg_sdram_cpu;
 static unsigned int pq_hw_avg_cache_hits;
 static unsigned int pq_hw_avg_cache_misses;
 static unsigned int pq_hw_avg_pixels;
+static unsigned int pq_hw_avg_sram_cache_hits;
+static unsigned int pq_hw_avg_sram_cache_misses;
 
 /* Mode tracking for display mode transitions */
 static int pq_prof_prev_mode;
@@ -1185,6 +1193,17 @@ static void PQ_Prof_DrawTerminal(void)
 		term_puts(line);
 	}
 
+	/* SRAM cache stats */
+	{
+		unsigned int total_acc = pq_hw_avg_sram_cache_hits + pq_hw_avg_sram_cache_misses;
+		unsigned int hitp = pct10(pq_hw_avg_sram_cache_hits, total_acc);
+		term_setpos(row++, 0);
+		snprintf(line, sizeof(line), "SRAM$: %2u.%u%% (%u/%u)",
+			hitp / 10, hitp % 10,
+			pq_hw_avg_sram_cache_hits, pq_hw_avg_sram_cache_misses);
+		term_puts(line);
+	}
+
 	/* Blank separator */
 	row++;
 
@@ -1355,6 +1374,8 @@ void R_RenderView_ (void)
 		pq_hw_snap_sdram_span = SYS_PERF_SDRAM_SPAN;
 		pq_hw_snap_sdram_dma = SYS_PERF_SDRAM_DMA;
 		pq_hw_snap_sdram_cpu = SYS_PERF_SDRAM_CPU;
+		pq_hw_snap_sram_cache_hits = SYS_PERF_SRAM_CACHE_HITS;
+		pq_hw_snap_sram_cache_misses = SYS_PERF_SRAM_CACHE_MISSES;
 		/* Write-clear span event counters */
 		SPAN_PERF_CACHE_HITS = 0;
 	}
@@ -1433,7 +1454,10 @@ SetVisibilityByPassages ();
 
 	if (profiling)
 		prof_start = SYS_CYCLE_LO;
+	extern int pq_noz_mode;
+	pq_noz_mode = 1;
 	R_DrawViewModel ();
+	pq_noz_mode = 0;
 	if (profiling)
 		pq_prof_viewmodel_cycles_frame = SYS_CYCLE_LO - prof_start;
 	pq_dbg_stage = 0x320C;
@@ -1468,6 +1492,8 @@ SetVisibilityByPassages ();
 		pq_hw_sdram_span_frame = SYS_PERF_SDRAM_SPAN - pq_hw_snap_sdram_span;
 		pq_hw_sdram_dma_frame = SYS_PERF_SDRAM_DMA - pq_hw_snap_sdram_dma;
 		pq_hw_sdram_cpu_frame = SYS_PERF_SDRAM_CPU - pq_hw_snap_sdram_cpu;
+		pq_hw_sram_cache_hits_frame = SYS_PERF_SRAM_CACHE_HITS - pq_hw_snap_sram_cache_hits;
+		pq_hw_sram_cache_misses_frame = SYS_PERF_SRAM_CACHE_MISSES - pq_hw_snap_sram_cache_misses;
 		/* Span event counters (cleared at frame start) */
 		pq_hw_cache_hits_frame   = SPAN_PERF_CACHE_HITS;
 		pq_hw_cache_misses_frame = SPAN_PERF_CACHE_MISSES;
@@ -1546,6 +1572,8 @@ SetVisibilityByPassages ();
 			pq_hw_cache_hits_accum += pq_hw_cache_hits_frame;
 			pq_hw_cache_misses_accum += pq_hw_cache_misses_frame;
 			pq_hw_pixels_accum += pq_hw_pixels_frame;
+			pq_hw_sram_cache_hits_accum += pq_hw_sram_cache_hits_frame;
+			pq_hw_sram_cache_misses_accum += pq_hw_sram_cache_misses_frame;
 
 			if ((pq_prof_frame_counter & 63) == 0) {
 				pq_prof_avg_total = pq_prof_total_accum >> 6;
@@ -1608,6 +1636,8 @@ SetVisibilityByPassages ();
 				pq_hw_avg_cache_hits = pq_hw_cache_hits_accum >> 6;
 				pq_hw_avg_cache_misses = pq_hw_cache_misses_accum >> 6;
 				pq_hw_avg_pixels = pq_hw_pixels_accum >> 6;
+				pq_hw_avg_sram_cache_hits = pq_hw_sram_cache_hits_accum >> 6;
+				pq_hw_avg_sram_cache_misses = pq_hw_sram_cache_misses_accum >> 6;
 
 				pq_hw_span_accum = 0;
 				pq_hw_dma_accum = 0;
@@ -1620,6 +1650,8 @@ SetVisibilityByPassages ();
 				pq_hw_cache_hits_accum = 0;
 				pq_hw_cache_misses_accum = 0;
 				pq_hw_pixels_accum = 0;
+				pq_hw_sram_cache_hits_accum = 0;
+				pq_hw_sram_cache_misses_accum = 0;
 
 				PQ_Prof_DrawTerminal();
 			}

@@ -108,6 +108,7 @@ int		skinwidth;
 byte	*skinstart;
 
 void D_PolysetDrawSpans8 (spanpackage_t *pspanpackage);
+void D_PolysetDrawSpans8_NoZ (spanpackage_t *pspanpackage);
 void D_PolysetCalcGradients (int skinwidth);
 void D_DrawSubdiv (void);
 void D_DrawNonSubdiv (void);
@@ -115,6 +116,8 @@ void D_PolysetRecursiveTriangle (int *p1, int *p2, int *p3);
 void D_PolysetSetEdgeTable (void);
 void D_RasterizeAliasPolySmooth (void);
 void D_PolysetScanLeftEdge (int height);
+
+int pq_noz_mode;
 
 #if	!id386
 
@@ -665,17 +668,73 @@ PQ_FASTTEXT void D_PolysetDrawSpans8 (spanpackage_t *pspanpackage)
 			{
 				if ((lzi >> 16) >= *lpz)
 				{
-#if HW_CMAP_BRAM
 					*lpdest = CMAP_BRAM_PTR[*lptex + (llight & 0xFF00)];
-#else
-					*lpdest = ((byte *)acolormap)[*lptex + (llight & 0xFF00)];
-#endif
-// gel mapping					*lpdest = gelmap[*lpdest];
 					*lpz = lzi >> 16;
 				}
 				lpdest++;
 				lzi += r_zistepx;
 				lpz++;
+				llight += r_lstepx;
+				lptex += a_ststepxwhole;
+				lsfrac += a_sstepxfrac;
+				lptex += lsfrac >> 16;
+				lsfrac &= 0xFFFF;
+				ltfrac += a_tstepxfrac;
+				if (ltfrac & 0x10000)
+				{
+					lptex += r_affinetridesc.skinwidth;
+					ltfrac &= 0xFFFF;
+				}
+			} while (--lcount);
+		}
+
+		pspanpackage++;
+	} while (pspanpackage->count != -999999);
+}
+
+/*
+================
+D_PolysetDrawSpans8_NoZ
+
+Viewmodel variant: skips all Z-buffer reads and writes.
+The viewmodel renders last with ziscale*3, so it always passes the Z-test.
+================
+*/
+PQ_FASTTEXT void D_PolysetDrawSpans8_NoZ (spanpackage_t *pspanpackage)
+{
+	int		lcount;
+	byte	*lpdest;
+	byte	*lptex;
+	int		lsfrac, ltfrac;
+	int		llight;
+
+	do
+	{
+		lcount = d_aspancount - pspanpackage->count;
+
+		errorterm += erroradjustup;
+		if (errorterm >= 0)
+		{
+			d_aspancount += d_countextrastep;
+			errorterm -= erroradjustdown;
+		}
+		else
+		{
+			d_aspancount += ubasestep;
+		}
+
+		if (lcount)
+		{
+			lpdest = pspanpackage->pdest;
+			lptex = pspanpackage->ptex;
+			lsfrac = pspanpackage->sfrac;
+			ltfrac = pspanpackage->tfrac;
+			llight = pspanpackage->light;
+
+			do
+			{
+				*lpdest = ((byte *)acolormap)[*lptex + (llight & 0xFF00)];
+				lpdest++;
 				llight += r_lstepx;
 				lptex += a_ststepxwhole;
 				lsfrac += a_sstepxfrac;
@@ -963,7 +1022,10 @@ PQ_FASTTEXT void D_RasterizeAliasPolySmooth (void)
 	d_countextrastep = ubasestep + 1;
 	originalcount = a_spans[initialrightheight].count;
 	a_spans[initialrightheight].count = -999999; // mark end of the spanpackages
-	D_PolysetDrawSpans8 (a_spans);
+	if (pq_noz_mode)
+		D_PolysetDrawSpans8_NoZ (a_spans);
+	else
+		D_PolysetDrawSpans8 (a_spans);
 
 // scan out the bottom part of the right edge, if it exists
 	if (pedgetable->numrightedges == 2)
@@ -987,7 +1049,10 @@ PQ_FASTTEXT void D_RasterizeAliasPolySmooth (void)
 		d_countextrastep = ubasestep + 1;
 		a_spans[initialrightheight + height].count = -999999;
 											// mark end of the spanpackages
-		D_PolysetDrawSpans8 (pstart);
+		if (pq_noz_mode)
+			D_PolysetDrawSpans8_NoZ (pstart);
+		else
+			D_PolysetDrawSpans8 (pstart);
 	}
 }
 

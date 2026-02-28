@@ -29,6 +29,8 @@
 #define SYS_PERF_SDRAM_SPAN (*(volatile uint32_t*)(SYSREG_BASE + 0x84))
 #define SYS_PERF_SDRAM_DMA  (*(volatile uint32_t*)(SYSREG_BASE + 0x88))
 #define SYS_PERF_SDRAM_CPU  (*(volatile uint32_t*)(SYSREG_BASE + 0x8C))
+#define SYS_PERF_SRAM_CACHE_HITS   (*(volatile uint32_t*)(SYSREG_BASE + 0x98))
+#define SYS_PERF_SRAM_CACHE_MISSES (*(volatile uint32_t*)(SYSREG_BASE + 0x9C))
 
 /* Span rasterizer performance counters (write-clear via SPAN_PERF_CACHE_HITS) */
 #define SPAN_PERF_CACHE_HITS   (*(volatile uint32_t*)0x4800005C)
