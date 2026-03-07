@@ -10,6 +10,24 @@ Quake (1996) running natively on the [Analogue Pocket](https://www.analogue.co/p
 
 See [Installation Layout](#installation-layout) below for the full SD card directory structure.
 
+### Soundtrack (Optional)
+
+PocketQuake supports CD audio playback of the original Quake soundtrack by Trent Reznor / Nine Inch Nails. The music files are not required — the game works fine without them.
+
+To add the soundtrack, place raw CD audio `.bin` files in `Assets/pocketquake/common/cd/` on your SD card:
+
+```
+Assets/pocketquake/common/cd/
++-- Quake (USA) (Track 02).bin
++-- Quake (USA) (Track 03).bin
++-- ...
++-- Quake (USA) (Track 11).bin
+```
+
+**Format:** Raw Red Book CD audio — 44100 Hz, 16-bit signed little-endian, stereo. These are the same `.bin` files produced by CD ripping tools when ripping to BIN/CUE format.
+
+Track 01 is the game data track and is not needed. Only tracks 02 through 11 contain music.
+
 ### Controls
 
 | Button | Action |
@@ -304,6 +322,10 @@ SD Card Root/
 |       +-- common/
 |           +-- quake.bin
 |           +-- pak0.pak        (from your Quake installation)
+|           +-- cd/             (optional — soundtrack)
+|               +-- Quake (USA) (Track 02).bin
+|               +-- ...
+|               +-- Quake (USA) (Track 11).bin
 +-- Cores/
 |   +-- ThinkElastic.PocketQuake/
 |       +-- bitstream.rbf_r
