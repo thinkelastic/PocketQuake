@@ -15,7 +15,9 @@
 /* Colormap BRAM base: 16KB at 0x54000000
  * Quake colormap = 64 light levels * 256 palette entries = 16384 bytes */
 #define CMAP_BRAM_BASE  0x54000000
-#define CMAP_BRAM_PTR   ((volatile unsigned char *)CMAP_BRAM_BASE)
+/* Read-only access: no volatile needed (BRAM has no side effects on read).
+ * Volatile was preventing the compiler from caching lookups in registers. */
+#define CMAP_BRAM_PTR   ((const unsigned char *)CMAP_BRAM_BASE)
 
 /* Upload 16KB colormap to BRAM (call once at init and on palette change).
  * src must point to Quake's host_colormap (first 16384 bytes used). */

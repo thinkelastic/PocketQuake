@@ -75,11 +75,18 @@
 #define SPAN_STATUS_CAN_ACCEPT  0x04
 #define SPAN_STATUS_OVERFLOW    0x08
 
-/* Service audio FIFO during hardware wait loops */
+/* Service audio during hardware wait loops.
+ * Fill the BRAM ring buffer so the timer ISR can drain it to the FIFO.
+ * When timer ISR is inactive, also drain directly to the FIFO. */
+extern void SNDDMA_FillRing(void);
 extern void SNDDMA_Submit(void);
+extern int audio_timer_active;
 static inline void span_pump_audio(void)
 {
-    SNDDMA_Submit();
+    if (audio_timer_active)
+        SNDDMA_FillRing();
+    else
+        SNDDMA_Submit();
 }
 
 /* Block until span completes, servicing audio in the meantime */

@@ -129,7 +129,7 @@ module axi_periph_slave #(
     // Audio output interface
     output reg         audio_sample_wr,
     output reg  [31:0] audio_sample_data,
-    input wire  [11:0] audio_fifo_level,
+    input wire  [10:0] audio_fifo_level,
     input wire         audio_fifo_full,
 
     // Link MMIO interface
@@ -164,10 +164,23 @@ module axi_periph_slave #(
     output reg         scanline_reg_rd,
     output reg  [3:0]  scanline_reg_addr,
     output reg  [31:0] scanline_reg_wdata,
-    input wire  [31:0] scanline_reg_rdata
+    input wire  [31:0] scanline_reg_rdata,
+
+    // Timer interrupt output (for CPU m_timer)
+    output wire        timer_irq
 );
 
 wire reset = ~reset_n;
+
+// ============================================
+// Machine timer compare (mtimecmp) — generates timer_irq
+// ============================================
+// 32-bit compare against cycle_counter[31:0].  CPU writes mtimecmp_reg
+// to schedule next interrupt.  Level-sensitive: IRQ stays high until
+// CPU writes a future mtimecmp value.  At 105 MHz, 32 bits wraps ~40s.
+reg [31:0] mtimecmp_reg;
+reg        mtimecmp_armed;  // Disarmed until first CPU write
+assign timer_irq = mtimecmp_armed && (cycle_counter[31:0] >= mtimecmp_reg);
 
 // ============================================
 // Address decode (combinatorial, on AXI address channels)
@@ -404,6 +417,8 @@ reg sysreg_wr_fire;
 always @(posedge clk) begin
     if (reset) begin
         cycle_counter <= 0;
+        mtimecmp_reg <= 32'hFFFFFFFF;
+        mtimecmp_armed <= 0;
         display_mode_reg <= 0;
         fb_display_idx <= 2'd0;
         fb_ready_idx <= 2'd3;  // 3 = none ready
@@ -478,6 +493,10 @@ always @(posedge clk) begin
                     pal_data <= req_wdata[23:0];
                     pal_index_reg <= pal_index_reg + 1;
                 end
+                6'b101010: begin  // 0xA8: mtimecmp
+                    mtimecmp_reg <= req_wdata;
+                    mtimecmp_armed <= 1;
+                end
                 default: ;
             endcase
         end
@@ -534,6 +553,8 @@ always @(*) begin
         6'b100111: sysreg_rdata = game_name_0_s;  // 0x9C GAME_NAME[0:3]
         6'b101000: sysreg_rdata = game_name_1_s;  // 0xA0 GAME_NAME[4:7]
         6'b101001: sysreg_rdata = game_name_2_s;  // 0xA4 GAME_NAME[8:11]
+        6'b101010: sysreg_rdata = mtimecmp_reg;  // 0xA8 MTIMECMP
+        6'b101011: sysreg_rdata = cycle_counter[31:0]; // 0xAC MTIME_LO (for ISR)
         default: sysreg_rdata = 32'h0;
     endcase
 end
@@ -553,7 +574,7 @@ wire [31:0] periph_rd_mux = reg_sysreg   ? sysreg_rdata :
                              reg_span     ? span_reg_rdata :
                              reg_cmap     ? cmap_rdata :
                              reg_atm      ? atm_reg_rdata :
-                             reg_audio    ? {19'b0, audio_fifo_full, audio_fifo_level} :
+                             reg_audio    ? {20'b0, audio_fifo_full, audio_fifo_level} :
                              reg_link     ? link_reg_rdata :
                              reg_sramfill ? sramfill_reg_rdata :
                              reg_scanline ? scanline_reg_rdata :

@@ -106,6 +106,7 @@ QUAKE_SRCS = $(QUAKE_DIR)/sys_pocket.c \
              $(QUAKE_DIR)/snd_mix.c \
              $(QUAKE_DIR)/snd_mem.c \
              $(QUAKE_DIR)/snd_pocket.c \
+             $(QUAKE_DIR)/audio_timer.c \
              $(QUAKE_DIR)/printf_pocket.c
 
 # Assembly sources

@@ -185,6 +185,10 @@ reg [31:0] z_cache_data;
 reg [21:0] z_cache_addr;
 reg        z_cache_valid;
 
+// Registered z-test results (pipeline break for timing closure)
+reg        z_test_pass_r;
+reg        z_cache_hit_r;
+
 // Surface block active state
 reg        surf_block_active;
 reg [31:0] surf_ll, surf_lr;
@@ -539,8 +543,11 @@ localparam ST_PERSP_INV2     = 6'd29;  // Read t inv product, launch chunk
 localparam ST_Z_FLUSH        = 6'd30;  // Wait for combined z pending write to flush
 localparam ST_PERSP_ADVANCE  = 6'd31;  // Compute & apply perspective chunk advance (multiply separated from clamp)
 localparam ST_PERSP_CLAMP2   = 6'd36;  // Add adjust + clamp s/t (from registered barrel shift)
-localparam ST_ZTEST_READ     = 6'd37;  // Z-test: check cache or issue SRAM read
+localparam ST_ZTEST_READ     = 6'd37;  // Z-test: act on registered compare results
 localparam ST_ZTEST_WAIT     = 6'd38;  // Z-test: wait for SRAM read response
+localparam ST_ZTEST_CMP      = 6'd39;  // Z-test: register cache hit/compare (pipeline break)
+localparam ST_FIFO_DEQUEUE   = 6'd40;  // Consolidated FIFO dequeue (single readout point)
+localparam ST_TEX_PIPE       = 6'd41;  // Pipeline wait: t/s_int_eff_r → tex_byte_addr_r settle
 reg [5:0] state;
 reg       cmd_issued;      // Used for SRAM z-write path
 reg       seen_busy;       // Used for SRAM z-write path
@@ -563,12 +570,15 @@ wire [15:0] t_int = t_int_signed[15] ? 16'd0 : t_int_signed[15:0];
 // Mux: turb mode uses distorted coords (6-bit, always positive)
 wire [15:0] s_int_eff = cur_turb_en ? {10'd0, turb_s_r} : s_int;
 wire [15:0] t_int_eff = cur_turb_en ? {10'd0, turb_t_r} : t_int;
+// Pipeline registers: break critical path from cur_s/cur_t mux tree → DSP multiply.
+// Free-running, always 1 cycle behind s/t_int_eff. ST_TEX_PIPE provides the extra
+// wait cycle so tex_byte_addr_r is correct before M10K address capture.
+reg [15:0] s_int_eff_r, t_int_eff_r;
 // Registered texture byte address: combines multiply (t * width), s offset,
-// and tex base address into a single pipeline register. This moves the
-// cur_tex_addr adder from the critical output path (tex_offset_r → adder →
-// cache lookup → cache_hit_r) to the non-critical input path, saving ~3.7 ns.
-wire [31:0] t_times_w = t_int_eff * cur_tex_width;
-wire [31:0] tex_byte_addr_comb = t_times_w + {16'd0, s_int_eff} + cur_tex_addr;
+// and tex base address into a single pipeline register. Uses pipelined s/t_int_eff_r
+// to break the span_reg_wr → mux → DSP critical path (~2.5ns improvement).
+wire [31:0] t_times_w = t_int_eff_r * cur_tex_width;
+wire [31:0] tex_byte_addr_comb = t_times_w + {16'd0, s_int_eff_r} + cur_tex_addr;
 reg  [31:0] tex_byte_addr_r;
 wire [23:0] tex_word_addr = tex_byte_addr_r[25:2];
 wire [1:0]  tex_byte_sel  = tex_byte_addr_r[1:0];
@@ -862,6 +872,8 @@ always @(posedge clk or negedge reset_n) begin
 
         cmap_byte_sel_r  <= 2'd0;
 
+        s_int_eff_r      <= 16'd0;
+        t_int_eff_r      <= 16'd0;
         tex_byte_addr_r  <= 32'd0;
         tex_addr_for_turb <= 1'b0;
         cache_hit_r      <= 1'b0;
@@ -962,7 +974,7 @@ always @(posedge clk or negedge reset_n) begin
         // Uses sram_busy_eff (not sram_busy) to avoid back-to-back write hazard
         if (z_pending_valid && !sram_busy_eff
             && state != ST_Z_WRITE && state != ST_Z_WAIT
-            && state != ST_ZTEST_READ && state != ST_ZTEST_WAIT) begin
+            && state != ST_ZTEST_CMP && state != ST_ZTEST_READ && state != ST_ZTEST_WAIT) begin
             sram_wr         <= 1'b1;
             sram_addr       <= z_pending_addr;
             sram_wdata      <= z_pending_data;
@@ -1001,7 +1013,12 @@ always @(posedge clk or negedge reset_n) begin
             end
         end
 
-        // Free-running registered address (multiply + s_int_eff + cur_tex_addr, latched in ST_TEX_ADDR)
+        // Free-running pipeline registers: s/t_int_eff → s/t_int_eff_r (1 cycle delay)
+        s_int_eff_r <= s_int_eff;
+        t_int_eff_r <= t_int_eff;
+
+        // Free-running registered address (multiply + s_int_eff_r + cur_tex_addr)
+        // Uses pipelined s/t_int_eff_r: correct 2 cycles after cur_s/cur_t change.
         // Alias mode: use absolute ptex pointer instead of computed s/t address
         tex_byte_addr_r <= cur_alias_en ? cur_alias_ptex : tex_byte_addr_comb;
 
@@ -1082,9 +1099,9 @@ always @(posedge clk or negedge reset_n) begin
                                 state <= ST_PERSP_INIT;
                             end else if (reg_wdata[20] && reg_wdata[19] && !reg_wdata[21]) begin
                                 z_cache_valid <= 1'b0;
-                                state <= ST_ZTEST_READ;
+                                state <= ST_ZTEST_CMP;
                             end else begin
-                                state <= ST_TEX_ADDR;
+                                state <= ST_TEX_PIPE;
                             end
                         end else if (fifo_count < 2'd2) begin
                             fifo_is_z[fifo_wr_ptr]      <= 1'b0;
@@ -1231,99 +1248,14 @@ always @(posedge clk or negedge reset_n) begin
             ST_IDLE: begin
                 // If a command is queued in the FIFO, launch it.
                 if (fifo_count > 2'd0) begin
-                    if (fifo_is_z[fifo_rd_ptr]) begin
-                        cur_zaddr    <= fifo_zaddr[fifo_rd_ptr];
-                        cur_izi      <= fifo_izi[fifo_rd_ptr];
-                        cur_zistep   <= fifo_zistep[fifo_rd_ptr];
-                        z_remaining  <= fifo_zcount[fifo_rd_ptr];
-                        z_issue_pair <= 1'b0;
-                        cmd_issued   <= 1'b0;
-                        seen_busy    <= 1'b0;
-                        state        <= ST_Z_WRITE;
-                    end else if (fifo_is_surf[fifo_rd_ptr]) begin
-                        surf_fb_base   <= fifo_fb[fifo_rd_ptr];
-                        surf_tex_base  <= fifo_tex_addr[fifo_rd_ptr];
-                        surf_ll        <= fifo_surf_light_tl[fifo_rd_ptr];
-                        surf_lr        <= fifo_surf_light_tr[fifo_rd_ptr];
-                        surf_light_bl_reg <= fifo_surf_light_bl[fifo_rd_ptr];
-                        surf_light_br_reg <= fifo_surf_light_br[fifo_rd_ptr];
-                        surf_blockshift <= fifo_surf_blockshift[fifo_rd_ptr];
-                        surf_tex_step  <= fifo_surf_tex_step[fifo_rd_ptr];
-                        surf_dest_step <= fifo_surf_dest_step[fifo_rd_ptr];
-                        surf_block_active <= 1'b1;
-                        cmd_issued     <= 1'b0;
-                        seen_busy      <= 1'b0;
-                        state          <= ST_SURF_INIT;
-                    end else begin
-                        cur_fb        <= fifo_fb[fifo_rd_ptr];
-                        cur_tex_addr  <= fifo_tex_addr[fifo_rd_ptr];
-                        cur_tex_width <= fifo_tex_wh[fifo_rd_ptr][15:0];
-                        cur_tex_height <= fifo_tex_wh[fifo_rd_ptr][31:16];
-                        cur_s         <= fifo_s[fifo_rd_ptr];
-                        cur_t         <= fifo_t[fifo_rd_ptr];
-                        cur_sstep     <= fifo_sstep[fifo_rd_ptr];
-                        cur_tstep     <= fifo_tstep[fifo_rd_ptr];
-                        cur_light     <= fifo_light[fifo_rd_ptr];
-                        cur_lightstep <= fifo_lightstep[fifo_rd_ptr];
-                        cur_cmap_en   <= fifo_cmap_en[fifo_rd_ptr];
-                        cur_turb_en   <= fifo_turb_en[fifo_rd_ptr];
-                        cur_persp_en  <= fifo_is_persp[fifo_rd_ptr];
-                        cur_combined_z <= fifo_combined_z[fifo_rd_ptr];
-                        cur_alias_en  <= fifo_alias_en[fifo_rd_ptr];
-                        cur_noz_en    <= fifo_noz_en[fifo_rd_ptr];
-                        cur_sprite_en <= fifo_sprite_en[fifo_rd_ptr];
-                        sprite_ztest_done <= 1'b0;
-                        remaining     <= fifo_count_f[fifo_rd_ptr];
-                        cmd_issued    <= 1'b0;
-                        seen_busy     <= 1'b0;
-                        tex_addr_for_turb <= 1'b0;
-                        if (fifo_combined_z[fifo_rd_ptr]) begin
-                            cur_z_addr_comb <= fifo_zaddr[fifo_rd_ptr];
-                            cur_izi_comb    <= fifo_izi[fifo_rd_ptr];
-                            cur_zistep      <= fifo_zistep[fifo_rd_ptr];
-                            z_pair_has_lo   <= 1'b0;
-                            z_pending_valid <= 1'b0;
-                        end
-                        if (fifo_alias_en[fifo_rd_ptr]) begin
-                            cur_alias_ptex       <= fifo_alias_ptex[fifo_rd_ptr];
-                            cur_alias_ststep     <= fifo_alias_ststep[fifo_rd_ptr];
-                            cur_alias_sfrac      <= fifo_s[fifo_rd_ptr][15:0];
-                            cur_alias_sfrac_step <= fifo_alias_sfrac_step[fifo_rd_ptr];
-                            cur_alias_tfrac      <= fifo_t[fifo_rd_ptr][15:0];
-                            cur_alias_tfrac_step <= fifo_alias_tfrac_step[fifo_rd_ptr];
-                            cur_alias_skinwidth  <= fifo_alias_skinwidth[fifo_rd_ptr];
-                            cur_cmap_en          <= 1'b1;
-                        end
-                        if (fifo_is_persp[fifo_rd_ptr]) begin
-                            persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
-                            persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
-                            persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
-                            persp_total_remaining <= fifo_count_f[fifo_rd_ptr];
-                            persp_more_chunks <= 1'b1;
-                            persp_is_initial <= 1'b1;
-                            persp_pre_advanced <= 1'b0;
-                            if (fifo_sprite_en[fifo_rd_ptr]) begin
-                                z_cache_valid <= 1'b0;
-                            end
-                            state <= ST_PERSP_INIT;
-                        end else if (fifo_alias_en[fifo_rd_ptr] && fifo_combined_z[fifo_rd_ptr] && !fifo_noz_en[fifo_rd_ptr]) begin
-                            z_cache_valid <= 1'b0;
-                            state <= ST_ZTEST_READ;
-                        end else begin
-                            state <= ST_TEX_ADDR;
-                        end
-                    end
-                    fifo_rd_ptr <= ~fifo_rd_ptr;
-                    did_dequeue = 1'b1;
+                    state <= ST_FIFO_DEQUEUE;
                 end
             end
 
-            ST_TEX_ADDR: begin
-                // Wait state: 1 cycle for tex_offset_r to settle with correct
-                // cur_s/cur_t values. Next cycle (ST_TEX_CACHE) will register the
-                // cache lookup result using the now-correct address.
-                // Issue prefetch read if pending and no outstanding AXI read.
-                // arvalid is held until arready (handled above state machine).
+            ST_TEX_PIPE: begin
+                // Pipeline wait: s/t_int_eff_r capture new s/t_int_eff this edge.
+                // tex_byte_addr_r will capture correct value at next edge (ST_TEX_ADDR).
+                // Issue prefetch read if pending (overlap with pipeline wait).
                 if (pf_pending && !pf_filling && !pf_rd_pending && !m_axi_arvalid) begin
                     m_axi_arvalid   <= 1'b1;
                     m_axi_araddr    <= {6'b0, pf_addr, 2'b00};
@@ -1331,6 +1263,12 @@ always @(posedge clk or negedge reset_n) begin
                     pf_rd_pending   <= 1'b1;
                     pf_pending      <= 1'b0;
                 end
+                state <= ST_TEX_ADDR;
+            end
+
+            ST_TEX_ADDR: begin
+                // tex_byte_addr_r now correct (from pipelined s/t_int_eff_r).
+                // M10K will capture this address at the next edge (ST_TEX_M10K).
                 state <= ST_TEX_M10K;
             end
 
@@ -1384,16 +1322,16 @@ always @(posedge clk or negedge reset_n) begin
                                 end
                             end else begin
                                 tex_addr_for_turb <= 1'b0;
-                                state <= ST_TEX_ADDR;
+                                state <= ST_TEX_PIPE;
                             end
                         end else begin
                             tex_addr_for_turb <= 1'b0;
-                            state <= ST_TEX_ADDR;
+                            state <= ST_TEX_PIPE;
                         end
                     end else if (sprite_ztest_en && !sprite_ztest_done) begin
                         // Sprite opaque pixel: need z-test before writing
                         sprite_ztest_done <= 1'b1;
-                        state <= ST_ZTEST_READ;
+                        state <= ST_ZTEST_CMP;
                     end else if (!comb_z_would_stall) begin
                         // Cache hit, no colormap: accumulate directly (1 cycle per pixel)
                         case (fb_byte_sel)
@@ -1471,7 +1409,7 @@ always @(posedge clk or negedge reset_n) begin
                             state      <= ST_FB_WRITE;
                         end else begin
                             tex_addr_for_turb <= 1'b0;
-                            state <= ST_TEX_ADDR;
+                            state <= ST_TEX_PIPE;
                         end
                     end
                     // else: comb_z_would_stall — stay in ST_PIXEL until pending drains
@@ -1491,7 +1429,7 @@ always @(posedge clk or negedge reset_n) begin
                 end else if (pf_just_finished) begin
                     // Prefetch just completed — re-check cache (may have filled our line)
                     tex_addr_for_turb <= cur_turb_en;
-                    state <= ST_TEX_ADDR;
+                    state <= ST_TEX_PIPE;
                 end else if (m_axi_arvalid && m_axi_arready) begin
                     // Arbiter accepted our cache miss read — wait for data
                     fill_count      <= 2'd0;
@@ -1519,7 +1457,7 @@ always @(posedge clk or negedge reset_n) begin
                         pf_pending <= 1'b1;
                         // Re-enter address pipeline → guaranteed cache hit
                         tex_addr_for_turb <= cur_turb_en;
-                        state <= ST_TEX_ADDR;
+                        state <= ST_TEX_PIPE;
                     end else begin
                         fill_count <= fill_count + 2'd1;
                     end
@@ -1603,7 +1541,7 @@ always @(posedge clk or negedge reset_n) begin
                     state      <= ST_FB_WRITE;
                 end else begin
                     tex_addr_for_turb <= 1'b0;
-                    state <= alias_ztest_en ? ST_ZTEST_READ : ST_TEX_ADDR;
+                    state <= alias_ztest_en ? ST_ZTEST_CMP : ST_TEX_PIPE;
                 end
                 end // !comb_z_would_stall (else: stay in ST_CMAP_WAIT)
             end
@@ -1616,7 +1554,7 @@ always @(posedge clk or negedge reset_n) begin
                 turb_s_r <= (cur_s + turb_lut_rd_a) >> 16;
                 turb_t_r <= (cur_t + turb_lut_rd_b) >> 16;
                 tex_addr_for_turb <= 1'b1;
-                state <= ST_TEX_ADDR;
+                state <= ST_TEX_PIPE;
             end
 
             ST_TURB_FETCH: begin
@@ -1678,7 +1616,7 @@ always @(posedge clk or negedge reset_n) begin
                             state      <= ST_FB_WRITE;
                         end else begin
                             tex_addr_for_turb <= 1'b0;
-                            state <= ST_TEX_ADDR;
+                            state <= ST_TEX_PIPE;
                         end
                     end
                     // else: comb_z_would_stall — stay in ST_TURB_FETCH
@@ -1697,7 +1635,7 @@ always @(posedge clk or negedge reset_n) begin
                         // Write-behind: continue pixel processing while SDRAM handles write
                         acc_strb          <= 4'b0000;
                         tex_addr_for_turb <= 1'b0;
-                        state             <= alias_ztest_en ? ST_ZTEST_READ : ST_TEX_ADDR;
+                        state             <= alias_ztest_en ? ST_ZTEST_CMP : ST_TEX_PIPE;
                     end else if (cur_persp_en && persp_more_chunks) begin
                         // Perspective chunk done, more chunks remain
                         acc_strb  <= 4'b0000;
@@ -1738,94 +1676,14 @@ always @(posedge clk or negedge reset_n) begin
                             surf_block_active <= 1'b0;
                             cur_combined_z    <= 1'b0;
                             if (fifo_count > 2'd0 || did_enqueue) begin
-                                if (fifo_is_z[fifo_rd_ptr]) begin
-                                    cur_zaddr    <= fifo_zaddr[fifo_rd_ptr];
-                                    cur_izi      <= fifo_izi[fifo_rd_ptr];
-                                    cur_zistep   <= fifo_zistep[fifo_rd_ptr];
-                                    z_remaining  <= fifo_zcount[fifo_rd_ptr];
-                                    z_issue_pair <= 1'b0;
-                                    seen_busy    <= 1'b0;
-                                    state        <= ST_Z_WRITE;
-                                end else if (fifo_is_surf[fifo_rd_ptr]) begin
-                                    surf_fb_base   <= fifo_fb[fifo_rd_ptr];
-                                    surf_tex_base  <= fifo_tex_addr[fifo_rd_ptr];
-                                    surf_ll        <= fifo_surf_light_tl[fifo_rd_ptr];
-                                    surf_lr        <= fifo_surf_light_tr[fifo_rd_ptr];
-                                    surf_light_bl_reg <= fifo_surf_light_bl[fifo_rd_ptr];
-                                    surf_light_br_reg <= fifo_surf_light_br[fifo_rd_ptr];
-                                    surf_blockshift <= fifo_surf_blockshift[fifo_rd_ptr];
-                                    surf_tex_step  <= fifo_surf_tex_step[fifo_rd_ptr];
-                                    surf_dest_step <= fifo_surf_dest_step[fifo_rd_ptr];
-                                    surf_block_active <= 1'b1;
-                                    seen_busy      <= 1'b0;
-                                    state          <= ST_SURF_INIT;
-                                end else begin
-                                    cur_fb        <= fifo_fb[fifo_rd_ptr];
-                                    cur_tex_addr  <= fifo_tex_addr[fifo_rd_ptr];
-                                    cur_tex_width <= fifo_tex_wh[fifo_rd_ptr][15:0];
-                                    cur_tex_height <= fifo_tex_wh[fifo_rd_ptr][31:16];
-                                    cur_s         <= fifo_s[fifo_rd_ptr];
-                                    cur_t         <= fifo_t[fifo_rd_ptr];
-                                    cur_sstep     <= fifo_sstep[fifo_rd_ptr];
-                                    cur_tstep     <= fifo_tstep[fifo_rd_ptr];
-                                    cur_light     <= fifo_light[fifo_rd_ptr];
-                                    cur_lightstep <= fifo_lightstep[fifo_rd_ptr];
-                                    cur_cmap_en   <= fifo_cmap_en[fifo_rd_ptr];
-                                    cur_turb_en   <= fifo_turb_en[fifo_rd_ptr];
-                                    cur_persp_en  <= fifo_is_persp[fifo_rd_ptr];
-                                    cur_combined_z <= fifo_combined_z[fifo_rd_ptr];
-                                    cur_alias_en  <= fifo_alias_en[fifo_rd_ptr];
-                                    cur_noz_en    <= fifo_noz_en[fifo_rd_ptr];
-                                    cur_sprite_en <= fifo_sprite_en[fifo_rd_ptr];
-                                    sprite_ztest_done <= 1'b0;
-                                    remaining     <= fifo_count_f[fifo_rd_ptr];
-                                    seen_busy     <= 1'b0;
-                                    tex_addr_for_turb <= 1'b0;
-                                    if (fifo_combined_z[fifo_rd_ptr]) begin
-                                        cur_z_addr_comb <= fifo_zaddr[fifo_rd_ptr];
-                                        cur_izi_comb    <= fifo_izi[fifo_rd_ptr];
-                                        cur_zistep      <= fifo_zistep[fifo_rd_ptr];
-                                        z_pair_has_lo   <= 1'b0;
-                                        z_pending_valid <= 1'b0;
-                                    end
-                                    if (fifo_alias_en[fifo_rd_ptr]) begin
-                                        cur_alias_ptex       <= fifo_alias_ptex[fifo_rd_ptr];
-                                        cur_alias_ststep     <= fifo_alias_ststep[fifo_rd_ptr];
-                                        cur_alias_sfrac      <= fifo_s[fifo_rd_ptr][15:0];
-                                        cur_alias_sfrac_step <= fifo_alias_sfrac_step[fifo_rd_ptr];
-                                        cur_alias_tfrac      <= fifo_t[fifo_rd_ptr][15:0];
-                                        cur_alias_tfrac_step <= fifo_alias_tfrac_step[fifo_rd_ptr];
-                                        cur_alias_skinwidth  <= fifo_alias_skinwidth[fifo_rd_ptr];
-                                        cur_cmap_en          <= 1'b1;
-                                    end
-                                    if (fifo_is_persp[fifo_rd_ptr]) begin
-                                        persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
-                                        persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
-                                        persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
-                                        persp_total_remaining <= fifo_count_f[fifo_rd_ptr];
-                                        persp_more_chunks <= 1'b1;
-                                        persp_is_initial <= 1'b1;
-                                        persp_pre_advanced <= 1'b0;
-                                        if (fifo_sprite_en[fifo_rd_ptr]) begin
-                                            z_cache_valid <= 1'b0;
-                                        end
-                                        state <= ST_PERSP_INIT;
-                                    end else if (fifo_alias_en[fifo_rd_ptr] && fifo_combined_z[fifo_rd_ptr] && !fifo_noz_en[fifo_rd_ptr]) begin
-                                        z_cache_valid <= 1'b0;
-                                        state <= ST_ZTEST_READ;
-                                    end else begin
-                                        state <= ST_TEX_ADDR;
-                                    end
-                                end
-                                fifo_rd_ptr <= ~fifo_rd_ptr;
-                                did_dequeue = 1'b1;
+                                state <= ST_FIFO_DEQUEUE;
                             end else begin
                                 state <= ST_IDLE;
                             end
                         end
                     end else begin
                         tex_addr_for_turb <= 1'b0;
-                        state <= alias_ztest_en ? ST_ZTEST_READ : ST_TEX_ADDR;
+                        state <= alias_ztest_en ? ST_ZTEST_CMP : ST_TEX_PIPE;
                     end
                 end
             end
@@ -1864,87 +1722,7 @@ always @(posedge clk or negedge reset_n) begin
 
                         if (z_remaining <= 16'd2) begin
                             if (fifo_count > 2'd0 || did_enqueue) begin
-                                if (fifo_is_z[fifo_rd_ptr]) begin
-                                    cur_zaddr    <= fifo_zaddr[fifo_rd_ptr];
-                                    cur_izi      <= fifo_izi[fifo_rd_ptr];
-                                    cur_zistep   <= fifo_zistep[fifo_rd_ptr];
-                                    z_remaining  <= fifo_zcount[fifo_rd_ptr];
-                                    z_issue_pair <= 1'b0;
-                                    seen_busy    <= 1'b0;
-                                    state        <= ST_Z_WRITE;
-                                end else if (fifo_is_surf[fifo_rd_ptr]) begin
-                                    surf_fb_base   <= fifo_fb[fifo_rd_ptr];
-                                    surf_tex_base  <= fifo_tex_addr[fifo_rd_ptr];
-                                    surf_ll        <= fifo_surf_light_tl[fifo_rd_ptr];
-                                    surf_lr        <= fifo_surf_light_tr[fifo_rd_ptr];
-                                    surf_light_bl_reg <= fifo_surf_light_bl[fifo_rd_ptr];
-                                    surf_light_br_reg <= fifo_surf_light_br[fifo_rd_ptr];
-                                    surf_blockshift <= fifo_surf_blockshift[fifo_rd_ptr];
-                                    surf_tex_step  <= fifo_surf_tex_step[fifo_rd_ptr];
-                                    surf_dest_step <= fifo_surf_dest_step[fifo_rd_ptr];
-                                    surf_block_active <= 1'b1;
-                                    seen_busy      <= 1'b0;
-                                    state          <= ST_SURF_INIT;
-                                end else begin
-                                    cur_fb        <= fifo_fb[fifo_rd_ptr];
-                                    cur_tex_addr  <= fifo_tex_addr[fifo_rd_ptr];
-                                    cur_tex_width <= fifo_tex_wh[fifo_rd_ptr][15:0];
-                                    cur_tex_height <= fifo_tex_wh[fifo_rd_ptr][31:16];
-                                    cur_s         <= fifo_s[fifo_rd_ptr];
-                                    cur_t         <= fifo_t[fifo_rd_ptr];
-                                    cur_sstep     <= fifo_sstep[fifo_rd_ptr];
-                                    cur_tstep     <= fifo_tstep[fifo_rd_ptr];
-                                    cur_light     <= fifo_light[fifo_rd_ptr];
-                                    cur_lightstep <= fifo_lightstep[fifo_rd_ptr];
-                                    cur_cmap_en   <= fifo_cmap_en[fifo_rd_ptr];
-                                    cur_turb_en   <= fifo_turb_en[fifo_rd_ptr];
-                                    cur_persp_en  <= fifo_is_persp[fifo_rd_ptr];
-                                    cur_combined_z <= fifo_combined_z[fifo_rd_ptr];
-                                    cur_alias_en  <= fifo_alias_en[fifo_rd_ptr];
-                                    cur_noz_en    <= fifo_noz_en[fifo_rd_ptr];
-                                    cur_sprite_en <= fifo_sprite_en[fifo_rd_ptr];
-                                    sprite_ztest_done <= 1'b0;
-                                    remaining     <= fifo_count_f[fifo_rd_ptr];
-                                    seen_busy     <= 1'b0;
-                                    tex_addr_for_turb <= 1'b0;
-                                    if (fifo_combined_z[fifo_rd_ptr]) begin
-                                        cur_z_addr_comb <= fifo_zaddr[fifo_rd_ptr];
-                                        cur_izi_comb    <= fifo_izi[fifo_rd_ptr];
-                                        cur_zistep      <= fifo_zistep[fifo_rd_ptr];
-                                        z_pair_has_lo   <= 1'b0;
-                                        z_pending_valid <= 1'b0;
-                                    end
-                                    if (fifo_alias_en[fifo_rd_ptr]) begin
-                                        cur_alias_ptex       <= fifo_alias_ptex[fifo_rd_ptr];
-                                        cur_alias_ststep     <= fifo_alias_ststep[fifo_rd_ptr];
-                                        cur_alias_sfrac      <= fifo_s[fifo_rd_ptr][15:0];
-                                        cur_alias_sfrac_step <= fifo_alias_sfrac_step[fifo_rd_ptr];
-                                        cur_alias_tfrac      <= fifo_t[fifo_rd_ptr][15:0];
-                                        cur_alias_tfrac_step <= fifo_alias_tfrac_step[fifo_rd_ptr];
-                                        cur_alias_skinwidth  <= fifo_alias_skinwidth[fifo_rd_ptr];
-                                        cur_cmap_en          <= 1'b1;
-                                    end
-                                    if (fifo_is_persp[fifo_rd_ptr]) begin
-                                        persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
-                                        persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
-                                        persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
-                                        persp_total_remaining <= fifo_count_f[fifo_rd_ptr];
-                                        persp_more_chunks <= 1'b1;
-                                        persp_is_initial <= 1'b1;
-                                        persp_pre_advanced <= 1'b0;
-                                        if (fifo_sprite_en[fifo_rd_ptr]) begin
-                                            z_cache_valid <= 1'b0;
-                                        end
-                                        state <= ST_PERSP_INIT;
-                                    end else if (fifo_alias_en[fifo_rd_ptr] && fifo_combined_z[fifo_rd_ptr] && !fifo_noz_en[fifo_rd_ptr]) begin
-                                        z_cache_valid <= 1'b0;
-                                        state <= ST_ZTEST_READ;
-                                    end else begin
-                                        state <= ST_TEX_ADDR;
-                                    end
-                                end
-                                fifo_rd_ptr <= ~fifo_rd_ptr;
-                                did_dequeue = 1'b1;
+                                state <= ST_FIFO_DEQUEUE;
                             end else begin
                                 state <= ST_IDLE;
                             end
@@ -1958,87 +1736,7 @@ always @(posedge clk or negedge reset_n) begin
 
                         if (z_remaining <= 16'd1) begin
                             if (fifo_count > 2'd0 || did_enqueue) begin
-                                if (fifo_is_z[fifo_rd_ptr]) begin
-                                    cur_zaddr    <= fifo_zaddr[fifo_rd_ptr];
-                                    cur_izi      <= fifo_izi[fifo_rd_ptr];
-                                    cur_zistep   <= fifo_zistep[fifo_rd_ptr];
-                                    z_remaining  <= fifo_zcount[fifo_rd_ptr];
-                                    z_issue_pair <= 1'b0;
-                                    seen_busy    <= 1'b0;
-                                    state        <= ST_Z_WRITE;
-                                end else if (fifo_is_surf[fifo_rd_ptr]) begin
-                                    surf_fb_base   <= fifo_fb[fifo_rd_ptr];
-                                    surf_tex_base  <= fifo_tex_addr[fifo_rd_ptr];
-                                    surf_ll        <= fifo_surf_light_tl[fifo_rd_ptr];
-                                    surf_lr        <= fifo_surf_light_tr[fifo_rd_ptr];
-                                    surf_light_bl_reg <= fifo_surf_light_bl[fifo_rd_ptr];
-                                    surf_light_br_reg <= fifo_surf_light_br[fifo_rd_ptr];
-                                    surf_blockshift <= fifo_surf_blockshift[fifo_rd_ptr];
-                                    surf_tex_step  <= fifo_surf_tex_step[fifo_rd_ptr];
-                                    surf_dest_step <= fifo_surf_dest_step[fifo_rd_ptr];
-                                    surf_block_active <= 1'b1;
-                                    seen_busy      <= 1'b0;
-                                    state          <= ST_SURF_INIT;
-                                end else begin
-                                    cur_fb        <= fifo_fb[fifo_rd_ptr];
-                                    cur_tex_addr  <= fifo_tex_addr[fifo_rd_ptr];
-                                    cur_tex_width <= fifo_tex_wh[fifo_rd_ptr][15:0];
-                                    cur_tex_height <= fifo_tex_wh[fifo_rd_ptr][31:16];
-                                    cur_s         <= fifo_s[fifo_rd_ptr];
-                                    cur_t         <= fifo_t[fifo_rd_ptr];
-                                    cur_sstep     <= fifo_sstep[fifo_rd_ptr];
-                                    cur_tstep     <= fifo_tstep[fifo_rd_ptr];
-                                    cur_light     <= fifo_light[fifo_rd_ptr];
-                                    cur_lightstep <= fifo_lightstep[fifo_rd_ptr];
-                                    cur_cmap_en   <= fifo_cmap_en[fifo_rd_ptr];
-                                    cur_turb_en   <= fifo_turb_en[fifo_rd_ptr];
-                                    cur_persp_en  <= fifo_is_persp[fifo_rd_ptr];
-                                    cur_combined_z <= fifo_combined_z[fifo_rd_ptr];
-                                    cur_alias_en  <= fifo_alias_en[fifo_rd_ptr];
-                                    cur_noz_en    <= fifo_noz_en[fifo_rd_ptr];
-                                    cur_sprite_en <= fifo_sprite_en[fifo_rd_ptr];
-                                    sprite_ztest_done <= 1'b0;
-                                    remaining     <= fifo_count_f[fifo_rd_ptr];
-                                    seen_busy     <= 1'b0;
-                                    tex_addr_for_turb <= 1'b0;
-                                    if (fifo_combined_z[fifo_rd_ptr]) begin
-                                        cur_z_addr_comb <= fifo_zaddr[fifo_rd_ptr];
-                                        cur_izi_comb    <= fifo_izi[fifo_rd_ptr];
-                                        cur_zistep      <= fifo_zistep[fifo_rd_ptr];
-                                        z_pair_has_lo   <= 1'b0;
-                                        z_pending_valid <= 1'b0;
-                                    end
-                                    if (fifo_alias_en[fifo_rd_ptr]) begin
-                                        cur_alias_ptex       <= fifo_alias_ptex[fifo_rd_ptr];
-                                        cur_alias_ststep     <= fifo_alias_ststep[fifo_rd_ptr];
-                                        cur_alias_sfrac      <= fifo_s[fifo_rd_ptr][15:0];
-                                        cur_alias_sfrac_step <= fifo_alias_sfrac_step[fifo_rd_ptr];
-                                        cur_alias_tfrac      <= fifo_t[fifo_rd_ptr][15:0];
-                                        cur_alias_tfrac_step <= fifo_alias_tfrac_step[fifo_rd_ptr];
-                                        cur_alias_skinwidth  <= fifo_alias_skinwidth[fifo_rd_ptr];
-                                        cur_cmap_en          <= 1'b1;
-                                    end
-                                    if (fifo_is_persp[fifo_rd_ptr]) begin
-                                        persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
-                                        persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
-                                        persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
-                                        persp_total_remaining <= fifo_count_f[fifo_rd_ptr];
-                                        persp_more_chunks <= 1'b1;
-                                        persp_is_initial <= 1'b1;
-                                        persp_pre_advanced <= 1'b0;
-                                        if (fifo_sprite_en[fifo_rd_ptr]) begin
-                                            z_cache_valid <= 1'b0;
-                                        end
-                                        state <= ST_PERSP_INIT;
-                                    end else if (fifo_alias_en[fifo_rd_ptr] && fifo_combined_z[fifo_rd_ptr] && !fifo_noz_en[fifo_rd_ptr]) begin
-                                        z_cache_valid <= 1'b0;
-                                        state <= ST_ZTEST_READ;
-                                    end else begin
-                                        state <= ST_TEX_ADDR;
-                                    end
-                                end
-                                fifo_rd_ptr <= ~fifo_rd_ptr;
-                                did_dequeue = 1'b1;
+                                state <= ST_FIFO_DEQUEUE;
                             end else begin
                                 state <= ST_IDLE;
                             end
@@ -2102,7 +1800,7 @@ always @(posedge clk or negedge reset_n) begin
                 cmd_issued        <= 1'b0;
                 seen_busy         <= 1'b0;
                 tex_addr_for_turb <= 1'b0;
-                state             <= ST_TEX_ADDR;
+                state             <= ST_TEX_PIPE;
             end
 
             // ============================================
@@ -2347,7 +2045,7 @@ always @(posedge clk or negedge reset_n) begin
                     cmd_issued <= 1'b0;
                     seen_busy  <= 1'b0;
                     tex_addr_for_turb <= 1'b0;
-                    state <= ST_TEX_ADDR;
+                    state <= ST_TEX_PIPE;
                 end else if (persp_chunk_count <= 5'd1) begin
                     // Single pixel: no stepping needed
                     cur_sstep <= 32'd0;
@@ -2358,7 +2056,7 @@ always @(posedge clk or negedge reset_n) begin
                     cmd_issued <= 1'b0;
                     seen_busy  <= 1'b0;
                     tex_addr_for_turb <= 1'b0;
-                    state <= ST_TEX_ADDR;
+                    state <= ST_TEX_PIPE;
                 end else begin
                     // Full 16-pixel chunk: sstep = (snext - s) >> 4
                     cur_sstep <= (persp_s_saved - $signed(cur_s)) >>> 4;
@@ -2381,7 +2079,7 @@ always @(posedge clk or negedge reset_n) begin
                     cmd_issued <= 1'b0;
                     seen_busy  <= 1'b0;
                     tex_addr_for_turb <= 1'b0;
-                    state <= ST_TEX_ADDR;
+                    state <= ST_TEX_PIPE;
                 end
             end
 
@@ -2424,13 +2122,20 @@ always @(posedge clk or negedge reset_n) begin
                 cmd_issued <= 1'b0;
                 seen_busy  <= 1'b0;
                 tex_addr_for_turb <= 1'b0;
-                state <= ST_TEX_ADDR;
+                state <= ST_TEX_PIPE;
+            end
+
+            ST_ZTEST_CMP: begin
+                // Pipeline stage 1: register z-cache compare results (timing break)
+                z_test_pass_r <= z_test_pass;
+                z_cache_hit_r <= z_cache_hit;
+                state         <= ST_ZTEST_READ;
             end
 
             ST_ZTEST_READ: begin
-                if (z_cache_hit) begin
-                    // Cache hit: immediate z-test
-                    if (z_test_pass) begin
+                if (z_cache_hit_r) begin
+                    // Cache hit: act on registered z-test result
+                    if (z_test_pass_r) begin
                         // PASS: update cache with new z-value
                         if (comb_z_half) z_cache_data[31:16] <= comb_z_val;
                         else             z_cache_data[15:0]  <= comb_z_val;
@@ -2440,7 +2145,7 @@ always @(posedge clk or negedge reset_n) begin
                         end else begin
                             // Alias: proceed to texture fetch
                             tex_addr_for_turb <= 1'b0;
-                            state <= ST_TEX_ADDR;
+                            state <= ST_TEX_PIPE;
                         end
                     end else begin
                         // FAIL: skip pixel entirely
@@ -2474,10 +2179,10 @@ always @(posedge clk or negedge reset_n) begin
                                     state <= ST_Z_FLUSH;
                                 end
                             end else begin
-                                state <= sprite_ztest_en ? ST_TEX_ADDR : ST_ZTEST_READ;
+                                state <= sprite_ztest_en ? ST_TEX_PIPE : ST_ZTEST_CMP;
                             end
                         end else begin
-                            state <= sprite_ztest_en ? ST_TEX_ADDR : ST_ZTEST_READ;
+                            state <= sprite_ztest_en ? ST_TEX_PIPE : ST_ZTEST_CMP;
                         end
                     end
                 end else if (!sram_busy_eff) begin
@@ -2486,16 +2191,16 @@ always @(posedge clk or negedge reset_n) begin
                     sram_addr <= comb_z_waddr;
                     state     <= ST_ZTEST_WAIT;
                 end
-                // else: SRAM busy, stay in ST_ZTEST_READ (retry next cycle)
+                // else: cache miss + SRAM busy, stay in ST_ZTEST_READ
             end
 
             ST_ZTEST_WAIT: begin
                 if (sram_rdata_valid) begin
-                    // Cache the z-word and re-enter ST_ZTEST_READ (guaranteed hit)
+                    // Cache the z-word and re-enter via CMP (need fresh compare)
                     z_cache_data  <= sram_rdata;
                     z_cache_addr  <= sram_addr;
                     z_cache_valid <= 1'b1;
-                    state         <= ST_ZTEST_READ;
+                    state         <= ST_ZTEST_CMP;
                 end
                 // else: wait for SRAM read to complete
             end
@@ -2507,6 +2212,101 @@ always @(posedge clk or negedge reset_n) begin
                     cur_combined_z <= 1'b0;
                     state <= ST_IDLE;
                 end
+            end
+
+            // ============================================
+            // Consolidated FIFO dequeue (single readout point)
+            // Replaces 4 duplicate ~80-line dequeue blocks with one,
+            // reducing combinational fan-out on all 36 FIFO arrays.
+            // ============================================
+            ST_FIFO_DEQUEUE: begin
+                if (fifo_is_z[fifo_rd_ptr]) begin
+                    // Z-span command
+                    cur_zaddr    <= fifo_zaddr[fifo_rd_ptr];
+                    cur_izi      <= fifo_izi[fifo_rd_ptr];
+                    cur_zistep   <= fifo_zistep[fifo_rd_ptr];
+                    z_remaining  <= fifo_zcount[fifo_rd_ptr];
+                    z_issue_pair <= 1'b0;
+                    cmd_issued   <= 1'b0;
+                    seen_busy    <= 1'b0;
+                    state        <= ST_Z_WRITE;
+                end else if (fifo_is_surf[fifo_rd_ptr]) begin
+                    // Surface block command
+                    surf_fb_base   <= fifo_fb[fifo_rd_ptr];
+                    surf_tex_base  <= fifo_tex_addr[fifo_rd_ptr];
+                    surf_ll        <= fifo_surf_light_tl[fifo_rd_ptr];
+                    surf_lr        <= fifo_surf_light_tr[fifo_rd_ptr];
+                    surf_light_bl_reg <= fifo_surf_light_bl[fifo_rd_ptr];
+                    surf_light_br_reg <= fifo_surf_light_br[fifo_rd_ptr];
+                    surf_blockshift <= fifo_surf_blockshift[fifo_rd_ptr];
+                    surf_tex_step  <= fifo_surf_tex_step[fifo_rd_ptr];
+                    surf_dest_step <= fifo_surf_dest_step[fifo_rd_ptr];
+                    surf_block_active <= 1'b1;
+                    cmd_issued     <= 1'b0;
+                    seen_busy      <= 1'b0;
+                    state          <= ST_SURF_INIT;
+                end else begin
+                    // Textured / perspective / alias span command
+                    cur_fb        <= fifo_fb[fifo_rd_ptr];
+                    cur_tex_addr  <= fifo_tex_addr[fifo_rd_ptr];
+                    cur_tex_width <= fifo_tex_wh[fifo_rd_ptr][15:0];
+                    cur_tex_height <= fifo_tex_wh[fifo_rd_ptr][31:16];
+                    cur_s         <= fifo_s[fifo_rd_ptr];
+                    cur_t         <= fifo_t[fifo_rd_ptr];
+                    cur_sstep     <= fifo_sstep[fifo_rd_ptr];
+                    cur_tstep     <= fifo_tstep[fifo_rd_ptr];
+                    cur_light     <= fifo_light[fifo_rd_ptr];
+                    cur_lightstep <= fifo_lightstep[fifo_rd_ptr];
+                    cur_cmap_en   <= fifo_cmap_en[fifo_rd_ptr];
+                    cur_turb_en   <= fifo_turb_en[fifo_rd_ptr];
+                    cur_persp_en  <= fifo_is_persp[fifo_rd_ptr];
+                    cur_combined_z <= fifo_combined_z[fifo_rd_ptr];
+                    cur_alias_en  <= fifo_alias_en[fifo_rd_ptr];
+                    cur_noz_en    <= fifo_noz_en[fifo_rd_ptr];
+                    cur_sprite_en <= fifo_sprite_en[fifo_rd_ptr];
+                    sprite_ztest_done <= 1'b0;
+                    remaining     <= fifo_count_f[fifo_rd_ptr];
+                    cmd_issued    <= 1'b0;
+                    seen_busy     <= 1'b0;
+                    tex_addr_for_turb <= 1'b0;
+                    if (fifo_combined_z[fifo_rd_ptr]) begin
+                        cur_z_addr_comb <= fifo_zaddr[fifo_rd_ptr];
+                        cur_izi_comb    <= fifo_izi[fifo_rd_ptr];
+                        cur_zistep      <= fifo_zistep[fifo_rd_ptr];
+                        z_pair_has_lo   <= 1'b0;
+                        z_pending_valid <= 1'b0;
+                    end
+                    if (fifo_alias_en[fifo_rd_ptr]) begin
+                        cur_alias_ptex       <= fifo_alias_ptex[fifo_rd_ptr];
+                        cur_alias_ststep     <= fifo_alias_ststep[fifo_rd_ptr];
+                        cur_alias_sfrac      <= fifo_s[fifo_rd_ptr][15:0];
+                        cur_alias_sfrac_step <= fifo_alias_sfrac_step[fifo_rd_ptr];
+                        cur_alias_tfrac      <= fifo_t[fifo_rd_ptr][15:0];
+                        cur_alias_tfrac_step <= fifo_alias_tfrac_step[fifo_rd_ptr];
+                        cur_alias_skinwidth  <= fifo_alias_skinwidth[fifo_rd_ptr];
+                        cur_cmap_en          <= 1'b1;
+                    end
+                    if (fifo_is_persp[fifo_rd_ptr]) begin
+                        persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
+                        persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
+                        persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
+                        persp_total_remaining <= fifo_count_f[fifo_rd_ptr];
+                        persp_more_chunks <= 1'b1;
+                        persp_is_initial <= 1'b1;
+                        persp_pre_advanced <= 1'b0;
+                        if (fifo_sprite_en[fifo_rd_ptr]) begin
+                            z_cache_valid <= 1'b0;
+                        end
+                        state <= ST_PERSP_INIT;
+                    end else if (fifo_alias_en[fifo_rd_ptr] && fifo_combined_z[fifo_rd_ptr] && !fifo_noz_en[fifo_rd_ptr]) begin
+                        z_cache_valid <= 1'b0;
+                        state <= ST_ZTEST_CMP;
+                    end else begin
+                        state <= ST_TEX_PIPE;
+                    end
+                end
+                fifo_rd_ptr <= ~fifo_rd_ptr;
+                did_dequeue = 1'b1;
             end
 
             default: begin

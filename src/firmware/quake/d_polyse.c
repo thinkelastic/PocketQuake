@@ -269,26 +269,9 @@ void D_DrawNonSubdiv (void)
 			continue;
 		}
 
-		r_p0[0] = index0->v[0];		// u
-		r_p0[1] = index0->v[1];		// v
-		r_p0[2] = index0->v[2];		// s
-		r_p0[3] = index0->v[3];		// t
-		r_p0[4] = index0->v[4];		// light
-		r_p0[5] = index0->v[5];		// iz
-
-		r_p1[0] = index1->v[0];
-		r_p1[1] = index1->v[1];
-		r_p1[2] = index1->v[2];
-		r_p1[3] = index1->v[3];
-		r_p1[4] = index1->v[4];
-		r_p1[5] = index1->v[5];
-
-		r_p2[0] = index2->v[0];
-		r_p2[1] = index2->v[1];
-		r_p2[2] = index2->v[2];
-		r_p2[3] = index2->v[3];
-		r_p2[4] = index2->v[4];
-		r_p2[5] = index2->v[5];
+		__builtin_memcpy(r_p0, index0->v, 6 * sizeof(int));
+		__builtin_memcpy(r_p1, index1->v, 6 * sizeof(int));
+		__builtin_memcpy(r_p2, index2->v, 6 * sizeof(int));
 
 		if (!ptri->facesfront)
 		{
@@ -667,7 +650,8 @@ PQ_FASTTEXT void D_PolysetDrawSpans8 (spanpackage_t *pspanpackage)
 		if (lcount > 0)
 		{
 #if HW_ALIAS_ACCEL
-			while (!(SPAN_STATUS & SPAN_STATUS_CAN_ACCEPT)) ;
+			while (!(SPAN_STATUS & SPAN_STATUS_CAN_ACCEPT))
+				;
 			span_draw_alias_z(
 				(unsigned int)pspanpackage->pdest,
 				(unsigned int)pspanpackage->ptex,
@@ -749,7 +733,8 @@ PQ_FASTTEXT void D_PolysetDrawSpans8_NoZ (spanpackage_t *pspanpackage)
 		if (lcount > 0)
 		{
 #if HW_ALIAS_ACCEL
-			while (!(SPAN_STATUS & SPAN_STATUS_CAN_ACCEPT)) ;
+			while (!(SPAN_STATUS & SPAN_STATUS_CAN_ACCEPT))
+				;
 			span_draw_alias_noz(
 				(unsigned int)pspanpackage->pdest,
 				(unsigned int)pspanpackage->ptex,

@@ -130,7 +130,7 @@ module VexiiRiscv (
   reg        [31:0]   FpuUnpackerPlugin_logic_unpacker_arbiter_io_inputs_0_payload_data;
   wire                FpuUnpackerPlugin_logic_unpacker_arbiter_io_inputs_1_valid;
   wire       [31:0]   FpuUnpackerPlugin_logic_unpacker_arbiter_io_inputs_1_payload_data;
-  wire                early0_DivPlugin_logic_processing_div_io_cmd_valid;
+  reg                 early0_DivPlugin_logic_processing_div_io_cmd_valid;
   reg                 early0_DivPlugin_logic_processing_div_io_cmd_payload_normalized;
   reg        [4:0]    early0_DivPlugin_logic_processing_div_io_cmd_payload_iterations;
   reg                 LsuPlugin_logic_flusher_arbiter_io_output_ready;
@@ -1461,7 +1461,6 @@ module VexiiRiscv (
   wire                execute_ctrl2_down_LsuL1_PREFETCH_lane0;
   wire                execute_ctrl2_down_LsuL1_INVALID_lane0;
   wire                execute_ctrl2_down_LsuL1_CLEAN_lane0;
-  wire       [3:0]    execute_ctrl2_down_LsuL1_MASK_lane0;
   wire                execute_ctrl2_down_LsuPlugin_logic_FROM_WB_lane0;
   wire                execute_ctrl2_down_FpuFlagsWritebackPlugin_logic_FLAGS_lane0_NX;
   wire                execute_ctrl2_down_FpuFlagsWritebackPlugin_logic_FLAGS_lane0_UF;
@@ -1588,8 +1587,6 @@ module VexiiRiscv (
   reg        [46:0]   execute_ctrl3_up_early0_MulPlugin_logic_mul_VALUES_2_lane0;
   reg        [46:0]   execute_ctrl3_up_early0_MulPlugin_logic_mul_VALUES_1_lane0;
   reg        [33:0]   execute_ctrl3_up_early0_MulPlugin_logic_mul_VALUES_0_lane0;
-  reg        [3:0]    execute_ctrl3_up_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
-  reg        [31:0]   execute_ctrl3_up_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0;
   reg        [31:0]   execute_ctrl3_up_LsuL1_MIXED_ADDRESS_lane0;
   reg                 execute_ctrl3_up_FpuMulPlugin_SUB2_lane0;
   reg                 execute_ctrl3_up_FpuMulPlugin_SUB1_lane0;
@@ -1746,11 +1743,10 @@ module VexiiRiscv (
   reg        [46:0]   execute_ctrl2_up_early0_MulPlugin_logic_mul_VALUES_2_lane0;
   reg        [46:0]   execute_ctrl2_up_early0_MulPlugin_logic_mul_VALUES_1_lane0;
   reg        [33:0]   execute_ctrl2_up_early0_MulPlugin_logic_mul_VALUES_0_lane0;
-  reg        [3:0]    execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
-  reg        [31:0]   execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0;
   reg        [0:0]    execute_ctrl2_up_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALUE_lane0_plru_0;
   reg        [1:0]    execute_ctrl2_up_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALUE_lane0_dirty;
   reg                 execute_ctrl2_up_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALID_lane0;
+  reg        [3:0]    execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
   reg        [31:0]   execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0;
   reg                 execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0;
   reg        [1:0]    execute_ctrl2_up_LsuL1Plugin_logic_BANK_BUSY_lane0;
@@ -3296,13 +3292,7 @@ module VexiiRiscv (
   reg        [31:0]   execute_ctrl1_up_integer_RS2_lane0;
   reg        [31:0]   execute_ctrl1_up_integer_RS1_lane0;
   wire       [31:0]   execute_ctrl3_down_LsuL1_READ_DATA_lane0;
-  wire       [31:0]   execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0;
-  wire       [3:0]    execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
-  wire       [31:0]   execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0;
-  wire       [3:0]    execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
-  wire       [1:0]    execute_ctrl3_down_LsuL1Plugin_logic_WRITE_TO_READ_HAZARDS_lane0;
-  reg        [31:0]   execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0;
-  wire       [3:0]    execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
+  wire       [31:0]   execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0;
   wire       [31:0]   execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0;
   wire                execute_ctrl3_down_LsuL1_FLUSH_HIT_lane0;
   wire       [3:0]    execute_ctrl3_down_LsuL1_MASK_lane0;
@@ -3324,6 +3314,7 @@ module VexiiRiscv (
   wire                execute_ctrl3_down_LsuL1_PREFETCH_lane0;
   wire                execute_ctrl3_down_LsuL1_LOAD_lane0;
   wire       [1:0]    execute_ctrl3_down_LsuL1Plugin_logic_BANK_BUSY_REMAPPED_lane0;
+  wire       [1:0]    execute_ctrl3_down_LsuL1Plugin_logic_WRITE_TO_READ_HAZARDS_lane0;
   wire       [31:0]   execute_ctrl3_down_LsuL1_PHYSICAL_ADDRESS_lane0;
   wire                execute_ctrl3_down_LsuL1Plugin_logic_WAYS_TAGS_lane0_0_loaded;
   wire       [15:0]   execute_ctrl3_down_LsuL1Plugin_logic_WAYS_TAGS_lane0_0_address;
@@ -3363,8 +3354,11 @@ module VexiiRiscv (
   wire                execute_ctrl2_down_LsuL1Plugin_logic_FREEZE_HAZARD_lane0;
   wire                execute_ctrl2_LsuL1Plugin_logic_FREEZE_HAZARD_lane0_bypass;
   wire                execute_ctrl1_up_LsuL1Plugin_logic_FREEZE_HAZARD_lane0;
+  wire       [3:0]    execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
   wire       [31:0]   execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0;
   wire                execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0;
+  wire       [3:0]    execute_ctrl2_down_LsuL1_MASK_lane0;
+  wire       [3:0]    execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
   wire       [31:0]   execute_ctrl2_down_LsuL1_PHYSICAL_ADDRESS_lane0;
   wire       [31:0]   execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0;
   wire                execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0;
@@ -3804,16 +3798,6 @@ module VexiiRiscv (
   wire                when_LsuL1Plugin_l940_1;
   wire       [15:0]   _zz_LsuL1Plugin_logic_waysWrite_tag_address;
   wire                when_LsuL1Plugin_l1028;
-  wire                when_LsuL1Plugin_l1035;
-  wire                when_LsuL1Plugin_l1039;
-  wire                when_LsuL1Plugin_l1039_1;
-  wire                when_LsuL1Plugin_l1039_2;
-  wire                when_LsuL1Plugin_l1039_3;
-  wire                when_LsuL1Plugin_l1035_1;
-  wire                when_LsuL1Plugin_l1039_4;
-  wire                when_LsuL1Plugin_l1039_5;
-  wire                when_LsuL1Plugin_l1039_6;
-  wire                when_LsuL1Plugin_l1039_7;
   reg        [10:0]   LsuL1Plugin_logic_initializer_counter;
   wire                LsuL1Plugin_logic_initializer_done;
   wire                when_LsuL1Plugin_l1233;
@@ -4143,7 +4127,7 @@ module VexiiRiscv (
   wire       [1:0]    BtbPlugin_logic_ras_write_payload_address;
   reg        [30:0]   BtbPlugin_logic_ras_write_payload_data;
   reg                 BtbPlugin_logic_memWrite_valid;
-  reg        [7:0]    BtbPlugin_logic_memWrite_payload_address;
+  reg        [8:0]    BtbPlugin_logic_memWrite_payload_address;
   reg        [15:0]   BtbPlugin_logic_memWrite_payload_data_0_hash;
   reg        [0:0]    BtbPlugin_logic_memWrite_payload_data_0_sliceLow;
   wire       [30:0]   BtbPlugin_logic_memWrite_payload_data_0_pcTarget;
@@ -4152,7 +4136,7 @@ module VexiiRiscv (
   reg                 BtbPlugin_logic_memWrite_payload_data_0_isPop;
   reg        [0:0]    BtbPlugin_logic_memWrite_payload_mask;
   wire                BtbPlugin_logic_memRead_cmd_valid;
-  wire       [7:0]    BtbPlugin_logic_memRead_cmd_payload;
+  wire       [8:0]    BtbPlugin_logic_memRead_cmd_payload;
   wire       [15:0]   BtbPlugin_logic_memRead_rsp_0_hash;
   wire       [0:0]    BtbPlugin_logic_memRead_rsp_0_sliceLow;
   wire       [30:0]   BtbPlugin_logic_memRead_rsp_0_pcTarget;
@@ -4160,7 +4144,7 @@ module VexiiRiscv (
   wire                BtbPlugin_logic_memRead_rsp_0_isPush;
   wire                BtbPlugin_logic_memRead_rsp_0_isPop;
   wire                BtbPlugin_logic_memDp_wp_valid;
-  wire       [7:0]    BtbPlugin_logic_memDp_wp_payload_address;
+  wire       [8:0]    BtbPlugin_logic_memDp_wp_payload_address;
   wire       [15:0]   BtbPlugin_logic_memDp_wp_payload_data_0_hash;
   wire       [0:0]    BtbPlugin_logic_memDp_wp_payload_data_0_sliceLow;
   wire       [30:0]   BtbPlugin_logic_memDp_wp_payload_data_0_pcTarget;
@@ -4169,7 +4153,7 @@ module VexiiRiscv (
   wire                BtbPlugin_logic_memDp_wp_payload_data_0_isPop;
   wire       [0:0]    BtbPlugin_logic_memDp_wp_payload_mask;
   wire                BtbPlugin_logic_memDp_rp_cmd_valid;
-  wire       [7:0]    BtbPlugin_logic_memDp_rp_cmd_payload;
+  wire       [8:0]    BtbPlugin_logic_memDp_rp_cmd_payload;
   wire       [15:0]   BtbPlugin_logic_memDp_rp_rsp_0_hash;
   wire       [0:0]    BtbPlugin_logic_memDp_rp_rsp_0_sliceLow;
   wire       [30:0]   BtbPlugin_logic_memDp_rp_rsp_0_pcTarget;
@@ -4584,6 +4568,10 @@ module VexiiRiscv (
   reg                 early0_DivPlugin_logic_processing_request;
   reg        [31:0]   early0_DivPlugin_logic_processing_a;
   reg        [31:0]   early0_DivPlugin_logic_processing_b;
+  reg        [31:0]   early0_DivPlugin_logic_processing_a_delay_1;
+  reg        [31:0]   early0_DivPlugin_logic_processing_b_delay_1;
+  reg                 early0_DivPlugin_logic_processing_relaxer_hadRequest;
+  wire                when_DivPlugin_l121;
   reg                 early0_DivPlugin_logic_processing_unscheduleRequest;
   wire                early0_DivPlugin_logic_processing_freeze;
   wire       [31:0]   early0_DivPlugin_logic_processing_selected;
@@ -6570,7 +6558,7 @@ module VexiiRiscv (
   reg [31:0] FetchL1Plugin_logic_banks_0_mem [0:4095];
   reg [19:0] FetchL1Plugin_logic_ways_0_mem [0:255];
   reg [3:0] GSharePlugin_logic_mem_banks_0 [0:8191];
-  (* ram_style = "block" *) reg [50:0] BtbPlugin_logic_mem [0:255];
+  (* ram_style = "block" *) reg [50:0] BtbPlugin_logic_mem [0:511];
   reg [77:0] LsuPlugin_logic_storeBuffer_ops_mem [0:31];
   reg [31:0] CsrRamPlugin_logic_mem [0:3];
   function [2:0] zz_FetchL1Plugin_logic_trapPort_payload_arg(input dummy);
@@ -7765,8 +7753,8 @@ module VexiiRiscv (
     .io_flush                  (execute_ctrl1_down_isReady                                          ), //i
     .io_cmd_valid              (early0_DivPlugin_logic_processing_div_io_cmd_valid                  ), //i
     .io_cmd_ready              (early0_DivPlugin_logic_processing_div_io_cmd_ready                  ), //o
-    .io_cmd_payload_a          (early0_DivPlugin_logic_processing_a[31:0]                           ), //i
-    .io_cmd_payload_b          (early0_DivPlugin_logic_processing_b[31:0]                           ), //i
+    .io_cmd_payload_a          (early0_DivPlugin_logic_processing_a_delay_1[31:0]                   ), //i
+    .io_cmd_payload_b          (early0_DivPlugin_logic_processing_b_delay_1[31:0]                   ), //i
     .io_cmd_payload_normalized (early0_DivPlugin_logic_processing_div_io_cmd_payload_normalized     ), //i
     .io_cmd_payload_iterations (early0_DivPlugin_logic_processing_div_io_cmd_payload_iterations[4:0]), //i
     .io_rsp_valid              (early0_DivPlugin_logic_processing_div_io_rsp_valid                  ), //o
@@ -10620,8 +10608,8 @@ module VexiiRiscv (
   assign _zz_execute_ctrl3_down_LsuL1Plugin_logic_MUXED_DATA_lane0_1 = execute_ctrl3_down_LsuL1Plugin_logic_WAYS_HITS_lane0[1];
   assign execute_ctrl3_down_LsuL1Plugin_logic_MUXED_DATA_lane0 = ((_zz_execute_ctrl3_down_LsuL1Plugin_logic_MUXED_DATA_lane0 ? execute_ctrl3_down_LsuL1Plugin_logic_BANKS_MUXES_lane0_0 : 32'h0) | (_zz_execute_ctrl3_down_LsuL1Plugin_logic_MUXED_DATA_lane0_1 ? execute_ctrl3_down_LsuL1Plugin_logic_BANKS_MUXES_lane0_1 : 32'h0));
   always @(*) begin
-    execute_ctrl2_down_LsuL1Plugin_logic_WRITE_TO_READ_HAZARDS_lane0[0] = ((execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0 && (execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0[31 : 2] == execute_ctrl2_down_LsuL1_PHYSICAL_ADDRESS_lane0[31 : 2])) && 1'b1);
-    execute_ctrl2_down_LsuL1Plugin_logic_WRITE_TO_READ_HAZARDS_lane0[1] = ((execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0 && (execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0[31 : 2] == execute_ctrl2_down_LsuL1_PHYSICAL_ADDRESS_lane0[31 : 2])) && 1'b1);
+    execute_ctrl2_down_LsuL1Plugin_logic_WRITE_TO_READ_HAZARDS_lane0[0] = ((execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0 && (execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0[31 : 2] == execute_ctrl2_down_LsuL1_PHYSICAL_ADDRESS_lane0[31 : 2])) && (|(execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0 & execute_ctrl2_down_LsuL1_MASK_lane0)));
+    execute_ctrl2_down_LsuL1Plugin_logic_WRITE_TO_READ_HAZARDS_lane0[1] = ((execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0 && (execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0[31 : 2] == execute_ctrl2_down_LsuL1_PHYSICAL_ADDRESS_lane0[31 : 2])) && (|(execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0 & execute_ctrl2_down_LsuL1_MASK_lane0)));
   end
 
   assign execute_ctrl1_up_LsuL1Plugin_logic_FREEZE_HAZARD_lane0 = 1'b0;
@@ -10688,7 +10676,7 @@ module VexiiRiscv (
   assign LsuL1Plugin_logic_lsu_ctrl_wasDirty = (|(execute_ctrl3_down_LsuL1Plugin_logic_SHARED_lane0_dirty & execute_ctrl3_down_LsuL1Plugin_logic_WAYS_HITS_lane0));
   assign LsuL1Plugin_logic_lsu_ctrl_loadedDirties = ({execute_ctrl3_down_LsuL1Plugin_logic_WAYS_TAGS_lane0_1_loaded,execute_ctrl3_down_LsuL1Plugin_logic_WAYS_TAGS_lane0_0_loaded} & execute_ctrl3_down_LsuL1Plugin_logic_SHARED_lane0_dirty);
   assign LsuL1Plugin_logic_lsu_ctrl_refillWayWasDirty = LsuL1Plugin_logic_lsu_ctrl_loadedDirties[LsuL1Plugin_logic_lsu_ctrl_refillWayWithoutUpdate];
-  assign LsuL1Plugin_logic_lsu_ctrl_writeToReadHazard = 1'b0;
+  assign LsuL1Plugin_logic_lsu_ctrl_writeToReadHazard = (|execute_ctrl3_down_LsuL1Plugin_logic_WRITE_TO_READ_HAZARDS_lane0);
   assign LsuL1Plugin_logic_lsu_ctrl_bankNotRead = (|(execute_ctrl3_down_LsuL1Plugin_logic_BANK_BUSY_REMAPPED_lane0 & execute_ctrl3_down_LsuL1Plugin_logic_WAYS_HITS_lane0));
   assign LsuL1Plugin_logic_lsu_ctrl_loadHazard = ((execute_ctrl3_down_LsuL1_LOAD_lane0 && (! execute_ctrl3_down_LsuL1_PREFETCH_lane0)) && (LsuL1Plugin_logic_lsu_ctrl_bankNotRead || LsuL1Plugin_logic_lsu_ctrl_writeToReadHazard));
   assign LsuL1Plugin_logic_lsu_ctrl_storeHazard = ((execute_ctrl3_down_LsuL1_STORE_lane0 && (! execute_ctrl3_down_LsuL1_PREFETCH_lane0)) && (! LsuL1Plugin_logic_lsu_ctrl_bankWriteReservation_win));
@@ -10813,48 +10801,7 @@ module VexiiRiscv (
   assign execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0 = execute_ctrl3_down_LsuL1_WRITE_DATA_lane0;
   assign execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0 = execute_ctrl3_down_LsuL1_MASK_lane0;
   assign when_LsuL1Plugin_l1028 = ((execute_ctrl3_down_LsuL1_SEL_lane0 && (! execute_ctrl3_down_LsuL1_HAZARD_lane0)) && (! execute_ctrl3_down_LsuL1_MISS_lane0));
-  always @(*) begin
-    execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0 = execute_ctrl3_down_LsuL1Plugin_logic_MUXED_DATA_lane0;
-    if(when_LsuL1Plugin_l1035) begin
-      if(when_LsuL1Plugin_l1039) begin
-        execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0[7 : 0] = execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0[7 : 0];
-      end
-      if(when_LsuL1Plugin_l1039_1) begin
-        execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0[15 : 8] = execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0[15 : 8];
-      end
-      if(when_LsuL1Plugin_l1039_2) begin
-        execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0[23 : 16] = execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0[23 : 16];
-      end
-      if(when_LsuL1Plugin_l1039_3) begin
-        execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0[31 : 24] = execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0[31 : 24];
-      end
-    end
-    if(when_LsuL1Plugin_l1035_1) begin
-      if(when_LsuL1Plugin_l1039_4) begin
-        execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0[7 : 0] = execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0[7 : 0];
-      end
-      if(when_LsuL1Plugin_l1039_5) begin
-        execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0[15 : 8] = execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0[15 : 8];
-      end
-      if(when_LsuL1Plugin_l1039_6) begin
-        execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0[23 : 16] = execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0[23 : 16];
-      end
-      if(when_LsuL1Plugin_l1039_7) begin
-        execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0[31 : 24] = execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0[31 : 24];
-      end
-    end
-  end
-
-  assign when_LsuL1Plugin_l1035 = execute_ctrl3_down_LsuL1Plugin_logic_WRITE_TO_READ_HAZARDS_lane0[1];
-  assign when_LsuL1Plugin_l1039 = execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0[0];
-  assign when_LsuL1Plugin_l1039_1 = execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0[1];
-  assign when_LsuL1Plugin_l1039_2 = execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0[2];
-  assign when_LsuL1Plugin_l1039_3 = execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0[3];
-  assign when_LsuL1Plugin_l1035_1 = execute_ctrl3_down_LsuL1Plugin_logic_WRITE_TO_READ_HAZARDS_lane0[0];
-  assign when_LsuL1Plugin_l1039_4 = execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0[0];
-  assign when_LsuL1Plugin_l1039_5 = execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0[1];
-  assign when_LsuL1Plugin_l1039_6 = execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0[2];
-  assign when_LsuL1Plugin_l1039_7 = execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0[3];
+  assign execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0 = execute_ctrl3_down_LsuL1Plugin_logic_MUXED_DATA_lane0;
   assign execute_ctrl3_down_LsuL1_READ_DATA_lane0 = execute_ctrl3_down_LsuL1Plugin_logic_BYPASSED_DATA_lane0;
   assign LsuL1Plugin_logic_initializer_done = LsuL1Plugin_logic_initializer_counter[10];
   assign when_LsuL1Plugin_l1233 = (! LsuL1Plugin_logic_initializer_done);
@@ -12289,7 +12236,13 @@ module VexiiRiscv (
     end
   end
 
-  assign early0_DivPlugin_logic_processing_div_io_cmd_valid = (early0_DivPlugin_logic_processing_request && (! early0_DivPlugin_logic_processing_cmdSent));
+  always @(*) begin
+    early0_DivPlugin_logic_processing_div_io_cmd_valid = (early0_DivPlugin_logic_processing_request && (! early0_DivPlugin_logic_processing_cmdSent));
+    if(when_DivPlugin_l121) begin
+      early0_DivPlugin_logic_processing_div_io_cmd_valid = 1'b0;
+    end
+  end
+
   always @(*) begin
     early0_DivPlugin_logic_processing_div_io_cmd_payload_normalized = 1'b0;
     if(when_FpuDivPlugin_l68) begin
@@ -12304,6 +12257,7 @@ module VexiiRiscv (
     end
   end
 
+  assign when_DivPlugin_l121 = (! early0_DivPlugin_logic_processing_relaxer_hadRequest);
   assign early0_DivPlugin_logic_processing_freeze = ((early0_DivPlugin_logic_processing_request && (! early0_DivPlugin_logic_processing_div_io_rsp_valid)) && (! early0_DivPlugin_logic_processing_unscheduleRequest));
   assign early0_DivPlugin_logic_processing_selected = (execute_ctrl1_down_DivPlugin_REM_lane0 ? early0_DivPlugin_logic_processing_div_io_rsp_payload_remain : early0_DivPlugin_logic_processing_div_io_rsp_payload_result);
   assign _zz_execute_ctrl1_down_DivPlugin_DIV_RESULT_lane0 = early0_DivPlugin_logic_processing_selected;
@@ -14145,7 +14099,7 @@ module VexiiRiscv (
   assign GSharePlugin_logic_mem_write_payload_address = GSharePlugin_logic_onLearn_hash;
   assign GSharePlugin_logic_mem_write_payload_data_0 = GSharePlugin_logic_onLearn_updated_0;
   assign GSharePlugin_logic_mem_write_payload_data_1 = GSharePlugin_logic_onLearn_updated_1;
-  assign BtbPlugin_logic_onLearn_hash = LearnPlugin_logic_learn_payload_pcOnLastSlice[25 : 10];
+  assign BtbPlugin_logic_onLearn_hash = LearnPlugin_logic_learn_payload_pcOnLastSlice[26 : 11];
   always @(*) begin
     BtbPlugin_logic_memWrite_valid = (LearnPlugin_logic_learn_valid && (LearnPlugin_logic_learn_payload_badPredictedTarget && LearnPlugin_logic_learn_payload_taken));
     if(DecoderPlugin_logic_forgetPort_valid) begin
@@ -14154,9 +14108,9 @@ module VexiiRiscv (
   end
 
   always @(*) begin
-    BtbPlugin_logic_memWrite_payload_address = _zz_BtbPlugin_logic_memWrite_payload_address[7:0];
+    BtbPlugin_logic_memWrite_payload_address = _zz_BtbPlugin_logic_memWrite_payload_address[8:0];
     if(DecoderPlugin_logic_forgetPort_valid) begin
-      BtbPlugin_logic_memWrite_payload_address = _zz_BtbPlugin_logic_memWrite_payload_address_1[7:0];
+      BtbPlugin_logic_memWrite_payload_address = _zz_BtbPlugin_logic_memWrite_payload_address_1[8:0];
     end
   end
 
@@ -15203,9 +15157,9 @@ module VexiiRiscv (
   assign when_CtrlLaneApi_l50_4 = (execute_ctrl1_down_isReady || execute_lane0_ctrls_1_downIsCancel);
   assign WhiteboxerPlugin_logic_executes_0_fire = ((execute_ctrl1_down_LANE_SEL_lane0 && (! execute_ctrl1_down_LANE_SEL_lane0_regNext)) && execute_ctrl1_down_COMMIT_lane0);
   assign WhiteboxerPlugin_logic_executes_0_microOpId = execute_ctrl1_down_Decode_UOP_ID_lane0;
-  assign BtbPlugin_logic_onForget_hash = DecoderPlugin_logic_forgetPort_payload_pcOnLastSlice[25 : 10];
+  assign BtbPlugin_logic_onForget_hash = DecoderPlugin_logic_forgetPort_payload_pcOnLastSlice[26 : 11];
   assign BtbPlugin_logic_memRead_cmd_valid = fetch_logic_ctrls_0_down_isReady;
-  assign BtbPlugin_logic_memRead_cmd_payload = _zz_BtbPlugin_logic_memRead_cmd_payload[7:0];
+  assign BtbPlugin_logic_memRead_cmd_payload = _zz_BtbPlugin_logic_memRead_cmd_payload[8:0];
   assign fetch_logic_ctrls_0_down_BtbPlugin_logic_readCmd_HAZARDS = ((BtbPlugin_logic_memWrite_valid && (BtbPlugin_logic_memWrite_payload_address == BtbPlugin_logic_memRead_cmd_payload)) ? BtbPlugin_logic_memWrite_payload_mask : 1'b0);
   assign fetch_logic_ctrls_0_haltRequest_BtbPlugin_l200 = BtbPlugin_logic_memWrite_valid;
   assign BtbPlugin_logic_predictions = {fetch_logic_ctrls_2_down_GSharePlugin_GSHARE_COUNTER_1[1],fetch_logic_ctrls_2_down_GSharePlugin_GSHARE_COUNTER_0[1]};
@@ -15215,7 +15169,7 @@ module VexiiRiscv (
   assign fetch_logic_ctrls_1_down_BtbPlugin_logic_chunksLogic_0_readRsp_ENTRY_isBranch = BtbPlugin_logic_memRead_rsp_0_isBranch;
   assign fetch_logic_ctrls_1_down_BtbPlugin_logic_chunksLogic_0_readRsp_ENTRY_isPush = BtbPlugin_logic_memRead_rsp_0_isPush;
   assign fetch_logic_ctrls_1_down_BtbPlugin_logic_chunksLogic_0_readRsp_ENTRY_isPop = BtbPlugin_logic_memRead_rsp_0_isPop;
-  assign fetch_logic_ctrls_2_down_BtbPlugin_logic_chunksLogic_0_hitCalc_HIT = ((fetch_logic_ctrls_2_down_BtbPlugin_logic_chunksLogic_0_readRsp_ENTRY_hash == fetch_logic_ctrls_2_down_Fetch_WORD_PC[25 : 10]) && (fetch_logic_ctrls_2_down_Fetch_WORD_PC[1 : 1] <= fetch_logic_ctrls_2_down_BtbPlugin_logic_chunksLogic_0_readRsp_ENTRY_sliceLow));
+  assign fetch_logic_ctrls_2_down_BtbPlugin_logic_chunksLogic_0_hitCalc_HIT = ((fetch_logic_ctrls_2_down_BtbPlugin_logic_chunksLogic_0_readRsp_ENTRY_hash == fetch_logic_ctrls_2_down_Fetch_WORD_PC[26 : 11]) && (fetch_logic_ctrls_2_down_Fetch_WORD_PC[1 : 1] <= fetch_logic_ctrls_2_down_BtbPlugin_logic_chunksLogic_0_readRsp_ENTRY_sliceLow));
   assign fetch_logic_ctrls_2_down_BtbPlugin_logic_chunksLogic_0_predict_TAKEN = ((! fetch_logic_ctrls_2_down_BtbPlugin_logic_chunksLogic_0_readRsp_ENTRY_isBranch) || BtbPlugin_logic_predictions[fetch_logic_ctrls_2_down_BtbPlugin_logic_chunksLogic_0_readRsp_ENTRY_sliceLow]);
   assign BtbPlugin_logic_ras_readIt = fetch_logic_ctrls_1_down_isReady;
   assign BtbPlugin_logic_applyIt_chunksMask = (fetch_logic_ctrls_2_down_BtbPlugin_logic_chunksLogic_0_hitCalc_HIT && 1'b1);
@@ -17700,11 +17654,10 @@ module VexiiRiscv (
   assign execute_ctrl2_down_LsuL1Plugin_logic_BANK_BUSY_lane0 = execute_ctrl2_up_LsuL1Plugin_logic_BANK_BUSY_lane0;
   assign execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0 = execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0;
   assign execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0 = execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0;
+  assign execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0 = execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
   assign execute_ctrl2_down_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALID_lane0 = execute_ctrl2_up_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALID_lane0;
   assign execute_ctrl2_down_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALUE_lane0_plru_0 = execute_ctrl2_up_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALUE_lane0_plru_0;
   assign execute_ctrl2_down_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALUE_lane0_dirty = execute_ctrl2_up_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALUE_lane0_dirty;
-  assign execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0 = execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0;
-  assign execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0 = execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
   assign execute_ctrl2_down_early0_MulPlugin_logic_mul_VALUES_0_lane0 = execute_ctrl2_up_early0_MulPlugin_logic_mul_VALUES_0_lane0;
   assign execute_ctrl2_down_early0_MulPlugin_logic_mul_VALUES_1_lane0 = execute_ctrl2_up_early0_MulPlugin_logic_mul_VALUES_1_lane0;
   assign execute_ctrl2_down_early0_MulPlugin_logic_mul_VALUES_2_lane0 = execute_ctrl2_up_early0_MulPlugin_logic_mul_VALUES_2_lane0;
@@ -17811,8 +17764,6 @@ module VexiiRiscv (
   assign execute_ctrl3_down_FpuMulPlugin_SUB1_lane0 = execute_ctrl3_up_FpuMulPlugin_SUB1_lane0;
   assign execute_ctrl3_down_FpuMulPlugin_SUB2_lane0 = execute_ctrl3_up_FpuMulPlugin_SUB2_lane0;
   assign execute_ctrl3_down_LsuL1_MIXED_ADDRESS_lane0 = execute_ctrl3_up_LsuL1_MIXED_ADDRESS_lane0;
-  assign execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0 = execute_ctrl3_up_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0;
-  assign execute_ctrl3_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0 = execute_ctrl3_up_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
   assign execute_ctrl3_down_early0_MulPlugin_logic_mul_VALUES_0_lane0 = execute_ctrl3_up_early0_MulPlugin_logic_mul_VALUES_0_lane0;
   assign execute_ctrl3_down_early0_MulPlugin_logic_mul_VALUES_1_lane0 = execute_ctrl3_up_early0_MulPlugin_logic_mul_VALUES_1_lane0;
   assign execute_ctrl3_down_early0_MulPlugin_logic_mul_VALUES_2_lane0 = execute_ctrl3_up_early0_MulPlugin_logic_mul_VALUES_2_lane0;
@@ -18376,6 +18327,7 @@ module VexiiRiscv (
       FpuAddSharedPlugin_logic_pip_node_3_valid <= 1'b0;
       FpuAddSharedPlugin_logic_pip_node_4_valid <= 1'b0;
       early0_DivPlugin_logic_processing_cmdSent <= 1'b0;
+      early0_DivPlugin_logic_processing_relaxer_hadRequest <= 1'b0;
       early0_DivPlugin_logic_processing_unscheduleRequest <= 1'b0;
       AlignerPlugin_logic_feeder_harts_0_dopId <= 10'h0;
       AlignerPlugin_logic_buffer_mask <= 2'b00;
@@ -18743,6 +18695,7 @@ module VexiiRiscv (
       if(execute_ctrl1_down_isReady) begin
         early0_DivPlugin_logic_processing_cmdSent <= 1'b0;
       end
+      early0_DivPlugin_logic_processing_relaxer_hadRequest <= (early0_DivPlugin_logic_processing_request && execute_freeze_valid);
       early0_DivPlugin_logic_processing_unscheduleRequest <= execute_lane0_ctrls_1_upIsCancel;
       if(execute_ctrl1_down_isReady) begin
         early0_DivPlugin_logic_processing_unscheduleRequest <= 1'b0;
@@ -19563,6 +19516,8 @@ module VexiiRiscv (
       FpuUnpackerPlugin_logic_onUnpack_firstCycle <= 1'b1;
     end
     early0_DivPlugin_logic_processing_divRevertResult <= ((execute_ctrl1_down_RsUnsignedPlugin_RS1_REVERT_lane0 ^ (execute_ctrl1_down_RsUnsignedPlugin_RS2_REVERT_lane0 && (! execute_ctrl1_down_DivPlugin_REM_lane0))) && (! (((execute_ctrl1_down_RsUnsignedPlugin_RS2_FORMATED_lane0 == 32'h0) && execute_ctrl1_down_RsUnsignedPlugin_RS2_SIGNED_lane0) && (! execute_ctrl1_down_DivPlugin_REM_lane0))));
+    early0_DivPlugin_logic_processing_a_delay_1 <= early0_DivPlugin_logic_processing_a;
+    early0_DivPlugin_logic_processing_b_delay_1 <= early0_DivPlugin_logic_processing_b;
     if(when_AlignerPlugin_l256) begin
       AlignerPlugin_logic_buffer_data <= fetch_logic_ctrls_2_down_Fetch_WORD;
       AlignerPlugin_logic_buffer_pc <= fetch_logic_ctrls_2_down_Fetch_WORD_PC;
@@ -20001,11 +19956,10 @@ module VexiiRiscv (
       execute_ctrl2_up_LsuL1Plugin_logic_BANK_BUSY_lane0 <= execute_ctrl1_down_LsuL1Plugin_logic_BANK_BUSY_lane0;
       execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0 <= execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_VALID_lane0;
       execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0 <= execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_ADDRESS_lane0;
+      execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0 <= execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
       execute_ctrl2_up_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALID_lane0 <= execute_ctrl1_down_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALID_lane0;
       execute_ctrl2_up_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALUE_lane0_plru_0 <= execute_ctrl1_down_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALUE_lane0_plru_0;
       execute_ctrl2_up_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALUE_lane0_dirty <= execute_ctrl1_down_LsuL1Plugin_logic_lsu_rt0_SHARED_BYPASS_VALUE_lane0_dirty;
-      execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0 <= execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0;
-      execute_ctrl2_up_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0 <= execute_ctrl1_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
       execute_ctrl2_up_early0_MulPlugin_logic_mul_VALUES_0_lane0 <= execute_ctrl1_down_early0_MulPlugin_logic_mul_VALUES_0_lane0;
       execute_ctrl2_up_early0_MulPlugin_logic_mul_VALUES_1_lane0 <= execute_ctrl1_down_early0_MulPlugin_logic_mul_VALUES_1_lane0;
       execute_ctrl2_up_early0_MulPlugin_logic_mul_VALUES_2_lane0 <= execute_ctrl1_down_early0_MulPlugin_logic_mul_VALUES_2_lane0;
@@ -20127,8 +20081,6 @@ module VexiiRiscv (
       execute_ctrl3_up_FpuFlagsWritebackPlugin_logic_FLAGS_lane0_DZ <= execute_ctrl2_down_FpuFlagsWritebackPlugin_logic_FLAGS_lane0_DZ;
       execute_ctrl3_up_FpuFlagsWritebackPlugin_logic_FLAGS_lane0_NV <= execute_ctrl2_down_FpuFlagsWritebackPlugin_logic_FLAGS_lane0_NV;
       execute_ctrl3_up_LsuL1_MIXED_ADDRESS_lane0 <= execute_ctrl2_down_LsuL1_MIXED_ADDRESS_lane0;
-      execute_ctrl3_up_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0 <= execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_DATA_lane0;
-      execute_ctrl3_up_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0 <= execute_ctrl2_down_LsuL1Plugin_logic_EVENT_WRITE_MASK_lane0;
       execute_ctrl3_up_early0_MulPlugin_logic_mul_VALUES_0_lane0 <= execute_ctrl2_down_early0_MulPlugin_logic_mul_VALUES_0_lane0;
       execute_ctrl3_up_early0_MulPlugin_logic_mul_VALUES_1_lane0 <= execute_ctrl2_down_early0_MulPlugin_logic_mul_VALUES_1_lane0;
       execute_ctrl3_up_early0_MulPlugin_logic_mul_VALUES_2_lane0 <= execute_ctrl2_down_early0_MulPlugin_logic_mul_VALUES_2_lane0;

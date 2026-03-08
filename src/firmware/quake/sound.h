@@ -123,6 +123,11 @@ int SNDDMA_GetDMAPos(void);
 // shutdown the DMA xfer.
 void SNDDMA_Shutdown(void);
 
+// Timer interrupt-driven audio FIFO pump
+void Audio_TimerStart(void);
+void Audio_TimerStop(void);
+extern int audio_timer_active;
+
 // ====================================================================
 // User-setable variables
 // ====================================================================
@@ -170,6 +175,7 @@ wavinfo_t GetWavinfo (char *name, byte *wav, int wavlength);
 
 void SND_InitScaletable (void);
 void SNDDMA_Submit(void);
+void SNDDMA_FillRing(void);
 
 void S_AmbientOff (void);
 void S_AmbientOn (void);

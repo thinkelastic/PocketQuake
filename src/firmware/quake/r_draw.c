@@ -437,13 +437,14 @@ PQ_FASTTEXT void R_RenderFace (msurface_t *fa, int clipflags, float planedot)
 	r_nearzionly = false;
 	makeleftedge = makerightedge = false;
 	pedges = currententity->model->edges;
+	int *psurfedges = currententity->model->surfedges + fa->firstedge;
 	r_lastvertvalid = false;
 
 	for (i=0 ; i<fa->numedges ; i++)
 	{
 		int v0idx, v1idx;
 
-		lindex = currententity->model->surfedges[fa->firstedge + i];
+		lindex = psurfedges[i];
 
 		if (lindex > 0)
 		{

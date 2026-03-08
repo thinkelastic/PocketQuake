@@ -89,7 +89,10 @@ module cpu_system (
     output reg         m_local_wlast,
 
     input  wire        m_local_bvalid,
-    input  wire [1:0]  m_local_bresp
+    input  wire [1:0]  m_local_bresp,
+
+    // Timer interrupt from axi_periph_slave (mtimecmp comparator)
+    input  wire        timer_irq
 );
 
 // ============================================
@@ -173,7 +176,7 @@ VexiiRiscv cpu (
     .reset(reset),
 
     .PrivilegedPlugin_logic_rdtime(rdtime_counter),
-    .PrivilegedPlugin_logic_harts_0_int_m_timer(1'b0),
+    .PrivilegedPlugin_logic_harts_0_int_m_timer(timer_irq),
     .PrivilegedPlugin_logic_harts_0_int_m_software(1'b0),
     .PrivilegedPlugin_logic_harts_0_int_m_external(1'b0),
 

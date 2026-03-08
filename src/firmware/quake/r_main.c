@@ -1057,7 +1057,6 @@ void R_DrawBEntitiesOnList (void)
 				VectorCopy (base_vpn, vpn);
 				VectorCopy (base_vup, vup);
 				VectorCopy (base_vright, vright);
-				VectorCopy (base_modelorg, modelorg);
 				VectorCopy (oldorigin, modelorg);
 				R_TransformFrustum ();
 			}
@@ -1254,6 +1253,7 @@ PQ_FASTTEXT void R_EdgeDrawing (void)
 	R_RenderWorld ();
 	if (profiling)
 		pq_prof_renderworld_cycles_frame = SYS_CYCLE_LO - prof_sub;
+	SNDDMA_FillRing();
 	pq_dbg_stage = 0x3252;
 
 	if (r_drawculledpolys)
@@ -1276,6 +1276,7 @@ PQ_FASTTEXT void R_EdgeDrawing (void)
 	R_DrawBEntitiesOnList ();
 	if (profiling)
 		pq_prof_bentities_cycles_frame = SYS_CYCLE_LO - prof_sub;
+	SNDDMA_FillRing();
 	pq_dbg_stage = 0x3255;
 
 	if (r_dspeeds.value)

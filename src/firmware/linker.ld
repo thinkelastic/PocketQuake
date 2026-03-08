@@ -141,6 +141,9 @@ SECTIONS {
     /* Provide symbols for C code */
     PROVIDE(_start_addr = ORIGIN(BRAM));
     PROVIDE(_stack_top = __stack_top);
+    /* Timer ISR uses a separate 256-byte stack below the main trap stack.
+     * Main trap frame is 272 bytes, so timer stack starts 512 bytes below top. */
+    PROVIDE(_timer_stack_top = __stack_top - 512);
     PROVIDE(_bss_start = __bss_start);
     PROVIDE(_bss_end = __bss_end);
     PROVIDE(_qbss_start = __qbss_start);

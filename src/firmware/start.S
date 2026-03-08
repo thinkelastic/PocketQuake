@@ -2,21 +2,27 @@
  * VexRiscv startup code
  * Sets up stack pointer and jumps to main
  * Includes trap handler for misaligned access emulation and crash debugging
+ *
+ * Trap architecture:
+ *   Reset vector = 0 (_start), mtvec set to _trap_vector during boot.
+ *   _trap_vector saves t0 to a fixed BRAM scratch word before reading
+ *   mcause, so ALL registers (including t0) survive interrupt return.
+ *   Timer interrupt (mcause 0x80000007) uses a fast path that only saves
+ *   caller-saved registers.  All other traps use the full save path.
+ *
+ * BRAM scratch layout (0x0000F000):
+ *   0x0000F000: boot magic / t0 save slot (shared; boot magic only read once)
+ *   0x0000F004: (available)
  */
 
 .section .text.start
 .global _start
 
 _start:
-    /* Check if this is a trap (exception re-entry) or cold boot.
-     * On cold boot, mcause is 0. On exception, mcause is non-zero.
-     * CPU jumps to mtvec (address 0) on any exception.
-     * CRITICAL: must check mcause BEFORE touching sp, otherwise the
-     * original sp is destroyed and the trap handler can't restore it. */
-    csrr t0, mcause
-    bnez t0, _trap_entry
+    /* Cold boot entry point (reset vector = 0).
+     * mtvec is changed to _trap_vector below, so this code only runs once. */
 
-    /* Cold boot: set up stack pointer */
+    /* Set up stack pointer */
     lui sp, %hi(_stack_top)
     addi sp, sp, %lo(_stack_top)
 
@@ -24,8 +30,8 @@ _start:
     li t0, (3 << 13)
     csrs mstatus, t0
 
-    /* Set mtvec to point to our trap handler (address 0 = _start) */
-    la t0, _start
+    /* Set mtvec to dedicated trap handler (NOT _start) */
+    la t0, _trap_vector
     csrw mtvec, t0
 
     /* Mark that we've booted (store magic value at fixed BRAM address) */
@@ -54,7 +60,111 @@ halt:
 
 
 /* ========================================
- * Trap entry - saves all integer + float registers and dispatches
+ * Trap vector entry point.
+ *
+ * Saves t0 to a fixed BRAM scratch word BEFORE reading mcause,
+ * so the original t0 is never lost.  Uses mscratch for original sp.
+ *
+ * Register contract at entry:
+ *   mscratch = undefined (will be set to original sp)
+ *   All GPRs = interrupted context values
+ * ======================================== */
+.align 4
+_trap_vector:
+    /* Step 1: Save original sp to mscratch */
+    csrw mscratch, sp
+
+    /* Step 2: Save original t0 to fixed BRAM scratch (0x0000F000).
+     * We use sp as a temp (original sp is safe in mscratch). */
+    lui sp, 0xF                 /* sp = 0x0000F000 */
+    sw t0, 0(sp)                /* BRAM[0xF000] = original t0 */
+
+    /* Step 3: Read mcause into t0 (safe — original t0 is saved) */
+    csrr t0, mcause
+
+    /* Step 4: Fast-path check for timer interrupt (mcause == 0x80000007).
+     * Interrupts have bit 31 set; code 7 = machine timer. */
+    bgez t0, _full_trap_path    /* Bit 31 clear → synchronous exception */
+    andi t0, t0, 0x7F           /* Mask off interrupt bit */
+    addi t0, t0, -7             /* t0 = 0 if timer interrupt */
+    bnez t0, _full_trap_path    /* Not timer → full save */
+
+    /* ================================================
+     * Timer interrupt fast path
+     * Save only caller-saved regs (~18 words = 72 bytes + overhead)
+     * ================================================ */
+    lui sp, %hi(_timer_stack_top)
+    addi sp, sp, %lo(_timer_stack_top)
+    addi sp, sp, -96
+
+    /* Save original sp (from mscratch) */
+    csrr t0, mscratch
+    sw t0,  0(sp)               /* frame[0] = original sp */
+
+    /* Save ra */
+    sw ra,  4(sp)
+
+    /* Save original t0 (from BRAM scratch at 0x0000F000) */
+    lui t0, 0xF
+    lw t0, 0(t0)
+    sw t0,  8(sp)               /* frame[2] = original t0 (x5) */
+
+    /* Save remaining caller-saved registers */
+    sw a0, 12(sp)
+    sw a1, 16(sp)
+    sw a2, 20(sp)
+    sw a3, 24(sp)
+    sw a4, 28(sp)
+    sw a5, 32(sp)
+    sw a6, 36(sp)
+    sw a7, 40(sp)
+    sw t1, 44(sp)
+    sw t2, 48(sp)
+    sw t3, 52(sp)
+    sw t4, 56(sp)
+    sw t5, 60(sp)
+    sw t6, 64(sp)
+    csrr t0, mepc
+    sw t0, 68(sp)               /* frame[17] = mepc */
+
+    /* Call audio ISR (integer-only, no FP save needed) */
+    jal ra, audio_timer_isr
+
+    /* Restore mepc */
+    lw t0, 68(sp)
+    csrw mepc, t0
+
+    /* Restore all caller-saved registers */
+    lw ra,  4(sp)
+    lw a0, 12(sp)
+    lw a1, 16(sp)
+    lw a2, 20(sp)
+    lw a3, 24(sp)
+    lw a4, 28(sp)
+    lw a5, 32(sp)
+    lw a6, 36(sp)
+    lw a7, 40(sp)
+    lw t1, 44(sp)
+    lw t2, 48(sp)
+    lw t3, 52(sp)
+    lw t4, 56(sp)
+    lw t5, 60(sp)
+    lw t6, 64(sp)
+
+    /* Restore t0 (must be after all other uses of t0) */
+    lw t0,  8(sp)
+
+    /* Restore original sp and return */
+    lw sp,  0(sp)
+    mret
+
+
+/* ================================================
+ * Full trap path — exceptions and non-timer interrupts
+ *
+ * Restores t0 from BRAM scratch, restores sp from mscratch,
+ * then saves ALL registers to a full trap frame.
+ *
  * Trap frame layout:
  *   x0-x31  (32 words) at sp+0   .. sp+124
  *   mepc    (1 word)   at sp+128
@@ -62,12 +172,11 @@ halt:
  *   mtval   (1 word)   at sp+136
  *   f0-f31  (32 words) at sp+140 .. sp+264
  * Total: 67 words = 268 bytes (round to 272 for 8-byte alignment)
- * ======================================== */
-_trap_entry:
-    /* Save original sp to mscratch, then switch to BRAM trap stack.
-     * sp still holds the original value here (mcause check above
-     * does not modify sp). */
-    csrw mscratch, sp
+ * ================================================ */
+_full_trap_path:
+    /* Recover original t0 from BRAM scratch.
+     * sp is still 0x0000F000 from the lui above. */
+    lw t0, 0(sp)               /* t0 = original t0 */
 
     /* Switch to trap stack in BRAM */
     lui sp, %hi(_stack_top)
@@ -76,14 +185,18 @@ _trap_entry:
     /* Allocate trap frame: 272 bytes */
     addi sp, sp, -272
 
-    /* Save x1-x31 (skip x0 which is always 0) */
-    sw x1,   4(sp)
-    /* x2 (sp) - save the original sp from mscratch */
+    /* Save original t0 (x5) FIRST — it was recovered from scratch */
+    sw t0,  20(sp)
+
+    /* Now use t0 as temp to save original sp from mscratch */
     csrr t0, mscratch
-    sw t0,   8(sp)
+    sw t0,   8(sp)             /* x2 = original sp */
+
+    /* Save remaining x1, x3-x31 */
+    sw x1,   4(sp)
     sw x3,  12(sp)
     sw x4,  16(sp)
-    sw x5,  20(sp)
+    /* x5 already saved above */
     sw x6,  24(sp)
     sw x7,  28(sp)
     sw x8,  32(sp)

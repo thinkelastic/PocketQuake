@@ -46,9 +46,12 @@ module video_scanout_indexed (
     localparam VID_H_ACTIVE = 320;
 
     // Line buffer: 320 x 8-bit palette indices
-    // Store as 16-bit words for efficient SDRAM reads
-    reg [15:0] line_buffer [0:159];  // 160 x 16-bit = 320 x 8-bit indices
-    reg [7:0] write_ptr;    // Write pointer (0-159 for 16-bit words)
+    // Store as 32-bit words matching SDRAM burst width (4 pixels per word).
+    // Previous 160 x 16-bit layout required two writes per cycle (write_ptr and
+    // write_ptr+1), which prevented M10K inference → 160:1 logic mux (~900 ALMs).
+    // 32-bit layout: single write port per cycle → clean M10K dual-port inference.
+    (* ramstyle = "M10K" *) reg [31:0] line_buffer [0:79];   // 80 x 32-bit = 320 x 8-bit indices
+    reg [6:0] write_ptr;    // Write pointer (0-79 for 32-bit words)
 
     // Palette RAM: 256 entries x 24-bit RGB
     // Using inferred dual-port RAM
@@ -110,11 +113,24 @@ module video_scanout_indexed (
     wire in_hactive = (x_count >= VID_H_BPORCH) && (x_count < VID_H_BPORCH + VID_H_ACTIVE);
     wire in_vactive_display = (y_count >= VID_V_BPORCH) && (y_count < VID_V_BPORCH + VID_V_ACTIVE);
 
-    // Read 8-bit index from line buffer
-    // visible_x[8:1] selects 16-bit word, visible_x[0] selects which byte
-    wire [7:0] word_idx = visible_x[8:1];
-    wire [15:0] pixel_word = line_buffer[word_idx];
-    wire [7:0] palette_index = visible_x[0] ? pixel_word[15:8] : pixel_word[7:0];
+    // Read 8-bit index from line buffer (registered for M10K inference)
+    // visible_x[8:2] selects 32-bit word, visible_x[1:0] selects which byte
+    wire [6:0] dword_idx = visible_x[8:2];
+    reg [31:0] pixel_dword;
+    reg [1:0] pixel_byte_sel;
+    always @(posedge clk_video) begin
+        pixel_dword <= line_buffer[dword_idx];
+        pixel_byte_sel <= visible_x[1:0];
+    end
+    reg [7:0] palette_index;
+    always @(*) begin
+        case (pixel_byte_sel)
+            2'd0: palette_index = pixel_dword[7:0];
+            2'd1: palette_index = pixel_dword[15:8];
+            2'd2: palette_index = pixel_dword[23:16];
+            2'd3: palette_index = pixel_dword[31:24];
+        endcase
+    end
 
     // Lookup palette (registered for timing)
     reg [23:0] palette_rgb;
@@ -188,10 +204,9 @@ module video_scanout_indexed (
                     // Write incoming data to line buffer
                     if (burst_data_valid) begin
                         // Each 32-bit word contains 4 palette indices (4 x 8-bit)
-                        // Store as two 16-bit entries in line buffer
-                        line_buffer[write_ptr] <= burst_data[15:0];      // First 2 pixels
-                        line_buffer[write_ptr + 1] <= burst_data[31:16]; // Next 2 pixels
-                        write_ptr <= write_ptr + 2;
+                        // Store directly as one 32-bit entry (single write port → M10K)
+                        line_buffer[write_ptr] <= burst_data;
+                        write_ptr <= write_ptr + 1;
                     end
 
                     if (burst_data_done) begin

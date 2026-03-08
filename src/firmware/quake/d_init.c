@@ -26,7 +26,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 cvar_t	d_subdiv16 = {"d_subdiv16", "1"};
 cvar_t	d_mipcap = {"d_mipcap", "3"};
-cvar_t	d_mipscale = {"d_mipscale", "0.45"};
+cvar_t	d_mipscale = {"d_mipscale", "0.15"};
 
 surfcache_t		*d_initial_rover;
 qboolean		d_roverwrapped;

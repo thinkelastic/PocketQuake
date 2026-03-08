@@ -10,6 +10,9 @@
  *
  * Non-blocking: uses async dataslot_read_start/poll to avoid stalling
  * the CPU during rendering.  At most one DMA completion per frame.
+ *
+ * Music ring buffer is in SRAM (uncached) alongside snd_buffer to avoid
+ * D-cache coherency issues when read from timer ISR context.
  */
 
 #include "quakedef.h"
@@ -20,12 +23,13 @@
 #define TRACK_MIN  2
 #define TRACK_MAX  11
 
-/* Ring buffer: 128KB = 32768 stereo frames (L+R = 4 bytes each) = ~0.74s at 44100 Hz.
- * Large enough to survive level load transitions (~0.5s at 1-2fps).
- * Placed in BSS (SDRAM). Must be power-of-two for masking. */
-#define MUSIC_BUF_FRAMES   32768
+/* Ring buffer: 64KB = 16384 stereo frames (L+R = 4 bytes each) = ~0.37s at 44100 Hz.
+ * In cached SDRAM — all access is from the main loop (no ISR reads), so
+ * D-cache coherency is not an issue.  Must be power-of-two for masking. */
+#define MUSIC_BUF_FRAMES   16384
 #define MUSIC_BUF_MASK     (MUSIC_BUF_FRAMES - 1)
-static short music_buffer[MUSIC_BUF_FRAMES * 2];  /* interleaved L, R */
+static short music_buf_data[MUSIC_BUF_FRAMES * 2] __attribute__((aligned(4)));
+static short * const music_buffer = music_buf_data;
 
 /* Streaming state */
 static int  cd_playing;
@@ -97,13 +101,15 @@ static int CDAudio_Probe(void)
 
 static void CDAudio_CopyChunk(unsigned int frames)
 {
-    volatile short *src = (volatile short *)SDRAM_UNCACHED(DMA_BUFFER);
+    /* Copy DMA buffer (uncached SDRAM) into the cached music ring buffer. */
+    volatile unsigned int *src = (volatile unsigned int *)SDRAM_UNCACHED(DMA_BUFFER);
     unsigned int wp = music_write_pos;
 
     for (unsigned int i = 0; i < frames; i++) {
         unsigned int idx = (wp & MUSIC_BUF_MASK) * 2;
-        music_buffer[idx]     = src[i * 2];
-        music_buffer[idx + 1] = src[i * 2 + 1];
+        unsigned int word = src[i];
+        music_buffer[idx]     = (short)(word & 0xFFFF);
+        music_buffer[idx + 1] = (short)(word >> 16);
         wp++;
     }
 
@@ -217,10 +223,18 @@ void CDAudio_Play(byte track, qboolean looping)
 
     cd_playing = 1;
 
-    /* Pre-fill the buffer (blocking — only at track start, 8 × 16KB = 128KB) */
-    for (int i = 0; i < 8; i++) {
+    /* Pre-fill the buffer (blocking — only at track start).
+     * Reduced from 8 to 4 chunks since buffer is now 64KB (halved).
+     * If the very first read fails, the track file doesn't exist — stop. */
+    for (int i = 0; i < 4; i++) {
         int rc = dataslot_read(cd_slot_id, cd_file_offset, (void *)DMA_BUFFER, MUSIC_DMA_CHUNK);
-        if (rc < 0) break;
+        if (rc < 0) {
+            if (i == 0) {
+                Con_Printf("CD Audio: track %d not found\n", track);
+                cd_playing = 0;
+            }
+            break;
+        }
         CDAudio_CopyChunk(MUSIC_DMA_CHUNK / 4);
         cd_file_offset += MUSIC_DMA_CHUNK;
     }

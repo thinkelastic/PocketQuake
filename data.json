@@ -107,7 +107,6 @@
                 "required": false,
                 "parameters": 0,
                 "extensions": ["bin"],
-                "filename": "cd/Quake (USA) (Track 02).bin",
                 "deferload": true
             },
             {
@@ -116,7 +115,6 @@
                 "required": false,
                 "parameters": 0,
                 "extensions": ["bin"],
-                "filename": "cd/Quake (USA) (Track 03).bin",
                 "deferload": true
             },
             {
@@ -125,7 +123,6 @@
                 "required": false,
                 "parameters": 0,
                 "extensions": ["bin"],
-                "filename": "cd/Quake (USA) (Track 04).bin",
                 "deferload": true
             },
             {
@@ -134,7 +131,6 @@
                 "required": false,
                 "parameters": 0,
                 "extensions": ["bin"],
-                "filename": "cd/Quake (USA) (Track 05).bin",
                 "deferload": true
             },
             {
@@ -143,7 +139,6 @@
                 "required": false,
                 "parameters": 0,
                 "extensions": ["bin"],
-                "filename": "cd/Quake (USA) (Track 06).bin",
                 "deferload": true
             },
             {
@@ -152,7 +147,6 @@
                 "required": false,
                 "parameters": 0,
                 "extensions": ["bin"],
-                "filename": "cd/Quake (USA) (Track 07).bin",
                 "deferload": true
             },
             {
@@ -161,7 +155,6 @@
                 "required": false,
                 "parameters": 0,
                 "extensions": ["bin"],
-                "filename": "cd/Quake (USA) (Track 08).bin",
                 "deferload": true
             },
             {
@@ -170,7 +163,6 @@
                 "required": false,
                 "parameters": 0,
                 "extensions": ["bin"],
-                "filename": "cd/Quake (USA) (Track 09).bin",
                 "deferload": true
             },
             {
@@ -179,7 +171,6 @@
                 "required": false,
                 "parameters": 0,
                 "extensions": ["bin"],
-                "filename": "cd/Quake (USA) (Track 10).bin",
                 "deferload": true
             },
             {
@@ -188,7 +179,6 @@
                 "required": false,
                 "parameters": 0,
                 "extensions": ["bin"],
-                "filename": "cd/Quake (USA) (Track 11).bin",
                 "deferload": true
             },
             {

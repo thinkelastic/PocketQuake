@@ -13,6 +13,46 @@
             {
                 "id": 2,
                 "filename": "pak1.pak"
+            },
+            {
+                "id": 10,
+                "filename": "cd/Quake (USA) (Track 02).bin"
+            },
+            {
+                "id": 11,
+                "filename": "cd/Quake (USA) (Track 03).bin"
+            },
+            {
+                "id": 12,
+                "filename": "cd/Quake (USA) (Track 04).bin"
+            },
+            {
+                "id": 13,
+                "filename": "cd/Quake (USA) (Track 05).bin"
+            },
+            {
+                "id": 14,
+                "filename": "cd/Quake (USA) (Track 06).bin"
+            },
+            {
+                "id": 15,
+                "filename": "cd/Quake (USA) (Track 07).bin"
+            },
+            {
+                "id": 16,
+                "filename": "cd/Quake (USA) (Track 08).bin"
+            },
+            {
+                "id": 17,
+                "filename": "cd/Quake (USA) (Track 09).bin"
+            },
+            {
+                "id": 18,
+                "filename": "cd/Quake (USA) (Track 10).bin"
+            },
+            {
+                "id": 19,
+                "filename": "cd/Quake (USA) (Track 11).bin"
             }
         ]
     }

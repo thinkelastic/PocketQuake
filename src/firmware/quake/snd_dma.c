@@ -24,6 +24,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 void S_PaintChannels(int endtime);
 void SND_InitScaletable(void);
 void SNDDMA_Submit(void);
+void SNDDMA_FillRing(void);
 
 // ====================================================================
 // Globals
@@ -43,7 +44,7 @@ vec3_t      listener_forward;
 vec3_t      listener_right;
 vec3_t      listener_up;
 
-int         paintedtime;    // sample PAIRS
+int         paintedtime __attribute__((section(".fastdata")));    // sample PAIRS — in BRAM for ISR access
 static int  soundtime;      // position in mono samples that hardware has played
 
 int         s_rawend;
@@ -573,7 +574,10 @@ void S_Update(vec3_t origin, vec3_t forward, vec3_t right, vec3_t up)
 
     S_PaintChannels(endtime);
 
-    SNDDMA_Submit();
+    if (audio_timer_active)
+        SNDDMA_FillRing();
+    else
+        SNDDMA_Submit();
 }
 
 void S_ExtraUpdate(void)
@@ -581,7 +585,10 @@ void S_ExtraUpdate(void)
     if (!sound_started)
         return;
 
-    SNDDMA_Submit();
+    if (audio_timer_active)
+        SNDDMA_FillRing();
+    else
+        SNDDMA_Submit();
 }
 
 void S_LocalSound(char *sound)

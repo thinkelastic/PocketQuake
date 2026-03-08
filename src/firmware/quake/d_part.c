@@ -88,6 +88,8 @@ PQ_FASTTEXT void D_DrawParticle (particle_t *pparticle)
 	pdest = d_viewbuffer + d_scantable[v] + u;
 	izi = (int)(zi * 0x8000);
 
+	byte color = (byte)pparticle->color;
+
 	pix = izi >> d_pix_shift;
 
 	if (pix < d_pix_min)
@@ -105,7 +107,7 @@ PQ_FASTTEXT void D_DrawParticle (particle_t *pparticle)
 			if (pz[0] <= izi)
 			{
 				pz[0] = izi;
-				pdest[0] = pparticle->color;
+				pdest[0] = color;
 			}
 		}
 		break;
@@ -118,13 +120,13 @@ PQ_FASTTEXT void D_DrawParticle (particle_t *pparticle)
 			if (pz[0] <= izi)
 			{
 				pz[0] = izi;
-				pdest[0] = pparticle->color;
+				pdest[0] = color;
 			}
 
 			if (pz[1] <= izi)
 			{
 				pz[1] = izi;
-				pdest[1] = pparticle->color;
+				pdest[1] = color;
 			}
 		}
 		break;
@@ -137,19 +139,19 @@ PQ_FASTTEXT void D_DrawParticle (particle_t *pparticle)
 			if (pz[0] <= izi)
 			{
 				pz[0] = izi;
-				pdest[0] = pparticle->color;
+				pdest[0] = color;
 			}
 
 			if (pz[1] <= izi)
 			{
 				pz[1] = izi;
-				pdest[1] = pparticle->color;
+				pdest[1] = color;
 			}
 
 			if (pz[2] <= izi)
 			{
 				pz[2] = izi;
-				pdest[2] = pparticle->color;
+				pdest[2] = color;
 			}
 		}
 		break;
@@ -162,25 +164,25 @@ PQ_FASTTEXT void D_DrawParticle (particle_t *pparticle)
 			if (pz[0] <= izi)
 			{
 				pz[0] = izi;
-				pdest[0] = pparticle->color;
+				pdest[0] = color;
 			}
 
 			if (pz[1] <= izi)
 			{
 				pz[1] = izi;
-				pdest[1] = pparticle->color;
+				pdest[1] = color;
 			}
 
 			if (pz[2] <= izi)
 			{
 				pz[2] = izi;
-				pdest[2] = pparticle->color;
+				pdest[2] = color;
 			}
 
 			if (pz[3] <= izi)
 			{
 				pz[3] = izi;
-				pdest[3] = pparticle->color;
+				pdest[3] = color;
 			}
 		}
 		break;
@@ -195,7 +197,7 @@ PQ_FASTTEXT void D_DrawParticle (particle_t *pparticle)
 				if (pz[i] <= izi)
 				{
 					pz[i] = izi;
-					pdest[i] = pparticle->color;
+					pdest[i] = color;
 				}
 			}
 		}

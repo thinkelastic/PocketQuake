@@ -526,7 +526,7 @@ wire        atm_busy;
 // Audio output interface (between cpu_system and audio_output)
 wire        audio_sample_wr;
 wire [31:0] audio_sample_data;
-wire [11:0] audio_fifo_level;
+wire [10:0] audio_fifo_level;
 wire        audio_fifo_full;
 
 // Link MMIO register interface (between cpu_system and link_mmio)
@@ -1481,6 +1481,9 @@ assign video_hs = vidout_hs;
     wire display_mode;
     wire [24:0] fb_display_addr;
 
+    // Timer interrupt (from axi_periph_slave mtimecmp comparator)
+    wire timer_irq;
+
     // VexiiRiscv CPU system - running at 100 MHz (CPU + memory)
     // Pure bus routing: VexiiRiscv → arbiter → {SDRAM, PSRAM, Local} AXI4 masters
     cpu_system cpu (
@@ -1545,7 +1548,8 @@ assign video_hs = vidout_hs;
         .m_local_wstrb(cpu_m_local_wstrb),
         .m_local_wlast(cpu_m_local_wlast),
         .m_local_bvalid(cpu_m_local_bvalid),
-        .m_local_bresp(cpu_m_local_bresp)
+        .m_local_bresp(cpu_m_local_bresp),
+        .timer_irq(timer_irq)
     );
 
     // AXI4 peripheral slave: BRAM, colormap, system registers, CDC, terminal,
@@ -1681,7 +1685,8 @@ assign video_hs = vidout_hs;
         .scanline_reg_rd(scanline_reg_rd),
         .scanline_reg_addr(scanline_reg_addr),
         .scanline_reg_wdata(scanline_reg_wdata),
-        .scanline_reg_rdata(scanline_reg_rdata)
+        .scanline_reg_rdata(scanline_reg_rdata),
+        .timer_irq(timer_irq)
     );
 
     // Slave → io_sdram pulse adapter: axi_sdram_slave holds rd/wr high until
