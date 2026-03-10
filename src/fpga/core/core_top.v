@@ -239,15 +239,15 @@ assign bridge_endian_little = 1;
 // ============================================================
 
 //Pocket Menu settings
-reg [13:0] analogizer_settings = 0;
-//wire [13:0] analogizer_settings_s;
+reg [31:0] analogizer_settings;
+//wire [31:0] analogizer_settings_s;
 
 reg analogizer_ena;
 reg [3:0] analogizer_video_type;
 reg [4:0] snac_game_cont_type /* synthesis keep */;
 reg [3:0] snac_cont_assignment /* synthesis keep */;
 
-//synch_3 #(.WIDTH(14)) sync_analogizer(analogizer_settings, analogizer_settings_s, clk_core_49152);
+//synch_3 #(.WIDTH(32)) sync_analogizer(analogizer_settings, analogizer_settings_s, clk_core_49152);
 
   //create aditional switch to blank Pocket screen.
   //assign video_rgb = (analogizer_video_type[3]) ? 24'h000000: video_rgb_reg;
@@ -257,6 +257,7 @@ always @(*) begin
   snac_cont_assignment  = analogizer_settings[9:6];
   analogizer_video_type = analogizer_settings[13:10];
 end 
+
 //use PSX Dual Shock style left analog stick as directional pad
 wire is_analog_input = (snac_game_cont_type == 5'h13);
 // Interact variable: SNAC adapter type (bridge address 0xF0000000)
@@ -280,39 +281,30 @@ wire PALFLAG;
 
 parameter NTSC_REF = 3.579545;   
 parameter PAL_REF = 4.43361875;
-// Colorburst Lenth Calculation to send to Y/C Module, based on the CLK_VIDEO of the core
-localparam [6:0] COLORBURST_START = (3.7 * (CLK_VIDEO_NTSC/NTSC_REF));
-localparam [9:0] COLORBURST_NTSC_END = (9 * (CLK_VIDEO_NTSC/NTSC_REF)) + COLORBURST_START;
-localparam [9:0] COLORBURST_PAL_END = (10 * (CLK_VIDEO_PAL/PAL_REF)) + COLORBURST_START;
 
 // Parameters to be modifed
-parameter CLK_VIDEO_NTSC = 48; 
-parameter CLK_VIDEO_PAL  = 48; 
+parameter CLK_VIDEO_NTSC = 49.152; 
+parameter CLK_VIDEO_PAL  = 49.152; 
 
-localparam [39:0] NTSC_PHASE_INC = 40'd81994819784;  //print(round(3.579545 * 2**40 / 48.0)) 
-localparam [39:0] PAL_PHASE_INC =  40'd101558653516; //print(round(4.43361875 * 2**40 / 48.0)) 
+localparam [39:0] NTSC_PHASE_INC = 40'd80073066196;  //print(round(3.579545 * 2**40 / 49.152)) 
+localparam [39:0] PAL_PHASE_INC =  40'd99178372574; //print(round(4.43361875 * 2**40 / 49.152)) 
 
 assign CHROMA_PHASE_INC = ((analogizer_video_type == 4'h4)|| (analogizer_video_type == 4'hC)) ? PAL_PHASE_INC : NTSC_PHASE_INC; 
 assign PALFLAG = (analogizer_video_type == 4'h4) || (analogizer_video_type == 4'hC); 
-assign CHROMA_ADD = 5'd0;
-assign CHROMA_MULT = 5'd0;
-//assign CHROMA_ADD = 5'd0;
-//assign CHROMA_MULT = 5'd0;
-assign COLORBURST_RANGE = {COLORBURST_START, COLORBURST_NTSC_END, COLORBURST_PAL_END}; // Pass colorburst length
 
 
 // Directly pass analog_video_type=0 (ACCENT_ACCENT=ACCENT_ACCENT) to disable video output (SNAC only for now)
 // Video output through the Analogizer can be wired up later if desired.
 openFPGA_Pocket_Analogizer #(
-    .MASTER_CLK_FREQ(48_000_000),
+    .MASTER_CLK_FREQ(49_152_000),
     .LINE_LENGTH(640)
 ) analogizer (
-    .i_clk(clk_core_49152),
+    .i_clk(clk_core_49152), //currently 50MHz
     .i_rst(~reset_n),
     .i_ena(1'b1),
     // Video interface (active but directly from our pipeline)
-    .video_clk(clk_core_12288),
-    .analog_video_type(4'h0),       // 0 RGBS
+    .video_clk(clk_core_12288), ////currently 12.25MHz
+    .analog_video_type(analogizer_video_type),       // 0 RGBS
     .R(vidout_rgb[23:16]),
     .G(vidout_rgb[15:8]),
     .B(vidout_rgb[7:0]),
@@ -815,31 +807,32 @@ assign vpll_feed = 1'bZ;
 
 always @(*) begin
     casex(bridge_addr)
-    default: begin
-        bridge_rd_data <= 0;
-    end
     32'b000000xx_xxxxxxxx_xxxxxxxx_xxxxxxxx: begin
         // SDRAM mapped at 0x00000000 - 0x03FFFFFF (64MB)
         bridge_rd_data <= bridge_rd_data_captured;
     end
-    32'hF0000000: begin 
-        bridge_rd_data <= {18'h0,analogizer_settings};
+    32'hF7000000: begin 
+        bridge_rd_data <= {analogizer_settings[7:0],analogizer_settings[15:8],analogizer_settings[23:16],analogizer_settings[31:24]};
       end
     32'hF8xxxxxx: begin
         bridge_rd_data <= cmd_bridge_rd_data;
+    end
+        default: begin
+        bridge_rd_data <= 0;
     end
     endcase
 end
 
 // Interact variable writes (SNAC adapter type from APF menu)
-always @(posedge clk_74a or negedge reset_n) begin
-    if (~reset_n) begin
-        //analogizer_snac_type <= 32'h0;  // default: disabled
-    end else if (bridge_wr && bridge_addr[31:24] == 8'hF0) begin
-        case (bridge_addr[3:0])
-            4'h0: analogizer_settings       <=  bridge_wr_data[13:0];
-            default: ;
-        endcase
+always @(posedge clk_74a) begin
+	if (bridge_wr) begin
+      casex (bridge_addr)
+        32'hF7000000: analogizer_settings <= {
+        bridge_wr_data[7:0], 
+        bridge_wr_data[15:8], 
+        bridge_wr_data[23:16], 
+        bridge_wr_data[31:24]};
+      endcase
     end
 end
 
@@ -1988,7 +1981,7 @@ assign video_hs = vidout_hs;
     wire        video_burst_data_valid;
     wire        video_burst_data_done;
 
-    video_CRT_scanout_indexed scanout (
+    video_CRT_scanout_indexed_BRAM scanout (
         // Video clock domain (12.288 MHz)
         .clk_video(clk_core_12288),
         .reset_n(reset_n),

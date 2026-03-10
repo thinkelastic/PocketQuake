@@ -12,7 +12,7 @@
 # or its authorized distributors. Please refer to the applicable 
 # agreement for further details.
 
-# ACDS 25.1 1129 linux 2026.03.09.22:05:32
+# ACDS 25.1 1129 linux 2026.03.10.13:41:57
 
 # ----------------------------------------
 # vcsmx - auto-generated simulation script
@@ -107,7 +107,7 @@
 # within the Quartus project, and generate a unified
 # script which supports all the Altera IP within the design.
 # ----------------------------------------
-# ACDS 25.1 1129 linux 2026.03.09.22:05:32
+# ACDS 25.1 1129 linux 2026.03.10.13:41:57
 # ----------------------------------------
 # initialize variables
 TOP_LEVEL_NAME="mf_pllbase"

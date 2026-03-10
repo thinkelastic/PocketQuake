@@ -1,93 +1,93 @@
 {
-    "interact": {
-        "magic": "APF_VER_1",
-        "variables": [
+  "interact": {
+      "magic": "APF_VER_1",
+      "variables": [
+        {
+          "name": "SNAC Adapter",
+          "id": 40,
+          "type": "list",
+          "enabled": true,
+          "persist": true,
+          "address": "0xF7000000",
+          "defaultval": "0x00",
+          "mask": "0xFFFFFFE0",
+          "options": [
             {
-        "name": "SNAC Adapter",
-        "id": 40,
-        "type": "list",
-        "enabled": true,
-        "persist": true,
-        "address": "0xF0000000",
-        "defaultval": "0x00",
-        "mask": "0xFFFFFFE0",
-        "options": [
-          {
-          "value": "0x00",
-          "name": "None"
-          },
-          {
-          "value": "0x03",
-          "name": "SNES"
-          },
-          {
-            "value": "0x0B",
-            "name": "SNES A,B<->X,Y"
-          },
-          {
-            "value": "0x11",
-            "name": "PSX (Digital DPAD)"
-          },
-          {
-            "value": "0x13",
-            "name": "PSX (Analog DPAD)"
-          }
-        ]
-    },
-			{
-				"name": "SNAC Controller Assignment",
-				"id": 50,
-				"type": "list",
-				"enabled": true,
-				"persist": true,
-				"address": "0xF0000000",
-				"defaultval": "0x00",
-				"mask": "0xFFFFFC3F",
-				"options": [
-					{
-					  "value": "0x0",
-					  "name": "SNAC -> P1"
-					},
-					{
-					  "value": "0x40",
-					  "name": "SNAC -> P2"
-					},
-					{
-					  "value": "0x80",
-					  "name": "SNAC P1,P2->P1,P2"
-					},
-					{
-					  "value": "0xC0",
-					  "name": "SNAC P1,P2->P2,P1"
-					},
-					{
-					  "value": "0x200",
-					  "name": "SNAC P1,P2->P3,P4"
-					},
-					{
-					  "value": "0x100",
-					  "name": "SNAC P1-P4->P1-P4"
-					},
-					{
-					  "value": "0x140",
-					  "name": "SNAC P1-P2->P1-P2"
-					},
-					{
-					  "value": "0x180",
-					  "name": "SNAC P1-P2->P3-P4"
-					}
-				]
-			},
-		  {
-        "name": "Analogizer Video Out",
-        "id": 60,
-        "type": "list",
-        "enabled": true,
-        "persist": true,
-        "address": "0xF0000000",
-        "defaultval": "0x0",
-        "mask": "0xFFFFC3FF",
-        "options": [
+            "value": "0x00",
+            "name": "None"
+            },
+            {
+            "value": "0x03",
+            "name": "SNES"
+            },
+            {
+              "value": "0x0B",
+              "name": "SNES A,B<->X,Y"
+            },
+            {
+              "value": "0x11",
+              "name": "PSX (Digital DPAD)"
+            },
+            {
+              "value": "0x13",
+              "name": "PSX (Analog DPAD)"
+            }
+          ]
+        },
+        {
+          "name": "SNAC Controller Assignment",
+          "id": 50,
+          "type": "list",
+          "enabled": true,
+          "persist": true,
+          "address": "0xF7000000",
+          "defaultval": "0x00",
+          "mask": "0xFFFFFC3F",
+          "options": [
+            {
+              "value": "0x0",
+              "name": "SNAC -> P1"
+            },
+            {
+              "value": "0x40",
+              "name": "SNAC -> P2"
+            },
+            {
+              "value": "0x80",
+              "name": "SNAC P1,P2->P1,P2"
+            },
+            {
+              "value": "0xC0",
+              "name": "SNAC P1,P2->P2,P1"
+            },
+            {
+              "value": "0x200",
+              "name": "SNAC P1,P2->P3,P4"
+            },
+            {
+              "value": "0x100",
+              "name": "SNAC P1-P4->P1-P4"
+            },
+            {
+              "value": "0x140",
+              "name": "SNAC P1-P2->P1-P2"
+            },
+            {
+              "value": "0x180",
+              "name": "SNAC P1-P2->P3-P4"
+            }
+          ]
+        },
+        {
+          "name": "Analogizer Video Out",
+          "id": 60,
+          "type": "list",
+          "enabled": true,
+          "persist": true,
+          "address": "0xF7000000",
+          "defaultval": "0x0",
+          "mask": "0xFFFFC3FF",
+          "options": [
           {
             "value": "0x0",
             "name": "RGBS"
@@ -152,8 +152,8 @@
               "name": "SC HQ2x RGBHV,Pocket OFF"
           }
         ]
-    }
-        ],
-        "messages": []
-    }
+      }
+    ],
+  "messages": []
+  }
 }

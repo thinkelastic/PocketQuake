@@ -741,6 +741,8 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to bridge_spimosi
 # periph_sdram_mux.v removed — replaced by axi_sdram_arbiter + axi_word_master
 
 
+set_global_assignment -name VERILOG_FILE analogizer/rgb2YPbPr.v
+set_global_assignment -name VERILOG_FILE core/video_CRT_scanout_indexed_BRAM.v
 set_global_assignment -name QIP_FILE analogizer/analogizer.qip
 set_global_assignment -name VERILOG_FILE core/video_CRT_scanout_indexed.v
 set_global_assignment -name QIP_FILE apf/apf.qip

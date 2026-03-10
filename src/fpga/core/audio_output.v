@@ -53,11 +53,11 @@ dcfifo dcfifo_audio (
     .aclr    (~reset_n)
 );
 defparam dcfifo_audio.intended_device_family = "Cyclone V",
-    dcfifo_audio.lpm_numwords  = 2048,
+    dcfifo_audio.lpm_numwords  = 4096,
     dcfifo_audio.lpm_showahead = "OFF",
     dcfifo_audio.lpm_type      = "dcfifo",
     dcfifo_audio.lpm_width     = 32,
-    dcfifo_audio.lpm_widthu    = 11,
+    dcfifo_audio.lpm_widthu    = 12,
     dcfifo_audio.overflow_checking  = "ON",
     dcfifo_audio.underflow_checking = "ON",
     dcfifo_audio.rdsync_delaypipe   = 5,
