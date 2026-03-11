@@ -94,7 +94,7 @@
 # within the Quartus project, and generate a unified
 # script which supports all the Altera IP within the design.
 # ----------------------------------------
-# ACDS 25.1 1129 linux 2026.02.04.21:18:18
+# ACDS 25.1 1129 linux 2026.03.10.13:41:57
 
 # ----------------------------------------
 # Initialize variables
@@ -113,7 +113,7 @@ if ![info exists QSYS_SIMDIR] {
 }
 
 if ![info exists QUARTUS_INSTALL_DIR] { 
-  set QUARTUS_INSTALL_DIR "$::env(HOME)/altera_lite/25.1std/quartus/"
+  set QUARTUS_INSTALL_DIR "/home/javier/altera_lite/25.1std/quartus/"
 }
 
 if ![info exists USER_DEFINED_COMPILE_OPTIONS] { 

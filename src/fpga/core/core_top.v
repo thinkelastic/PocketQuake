@@ -237,6 +237,29 @@ assign bridge_endian_little = 1;
 // ============================================================
 // Analogizer adapter (optional, directly controls cart port)
 // ============================================================
+
+//Pocket Menu settings
+reg [31:0] analogizer_settings;
+//wire [31:0] analogizer_settings_s;
+
+reg analogizer_ena;
+reg [3:0] analogizer_video_type;
+reg [4:0] snac_game_cont_type /* synthesis keep */;
+reg [3:0] snac_cont_assignment /* synthesis keep */;
+
+//synch_3 #(.WIDTH(32)) sync_analogizer(analogizer_settings, analogizer_settings_s, clk_core_49152);
+
+  //create aditional switch to blank Pocket screen.
+  //assign video_rgb = (analogizer_video_type[3]) ? 24'h000000: video_rgb_reg;
+
+always @(*) begin
+  snac_game_cont_type   = analogizer_settings[4:0];
+  snac_cont_assignment  = analogizer_settings[9:6];
+  analogizer_video_type = analogizer_settings[13:10];
+end 
+
+//use PSX Dual Shock style left analog stick as directional pad
+wire is_analog_input = (snac_game_cont_type == 5'h13);
 // Interact variable: SNAC adapter type (bridge address 0xF0000000)
 reg [31:0] analogizer_snac_type;
 wire [15:0] snac_p1_btn;
@@ -246,37 +269,61 @@ wire [31:0] snac_p2_joy;
 wire [15:0] snac_p3_btn;
 wire [15:0] snac_p4_btn;
 
+// Video Y/C Encoder settings
+// Follows the Mike Simone Y/C encoder settings:
+// https://github.com/MikeS11/MiSTerFPGA_YC_Encoder
+// SET PAL and NTSC TIMING and pass through status bits. ** YC must be enabled in the qsf file **
+wire [39:0] CHROMA_PHASE_INC;
+wire [26:0] COLORBURST_RANGE;
+wire [4:0] CHROMA_ADD;
+wire [4:0] CHROMA_MULT;
+wire PALFLAG;
+
+parameter NTSC_REF = 3.579545;   
+parameter PAL_REF = 4.43361875;
+
+// Parameters to be modifed
+parameter CLK_VIDEO_NTSC = 49.152; 
+parameter CLK_VIDEO_PAL  = 49.152; 
+
+localparam [39:0] NTSC_PHASE_INC = 40'd80073066196;  //print(round(3.579545 * 2**40 / 49.152)) 
+localparam [39:0] PAL_PHASE_INC =  40'd99178372574; //print(round(4.43361875 * 2**40 / 49.152)) 
+
+assign CHROMA_PHASE_INC = ((analogizer_video_type == 4'h4)|| (analogizer_video_type == 4'hC)) ? PAL_PHASE_INC : NTSC_PHASE_INC; 
+assign PALFLAG = (analogizer_video_type == 4'h4) || (analogizer_video_type == 4'hC); 
+
+
 // Directly pass analog_video_type=0 (ACCENT_ACCENT=ACCENT_ACCENT) to disable video output (SNAC only for now)
 // Video output through the Analogizer can be wired up later if desired.
 openFPGA_Pocket_Analogizer #(
-    .MASTER_CLK_FREQ(50_000_000),
-    .LINE_LENGTH(400)
+    .MASTER_CLK_FREQ(49_152_000),
+    .LINE_LENGTH(640)
 ) analogizer (
-    .i_clk(clk_74a),
+    .i_clk(clk_core_49152), //currently 50MHz
     .i_rst(~reset_n),
     .i_ena(1'b1),
     // Video interface (active but directly from our pipeline)
-    .video_clk(clk_core_12288),
-    .analog_video_type(4'h0),       // 0 = no analog video output
+    .video_clk(clk_core_12288), ////currently 12.25MHz
+    .analog_video_type(analogizer_video_type),       // 0 RGBS
     .R(vidout_rgb[23:16]),
     .G(vidout_rgb[15:8]),
     .B(vidout_rgb[7:0]),
-    .Hblank(~vidout_de),
-    .Vblank(vidout_vs),
-    .BLANKn(vidout_de),
-    .Hsync(vidout_hs),
-    .Vsync(vidout_vs),
-    .Csync(~(vidout_hs ^ vidout_vs)),
+    .Hblank(crt_hblank),
+    .Vblank(crt_vblank),
+    .BLANKn(crt_blankn),
+    .Hsync(crt_hs),
+    .Vsync(crt_vs),
+    .Csync(crt_csync ),
     // Y/C encoder (unused)
-    .CHROMA_PHASE_INC(40'd0),
-    .PALFLAG(1'b0),
+    .CHROMA_PHASE_INC(CHROMA_PHASE_INC),
+    .PALFLAG(PALFLAG),
     // Scandoubler (unused)
     .ce_pix(1'b1),
     .scandoubler(1'b0),
-    .fx(3'd0),
+    .fx(3'd0), //0 disable, 1 scanlines 25%, 2 scanlines 50%, 3 scanlines 75%, 4 hq2x
     // SNAC controller interface
-    .conf_AB(analogizer_snac_type[5]),
-    .game_cont_type(analogizer_snac_type[4:0]),
+    .conf_AB(snac_game_cont_type >= 5'd16),  //0 conf. A(default), 1 conf. B (see graph above)
+    .game_cont_type(snac_game_cont_type),
     .p1_btn_state(snac_p1_btn),
     .p1_joy_state(snac_p1_joy),
     .p2_btn_state(snac_p2_btn),
@@ -760,35 +807,32 @@ assign vpll_feed = 1'bZ;
 
 always @(*) begin
     casex(bridge_addr)
-    default: begin
-        bridge_rd_data <= 0;
-    end
     32'b000000xx_xxxxxxxx_xxxxxxxx_xxxxxxxx: begin
         // SDRAM mapped at 0x00000000 - 0x03FFFFFF (64MB)
         bridge_rd_data <= bridge_rd_data_captured;
     end
-    32'hF0xxxxxx: begin
-        // Interact variables (settings from APF menu)
-        case (bridge_addr[3:0])
-            4'h0: bridge_rd_data <= analogizer_snac_type;
-            default: bridge_rd_data <= 32'h0;
-        endcase
-    end
+    32'hF7000000: begin 
+        bridge_rd_data <= {analogizer_settings[7:0],analogizer_settings[15:8],analogizer_settings[23:16],analogizer_settings[31:24]};
+      end
     32'hF8xxxxxx: begin
         bridge_rd_data <= cmd_bridge_rd_data;
+    end
+        default: begin
+        bridge_rd_data <= 0;
     end
     endcase
 end
 
 // Interact variable writes (SNAC adapter type from APF menu)
-always @(posedge clk_74a or negedge reset_n) begin
-    if (~reset_n) begin
-        analogizer_snac_type <= 32'h0;  // default: disabled
-    end else if (bridge_wr && bridge_addr[31:24] == 8'hF0) begin
-        case (bridge_addr[3:0])
-            4'h0: analogizer_snac_type <= bridge_wr_data;
-            default: ;
-        endcase
+always @(posedge clk_74a) begin
+	if (bridge_wr) begin
+      casex (bridge_addr)
+        32'hF7000000: analogizer_settings <= {
+        bridge_wr_data[7:0], 
+        bridge_wr_data[15:8], 
+        bridge_wr_data[23:16], 
+        bridge_wr_data[31:24]};
+      endcase
     end
 end
 
@@ -1406,8 +1450,6 @@ assign video_hs = vidout_hs;
     reg [9:0]   x_count;
     reg [9:0]   y_count;
 
-    wire [9:0]  visible_x = x_count - VID_H_BPORCH;
-    wire [9:0]  visible_y = y_count - VID_V_BPORCH;
 
     reg [23:0]  vidout_rgb;
     reg         vidout_de, vidout_de_1;
@@ -1905,7 +1947,7 @@ assign video_hs = vidout_hs;
         .clk(clk_core_12288),
         .clk_cpu(clk_cpu),  // CPU clock for memory interface (100 MHz)
         .reset_n(reset_n),
-        .pixel_x(visible_x),
+        .pixel_x({visible_x[9],visible_x[9:1]}), //RndMnkIII: For CRT I doubled the x resolution
         .pixel_y(visible_y),
         .pixel_color(terminal_pixel_color),
         .mem_valid(term_mem_valid),
@@ -1939,7 +1981,7 @@ assign video_hs = vidout_hs;
     wire        video_burst_data_valid;
     wire        video_burst_data_done;
 
-    video_scanout_indexed scanout (
+    video_CRT_scanout_indexed_BRAM scanout (
         // Video clock domain (12.288 MHz)
         .clk_video(clk_core_12288),
         .reset_n(reset_n),
@@ -1964,6 +2006,28 @@ assign video_hs = vidout_hs;
         .pal_data(cpu_pal_data)
     );
 
+
+
+// ---  CRT 15.7kHz / 60Hz Parameters ---
+localparam CRT_V_TOTAL  = CRT_V_SYNC + CRT_V_BPORCH + CRT_V_ACTIVE + CRT_V_FPORCH;
+localparam CRT_V_SYNC   = 3;
+localparam CRT_V_BPORCH = 15;
+localparam CRT_V_FPORCH = 4;
+localparam CRT_V_ACTIVE = 240;
+localparam CRT_H_TOTAL  = CRT_H_SYNC + CRT_H_BPORCH + CRT_H_ACTIVE + CRT_H_FPORCH;
+localparam CRT_H_SYNC   = 58;
+localparam CRT_H_BPORCH = 62;
+localparam CRT_H_FPORCH = 20;
+localparam CRT_H_ACTIVE = 640;
+reg crt_hs, crt_vs, crt_de;
+reg crt_hblank, crt_vblank;
+wire crt_csync;
+wire crt_blankn;
+
+
+wire [9:0]  visible_x = x_count - CRT_H_SYNC - CRT_H_BPORCH;
+wire [9:0]  visible_y = y_count - CRT_V_SYNC - CRT_V_BPORCH;
+
 always @(posedge clk_core_12288 or negedge reset_n) begin
 
     if(~reset_n) begin
@@ -1982,16 +2046,27 @@ always @(posedge clk_core_12288 or negedge reset_n) begin
 
         // x and y counters
         x_count <= x_count + 1'b1;
-        if(x_count == VID_H_TOTAL-1) begin
+        if(x_count == CRT_H_TOTAL-1) begin
             x_count <= 0;
 
             y_count <= y_count + 1'b1;
-            if(y_count == VID_V_TOTAL-1) begin
+            if(y_count == CRT_V_TOTAL-1) begin
                 y_count <= 0;
             end
         end
 
-        // generate sync
+        // CRT Blank
+        crt_hblank <= x_count < (CRT_H_SYNC + CRT_H_BPORCH) || (x_count >= CRT_H_SYNC + CRT_H_BPORCH + CRT_H_ACTIVE);
+        crt_vblank <= y_count < (CRT_V_SYNC + CRT_V_BPORCH) || (y_count >= CRT_V_SYNC + CRT_V_BPORCH + CRT_V_ACTIVE);
+
+        // Generate CRT sync
+        // --- Generación de Syncs (Lógica Negativa) ---
+
+        crt_hs <= (x_count >= 0) && (x_count < CRT_H_SYNC);
+        crt_vs <= (y_count >= 0) && (y_count < CRT_V_SYNC);
+
+
+        // Generate Pocket sync
         if(x_count == 0 && y_count == 0) begin
             // sync signal in back porch
             // new frame
@@ -2007,10 +2082,11 @@ always @(posedge clk_core_12288 or negedge reset_n) begin
 
         // inactive screen areas are black
         vidout_rgb <= 24'h0;
-        // generate active video
-        if(x_count >= VID_H_BPORCH && x_count < VID_H_ACTIVE+VID_H_BPORCH) begin
 
-            if(y_count >= VID_V_BPORCH && y_count < VID_V_ACTIVE+VID_V_BPORCH) begin
+        // generate active video, now accounts for CRT specific timings but making compatible with Analogue Pocket video also
+        if(x_count >= CRT_H_SYNC + CRT_H_BPORCH  && x_count < CRT_H_SYNC + CRT_H_BPORCH + CRT_H_ACTIVE) begin
+
+            if(y_count >= CRT_V_SYNC + CRT_V_BPORCH && y_count < CRT_V_SYNC + CRT_V_BPORCH + CRT_V_ACTIVE) begin
                 // data enable. this is the active region of the line
                 vidout_de <= 1;
 
@@ -2030,8 +2106,8 @@ always @(posedge clk_core_12288 or negedge reset_n) begin
     end
 end
 
-
-
+assign crt_csync = ~(crt_hs ^ crt_vs);
+assign crt_blankn   = ~(crt_hblank | crt_vblank);
 
 //
 // Link MMIO peripheral (FIFO + synchronous SCK/SO/SI PHY)
@@ -2087,6 +2163,7 @@ audio_output audio_out (
 
     wire    clk_core_12288;
     wire    clk_core_12288_90deg;
+    wire    clk_core_49152;
     wire    clk_cpu;            // CPU clock (100 MHz)
     wire    clk_ram_controller; // 100 MHz SDRAM controller clock
     wire    clk_ram_chip;       // 100 MHz SDRAM chip clock (phase shifted)
@@ -2104,7 +2181,7 @@ mf_pllbase mp1 (
     .outclk_0       ( clk_core_12288 ),
     .outclk_1       ( clk_core_12288_90deg ),
 
-    .outclk_2       ( ),                    // 33 MHz (unused)
+    .outclk_2       ( clk_core_49152),       //x4 video freq for SVGA Scandoubler and YC encoder
     .outclk_3       ( ),                    // 66 MHz (unused)
     .outclk_4       ( ),                    // 66 MHz (unused)
 

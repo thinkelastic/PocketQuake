@@ -12,7 +12,7 @@
 # or its authorized distributors. Please refer to the applicable 
 # agreement for further details.
 
-# ACDS 25.1 1129 linux 2026.02.04.21:18:18
+# ACDS 25.1 1129 linux 2026.03.10.13:41:57
 
 # ----------------------------------------
 # vcs - auto-generated simulation script
@@ -94,12 +94,12 @@
 # within the Quartus project, and generate a unified
 # script which supports all the Altera IP within the design.
 # ----------------------------------------
-# ACDS 25.1 1129 linux 2026.02.04.21:18:18
+# ACDS 25.1 1129 linux 2026.03.10.13:41:57
 # ----------------------------------------
 # initialize variables
 TOP_LEVEL_NAME="mf_pllbase"
 QSYS_SIMDIR="./../../"
-QUARTUS_INSTALL_DIR="${QUARTUS_ROOTDIR:-$HOME/altera_lite/25.1std/quartus}/"
+QUARTUS_INSTALL_DIR="/home/javier/altera_lite/25.1std/quartus/"
 SKIP_FILE_COPY=0
 SKIP_SIM=0
 USER_DEFINED_ELAB_OPTIONS=""

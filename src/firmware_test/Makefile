@@ -2,7 +2,7 @@
 # Builds into BRAM (64KB), uses terminal for output
 
 # Toolchain
-CROSS = riscv64-elf-
+CROSS = riscv64-unknown-elf-
 CC = $(CROSS)gcc
 AS = $(CROSS)gcc
 LD = $(CROSS)gcc

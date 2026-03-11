@@ -309,9 +309,9 @@ void IN_Move(usercmd_t *cmd)
     snac_joy = SNAC1_JOY;
     if (snac_joy != 0x80808080u && snac_joy != 0u) {
         snac_lx = (int)(snac_joy & 0xFF) - 128;
-        snac_ly = (int)((snac_joy >> 8) & 0xFF) - 128;
+        snac_ly = (int)((snac_joy >> 8) & 0xFF) - 128; 
         if (snac_lx > 16 || snac_lx < -16) lstick_x += snac_lx;
-        if (snac_ly > 16 || snac_ly < -16) lstick_y += snac_ly;
+        if (snac_ly > 16 || snac_ly < -16) lstick_y -= snac_ly; /* fix up-down movement*/
 
         /* Right stick for look (view angles) */
         snac_rx = (int)((snac_joy >> 16) & 0xFF) - 128;
