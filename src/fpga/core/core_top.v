@@ -371,13 +371,34 @@ assign link_sd_i = port_tran_sd;
 
 // PSRAM Controller for CRAM0 (16MB)
 // Uses muxed signals for bridge/CPU arbitration
-// Async mode only — cram0_clk driven to 0 by psram.sv
+// CRAM0 CLK driven by PLL outclk_2 (105 MHz, phase-shifted) for sync burst
+wire clk_cram0;  // declared near PLL, assigned to cram0_clk below
+assign cram0_clk = clk_cram0;
+
+// BCR init FSM signals
+reg        bcr_config_en = 0;
+reg [15:0] bcr_config_data = 0;
+reg        bcr_bank_sel = 0;
+reg        bcr_init_done = 0;
+
+// Raw psram.sv busy (for BCR init FSM — bypasses word_busy)
+wire        psram_raw_busy;
+wire        psram_dbg_wait_seen;
+wire [15:0] psram_dbg_wait_cycles;
+wire [15:0] psram_dbg_burst_count;
+wire [15:0] psram_dbg_stale_count;
+
+// Sync burst read signals (psram_controller ↔ axi_psram_slave)
+wire        psram_burst_rd;
+wire [5:0]  psram_burst_len;
+wire        psram_burst_rdata_valid;
+wire [31:0] psram_burst_rdata;
 
 psram_controller #(
     .CLOCK_SPEED(105.0)
 ) psram0 (
     .clk(clk_ram_controller),
-    .reset_n(reset_n),
+    .reset_n(reset_n_apf),  // Use raw reset, not bcr_init_done-gated reset
 
     // Muxed word interface (bridge or CPU)
     .word_rd(psram_mux_rd),
@@ -388,11 +409,31 @@ psram_controller #(
     .word_q(psram_mux_rdata),
     .word_busy(psram_mux_busy),
     .word_q_valid(psram_mux_rdata_valid),
-    // Physical PSRAM signals
+
+    // BCR configuration (from init FSM)
+    .config_en(bcr_config_en),
+    .config_data(bcr_config_data),
+    .config_bank_sel(bcr_bank_sel),
+
+    // Sync burst read (from axi_psram_slave)
+    .burst_rd(psram_burst_rd),
+    .burst_len(psram_burst_len),
+    .burst_rdata_valid(psram_burst_rdata_valid),
+    .burst_rdata(psram_burst_rdata),
+
+    // Raw psram.sv busy (for BCR init FSM)
+    .raw_busy(psram_raw_busy),
+
+    // Debug pass-through
+    .dbg_wait_seen(psram_dbg_wait_seen),
+    .dbg_wait_cycles(psram_dbg_wait_cycles),
+    .dbg_burst_count(psram_dbg_burst_count),
+    .dbg_stale_count(psram_dbg_stale_count),
+
+    // Physical PSRAM signals (cram0_clk driven by PLL, not psram.sv)
     .cram_a(cram0_a),
     .cram_dq(cram0_dq),
     .cram_wait(cram0_wait),
-    .cram_clk(cram0_clk),
     .cram_adv_n(cram0_adv_n),
     .cram_cre(cram0_cre),
     .cram_ce0_n(cram0_ce0_n),
@@ -415,6 +456,91 @@ assign cram1_oe_n  = 1'b1;
 assign cram1_we_n  = 1'b1;
 assign cram1_ub_n  = 1'b1;
 assign cram1_lb_n  = 1'b1;
+
+// ============================================
+// BCR init FSM — configure CRAM0 for synchronous burst mode
+// Writes BCR 0x645F to both CE0# and CE1# dies after PLL lock.
+// BCR 0x645F = sync mode, FIXED latency code 4, WAIT during delay, continuous burst.
+// Bit 8 = 0: WAIT asserted DURING delay (not look-ahead). Matches psram.sv
+// FSM which gates reads on !cram_wait (HIGH = invalid, LOW = valid).
+// Code 4 required at 105 MHz (code 3 rated ≤104 MHz).
+// Must complete before CPU reset deasserts (gated by bcr_init_done).
+// ============================================
+localparam BCR_VALUE = 16'h641F;
+
+localparam [3:0] BCR_IDLE       = 4'd0;
+localparam [3:0] BCR_CE0_START  = 4'd1;
+localparam [3:0] BCR_CE0_BUSY   = 4'd2;  // Wait for busy to assert
+localparam [3:0] BCR_CE0_WAIT   = 4'd3;  // Wait for busy to deassert
+localparam [3:0] BCR_CE1_START  = 4'd4;
+localparam [3:0] BCR_CE1_BUSY   = 4'd5;
+localparam [3:0] BCR_CE1_WAIT   = 4'd6;
+localparam [3:0] BCR_DONE       = 4'd7;
+
+reg [3:0] bcr_state = BCR_IDLE;
+
+always @(posedge clk_ram_controller) begin
+    // Default: clear single-cycle config_en pulse
+    bcr_config_en <= 1'b0;
+
+    case (bcr_state)
+        BCR_IDLE: begin
+            bcr_init_done <= 1'b0;
+            // Wait for PLL lock AND bridge reset release before configuring PSRAM.
+            // psram_controller is held in reset by reset_n_apf — if we start
+            // before that deasserts, psram_raw_busy never rises and we deadlock.
+            if (pll_ram_locked && reset_n_apf)
+                bcr_state <= BCR_CE0_START;
+        end
+
+        BCR_CE0_START: begin
+            if (!psram_raw_busy) begin
+                bcr_config_en <= 1'b1;
+                bcr_config_data <= BCR_VALUE;
+                bcr_bank_sel <= 1'b0;  // CE0#
+                bcr_state <= BCR_CE0_BUSY;
+            end
+        end
+
+        BCR_CE0_BUSY: begin
+            // Wait for psram.sv to see config_en and go busy
+            if (psram_raw_busy)
+                bcr_state <= BCR_CE0_WAIT;
+        end
+
+        BCR_CE0_WAIT: begin
+            // Wait for config write to complete
+            if (!psram_raw_busy)
+                bcr_state <= BCR_CE1_START;
+        end
+
+        BCR_CE1_START: begin
+            if (!psram_raw_busy) begin
+                bcr_config_en <= 1'b1;
+                bcr_config_data <= BCR_VALUE;
+                bcr_bank_sel <= 1'b1;  // CE1#
+                bcr_state <= BCR_CE1_BUSY;
+            end
+        end
+
+        BCR_CE1_BUSY: begin
+            if (psram_raw_busy)
+                bcr_state <= BCR_CE1_WAIT;
+        end
+
+        BCR_CE1_WAIT: begin
+            if (!psram_raw_busy)
+                bcr_state <= BCR_DONE;
+        end
+
+        BCR_DONE: begin
+            bcr_init_done <= 1'b1;
+            // Stay here permanently
+        end
+
+        default: bcr_state <= BCR_IDLE;
+    endcase
+end
 
 // SDRAM word interface signals (to io_sdram)
 // Driven by one-cycle pulse adapter (see below)
@@ -1176,7 +1302,7 @@ assign cpu_psram_rdata_valid = psram_mux_rdata_valid;
     wire            reset_n_apf;            // driven by host commands from APF bridge
     wire    [31:0]  cmd_bridge_rd_data;
 
-    wire reset_n = reset_n_apf;
+    wire reset_n = reset_n_apf & bcr_init_done;
 
 // bridge host commands
 // synchronous to clk_74a
@@ -1686,7 +1812,12 @@ assign video_hs = vidout_hs;
         .scanline_reg_addr(scanline_reg_addr),
         .scanline_reg_wdata(scanline_reg_wdata),
         .scanline_reg_rdata(scanline_reg_rdata),
-        .timer_irq(timer_irq)
+        .timer_irq(timer_irq),
+        // PSRAM debug
+        .psram_dbg_wait_seen(psram_dbg_wait_seen),
+        .psram_dbg_wait_cycles(psram_dbg_wait_cycles),
+        .psram_dbg_burst_count(psram_dbg_burst_count),
+        .psram_dbg_stale_count(psram_dbg_stale_count)
     );
 
     // Slave → io_sdram pulse adapter: axi_sdram_slave holds rd/wr high until
@@ -1881,7 +2012,12 @@ assign video_hs = vidout_hs;
         .psram_wstrb(cpu_psram_wstrb),
         .psram_rdata(cpu_psram_rdata),
         .psram_busy(cpu_psram_busy),
-        .psram_rdata_valid(cpu_psram_rdata_valid)
+        .psram_rdata_valid(cpu_psram_rdata_valid),
+        // Sync burst read (to psram_controller via core_top wires)
+        .psram_burst_rd(psram_burst_rd),
+        .psram_burst_len(psram_burst_len),
+        .psram_burst_rdata_valid(psram_burst_rdata_valid),
+        .psram_burst_rdata(psram_burst_rdata)
     );
 
     // DMA Clear/Blit peripheral
@@ -2214,7 +2350,7 @@ mf_pllram_133 mp_ram (
     .rst            ( 0 ),
     .outclk_0       ( clk_ram_controller ), // 100 MHz for SDRAM controller
     .outclk_1       ( clk_ram_chip ),       // 100 MHz for SDRAM chip (phase shifted)
-    .outclk_2       ( ),                    // 100 MHz (unused, was CRAM0 sync burst)
+    .outclk_2       ( clk_cram0 ),          // 105 MHz phase-shifted for CRAM0 sync burst
     .locked         ( pll_ram_locked )
 );
 

@@ -13,7 +13,7 @@
  *   - 0x10200000: quake.bin LMA (bridge loads here, copied to PSRAM)
  *   - 0x10400000: BSS + Heap (~43.5MB, pak0.pak read on demand from SD)
  * - Terminal: 0x20000000 (8KB)   - Character VRAM
- * - PSRAM:    0x30000000 (16MB)  - Quake code + data (CRAM0)
+ * - PSRAM:    0x30000000 (16MB)  - Quake code (read-only, CRAM0)
  * - SRAM:     0x38000000 (256KB) - Z-buffer
  * - SysRegs:  0x40000000         - System control registers
  */
@@ -22,7 +22,7 @@ ENTRY(_start)
 
 MEMORY {
     BRAM      (rwx) : ORIGIN = 0x00000000, LENGTH = 64K
-    PSRAM     (rwx) : ORIGIN = 0x30000000, LENGTH = 16M     /* Quake code VMA (CRAM0) */
+    PSRAM     (rx)  : ORIGIN = 0x30000000, LENGTH = 16M     /* Quake code VMA (CRAM0, read-only) */
     SDRAM_BSS (rwx) : ORIGIN = 0x10400000, LENGTH = 44M     /* BSS + Heap in SDRAM after quake.bin LMA */
 }
 
@@ -45,6 +45,7 @@ SECTIONS {
         dataslot.o(.text*)         /* Dataslot functions for loading */
         dataslot.o(.rodata*)
         dataslot.o(.srodata*)
+        main.o(.rodata*)           /* Boot string literals + constants */
         main.o(.srodata*)          /* Boot test float constants */
         *(.rodata.boot*)
         . = ALIGN(4);
@@ -98,24 +99,31 @@ SECTIONS {
         __text_end = .;
     } > PSRAM
 
-    /* Quake initialized data - LMA must mirror VMA offset so bootloader's
-     * flat copy places .data at the correct PSRAM address.  Using SIZEOF(.text)
-     * would make the LMA contiguous even when VMA has alignment padding,
-     * shifting all initialized data by the padding amount. */
-    .data : AT(__quake_load_addr + (__data_start - __text_start)) {
+    /* Copy region symbols for bootloader (.text only → PSRAM) */
+    __quake_copy_src = LOADADDR(.text);          /* SDRAM LMA */
+    __quake_copy_dst = __text_start;             /* PSRAM VMA */
+    __quake_copy_size = __text_end - __text_start;
+
+    /* Total quake.bin image size (for deferload: .text + .data) */
+    __quake_load_size = SIZEOF(.text) + SIZEOF(.data);
+
+    /* Quake initialized data — in SDRAM (not PSRAM) so PSRAM stays read-only.
+     * LMA is contiguous with .text in quake.bin image.  Bootloader copies
+     * from LMA to VMA in SDRAM at startup. */
+    .data : AT(__quake_load_addr + SIZEOF(.text)) {
         __data_start = .;
         KEEP(*(.data*))
         KEEP(*(.sdata*))
         . = ALIGN(4);
         __data_end = .;
-    } > PSRAM
+    } > SDRAM_BSS
 
-    /* Copy region symbols for bootloader */
-    __quake_copy_src = LOADADDR(.text);          /* SDRAM LMA */
-    __quake_copy_dst = __text_start;             /* PSRAM VMA */
-    __quake_copy_size = __data_end - __text_start;
+    /* .data copy symbols for bootloader (SDRAM LMA → SDRAM VMA) */
+    __data_copy_src = LOADADDR(.data);
+    __data_copy_dst = __data_start;
+    __data_copy_size = __data_end - __data_start;
 
-    /* Quake uninitialized data (BSS) - in SDRAM after pak0.pak area */
+    /* Quake uninitialized data (BSS) - in SDRAM after .data */
     .qbss : {
         . = ALIGN(4);
         __qbss_start = .;
@@ -155,6 +163,10 @@ SECTIONS {
     PROVIDE(_quake_copy_src = __quake_copy_src);
     PROVIDE(_quake_copy_dst = __quake_copy_dst);
     PROVIDE(_quake_copy_size = __quake_copy_size);
+    PROVIDE(_quake_load_size = __quake_load_size);
+    PROVIDE(_data_copy_src = __data_copy_src);
+    PROVIDE(_data_copy_dst = __data_copy_dst);
+    PROVIDE(_data_copy_size = __data_copy_size);
 
     /* Keep at least 8 KB BRAM stack/trap headroom after hot sections. */
     ASSERT(__fastdata_end <= (__stack_top - 8192), "BRAM overflow: insufficient stack headroom")

@@ -19,7 +19,11 @@ extern char _qbss_start[], _qbss_end[];
 extern char _runtime_stack_top[];
 extern char _quake_copy_src[];   /* Source address (SDRAM LMA) */
 extern char _quake_copy_dst[];   /* Destination address (PSRAM VMA) */
-extern char _quake_copy_size[];  /* Size of .text + .data to copy */
+extern char _quake_copy_size[];  /* Size of .text to copy to PSRAM */
+extern char _quake_load_size[];  /* Total quake.bin image size (.text + .data) */
+extern char _data_copy_src[];    /* .data LMA in SDRAM (within quake.bin) */
+extern char _data_copy_dst[];    /* .data VMA in SDRAM */
+extern char _data_copy_size[];   /* .data section size */
 /* Quake entry point (in sys_pocket.c, linked in PSRAM) */
 extern void quake_main(void);
 extern void switch_to_runtime_stack_and_call(void (*entry)(void), void *stack_top);
@@ -33,7 +37,7 @@ static void clear_qbss(void) {
         *p++ = 0;
 }
 
-/* Copy Quake binary from SDRAM (LMA) to PSRAM (VMA) for execution */
+/* Copy Quake .text from SDRAM (LMA) to PSRAM (VMA) for execution */
 __attribute__((section(".text.boot")))
 static void copy_to_psram(void) {
     volatile unsigned int *src =
@@ -48,10 +52,22 @@ static void copy_to_psram(void) {
     __asm__ volatile(".word 0x0000100f");  /* fence.i */
 }
 
+/* Copy Quake .data from SDRAM LMA (within quake.bin) to SDRAM VMA.
+ * .data lives in SDRAM so PSRAM stays read-only (no D-cache writebacks). */
+__attribute__((section(".text.boot")))
+static void copy_data_section(void) {
+    unsigned int *src = (unsigned int *)(uint32_t)_data_copy_src;
+    unsigned int *dst = (unsigned int *)(uint32_t)_data_copy_dst;
+    unsigned int words = (unsigned int)_data_copy_size / 4;
+
+    for (unsigned int i = 0; i < words; i++)
+        dst[i] = src[i];
+}
+
 /* Load quake.bin from data slot into SDRAM LMA via deferload */
 __attribute__((section(".text.boot")))
 static int load_quake_bin_from_slot(void) {
-    uint32_t total = (uint32_t)_quake_copy_size;
+    uint32_t total = (uint32_t)_quake_load_size;
     uint32_t base = (uint32_t)_quake_copy_src;
     uint32_t done = 0;
 
@@ -154,59 +170,130 @@ static int sdram_data_test(void) {
 }
 
 /*
- * PSRAM data integrity test
+ * PSRAM sync burst diagnostic — multi-pattern test with position histogram
+ * and hardware WAIT debug register readout.
  *
- * Tests D-cache write-back and read-fill through axi_psram_slave →
- * psram_controller → physical CRAM0.  Each 32-bit D-cache word becomes
- * 16 individual PSRAM word ops (16-beat burst decomposed to single words,
- * each word = 2 × 16-bit PSRAM accesses).
- *
- * 1. Write 64KB pattern through D-cache to PSRAM scratch region
- * 2. fence.i  (flush dirty lines → PSRAM)
- * 3. Evict all D-cache lines by writing 128KB to SDRAM
- * 4. Read back from PSRAM (D-cache miss → refill from PSRAM)
- * 5. Compare
+ * Debug registers (from psram.sv):
+ *   0x400000B0: [31] wait_seen, [15:0] burst_count
+ *   0x400000B4: [15:0] wait_cycles (total WAIT HIGH during STATE_SYNC_DATA)
  *
  * Test region: 0x30100000 (1MB into PSRAM, well past quake.bin ~342KB)
  */
+#define PSRAM_DBG0 (*(volatile unsigned int *)0x400000B0)
+#define PSRAM_DBG1 (*(volatile unsigned int *)0x400000B4)
+#define PSRAM_DBG2 (*(volatile unsigned int *)0x400000B8)
+
+/* Pure burst-read diagnostic: no CPU writes to PSRAM.
+ * Compares PSRAM data (burst-read via D-cache) against SDRAM reference.
+ * copy_to_psram() must have already run: SDRAM 0x10200000 → PSRAM 0x30000000.
+ * SDRAM reads go through uncached alias (0x50xx) to bypass D-cache.
+ *
+ * 1. Evict D-cache to force burst fills from PSRAM
+ * 2. Read PSRAM (burst) and SDRAM (uncached) word-by-word, compare
+ * 3. Print failing cache line indices + full dump of first failure
+ */
 __attribute__((section(".text.boot")))
 static int psram_data_test(void) {
-    volatile unsigned int *psram = (volatile unsigned int *)0x30100000;
-    const int words = 16384;  /* 64KB */
-    int errors = 0;
+    /* Read from 64KB into quake.bin (past any headers, safely within data) */
+    volatile unsigned int *psram = (volatile unsigned int *)0x30010000;
+    volatile unsigned int *sdram = (volatile unsigned int *)0x50210000;  /* uncached SDRAM alias */
+    const int words = 16384;  /* 64KB = 1024 cache lines */
+    int pos_hist[16];
+    int fail_lines[20];
+    int fail_count = 0;
+    int total_errors = 0;
+    int first_fail_line = -1;
+    int last_fail_line = -1;
 
-    term_printf("PSRAM test: 64KB...");
+    for (int i = 0; i < 16; i++) pos_hist[i] = 0;
 
-    /* Write address-as-data through D-cache → PSRAM */
-    for (int i = 0; i < words; i++)
-        psram[i] = 0xB4000000 | (unsigned int)i;
+    term_printf("=== PSRAM Burst Diag ===\n");
 
-    /* Flush D-cache (dirty lines written back to PSRAM) */
+    /* Evict all PSRAM lines from D-cache.
+     * Use 0x10180000 (not 0x10140000 which sdram_data_test cached).
+     * Read 256KB (2x D-cache 128KB) to guarantee full eviction regardless
+     * of prior cache state.  fence.i to also invalidate I-cache. */
+    volatile unsigned int *evict = (volatile unsigned int *)0x10180000;
+    unsigned int sink = 0;
+    for (int i = 0; i < 65536; i++)   /* 256KB */
+        sink += evict[i];
     __asm__ volatile("fence");
     __asm__ volatile(".word 0x0000100f");  /* fence.i */
+    (void)sink;
 
-    /* Evict all PSRAM lines from D-cache by filling with SDRAM data.
-     * 128KB = 2× cache size → both ways of all 512 sets replaced. */
-    volatile unsigned int *evict = (volatile unsigned int *)0x10140000;
-    for (int i = 0; i < 32768; i++)   /* 128KB */
-        evict[i] = 0xDEAD0000 | (unsigned int)i;
-    __asm__ volatile("fence");
-    __asm__ volatile(".word 0x0000100f");  /* fence.i */
+    /* Read burst count BEFORE the test to compute delta */
+    unsigned int bursts_before = PSRAM_DBG0 & 0xFFFF;
 
-    /* Read back from PSRAM (D-cache miss → 16-beat refill from PSRAM) */
+    /* Compare PSRAM (burst-read) vs SDRAM (uncached reference) */
     for (int i = 0; i < words; i++) {
-        unsigned int exp = 0xB4000000 | (unsigned int)i;
-        unsigned int got = psram[i];
+        unsigned int got = psram[i];      /* D-cache miss → sync burst fill */
+        unsigned int exp = sdram[i];      /* uncached SDRAM read → reference */
         if (got != exp) {
-            if (errors < 4)
-                term_printf("\n @%08X: %08X!=%08X",
-                    0x30100000 + i * 4, exp, got);
-            errors++;
+            int pos = i & 15;
+            pos_hist[pos]++;
+            total_errors++;
+            int line = i >> 4;
+            if (line != last_fail_line) {
+                last_fail_line = line;
+                if (first_fail_line < 0) first_fail_line = line;
+                if (fail_count < 20)
+                    fail_lines[fail_count] = line;
+                fail_count++;
+            }
         }
     }
 
-    term_printf(errors ? " FAIL(%d)\n" : " OK\n", errors);
-    return errors;
+    term_printf("Errors: %d in %d lines\n", total_errors, fail_count);
+
+    /* Print first 20 failing cache line indices */
+    if (fail_count > 0) {
+        int show = fail_count < 20 ? fail_count : 20;
+        term_printf("Fail lines:");
+        for (int i = 0; i < show; i++)
+            term_printf(" %d", fail_lines[i]);
+        if (fail_count > 20) term_printf(" ...");
+        term_printf("\n");
+    }
+
+    /* Dump all 16 words of the first failing cache line */
+    if (first_fail_line >= 0) {
+        int base = first_fail_line << 4;
+        term_printf("Line %d dump (got/exp):\n", first_fail_line);
+        for (int w = 0; w < 16; w += 2) {
+            unsigned int g0 = psram[base + w];
+            unsigned int e0 = sdram[base + w];
+            unsigned int g1 = psram[base + w + 1];
+            unsigned int e1 = sdram[base + w + 1];
+            char m0 = (g0 != e0) ? '*' : ' ';
+            char m1 = (g1 != e1) ? '*' : ' ';
+            term_printf(" %c%08X/%08X %c%08X/%08X\n", m0, g0, e0, m1, g1, e1);
+        }
+    }
+
+    /* Position histogram */
+    if (total_errors > 0) {
+        term_printf("Pos:");
+        for (int p = 0; p < 16; p++) {
+            if (pos_hist[p] > 0)
+                term_printf(" w%d=%d", p, pos_hist[p]);
+        }
+        term_printf("\n");
+    }
+
+    /* Hardware debug: burst count delta shows actual PSRAM bursts during test */
+    unsigned int dbg0 = PSRAM_DBG0;
+    unsigned int dbg1 = PSRAM_DBG1;
+    unsigned int dbg2 = PSRAM_DBG2;
+    unsigned int bursts_during = (dbg0 & 0xFFFF) - bursts_before;
+    term_printf("Bursts=%d errs=%d stale=%d\n",
+        bursts_during, total_errors, dbg2 & 0xFFFF);
+
+    if (total_errors)
+        term_printf("TOTAL: %d errors\n", total_errors);
+    else
+        term_printf("ALL PASS\n");
+
+    return total_errors;
 }
 
 __attribute__((section(".text.boot")))
@@ -227,11 +314,23 @@ int main(void) {
     if (rc < 0)
         while (1) {}  /* Halt on load failure */
 
-    /* Memory data integrity tests (while terminal is still visible) */
-    if (sdram_data_test() | psram_data_test()) {
-        term_printf("HALTED - errors above\n");
-        while (1) {}  /* Halt so errors stay visible */
+    /* SDRAM data integrity test (uses 0x10140000, doesn't touch quake.bin) */
+    if (sdram_data_test()) {
+        term_printf("HALTED - SDRAM errors\n");
+        while (1) {}
     }
+
+    /* Copy quake.bin from SDRAM to PSRAM (async writes via D-cache writeback) */
+    copy_to_psram();
+
+    /* PSRAM burst-read diagnostic: compare PSRAM data (burst reads via D-cache)
+     * against SDRAM reference (uncached reads). Pure reads — no CPU writes to PSRAM.
+     * Must run AFTER copy_to_psram so PSRAM has valid data to verify. */
+    if (psram_data_test()) {
+        term_printf("HALTED - PSRAM errors\n");
+        while (1) {}
+    }
+
     /* Re-run SDRAM test under contention: video scanout does continuous
      * burst reads from SDRAM every scanline (~26us apart at 320x240@60Hz).
      * This stresses the SDRAM arbiter with concurrent CPU + scanout access.
@@ -262,10 +361,10 @@ int main(void) {
     /* Switch to framebuffer display */
     SYS_DISPLAY_MODE = 1;
 
-    /* Copy from SDRAM to PSRAM */
-    copy_to_psram();
+    /* Copy .data from quake.bin LMA to SDRAM VMA */
+    copy_data_section();
 
-    /* Clear BSS */
+    /* Clear BSS (starts after .data in SDRAM) */
     clear_qbss();
 
     /* Final fence.i before jump */

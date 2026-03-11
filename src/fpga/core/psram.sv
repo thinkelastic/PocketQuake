@@ -49,7 +49,7 @@ module psram #(
     parameter MAX_ACCESS_TIME_FROM_ADV = 70, // Maximum time (ns) for valid data to appear after adv_n goes low
 
     // -- Sync burst --
-    parameter SYNC_LATENCY = 4  // FSM wait cycles: φ=6ns CLK0 latch, code 4, negedge capture
+    parameter SYNC_LATENCY = 4  // Fixed latency count; WAIT gating handles row boundary crossings only
 ) (
     input wire clk,
 
@@ -73,6 +73,12 @@ module psram #(
     output reg [15:0] data_out,
 
     output reg busy,
+
+    // Debug outputs (sticky counters, cleared on sync_burst_en)
+    output reg        dbg_wait_seen,     // Sticky: WAIT was HIGH during STATE_SYNC_DATA
+    output reg [15:0] dbg_wait_cycles,   // Total cycles WAIT HIGH during STATE_SYNC_DATA
+    output reg [15:0] dbg_burst_count,   // Completed sync bursts since last clear
+    output reg [15:0] dbg_stale_count,   // Bursts where first h0 in cram_dq_r == prev burst's last
 
     // PSRAM signals
     output reg [21:16] cram_a,
@@ -158,7 +164,8 @@ module psram #(
   localparam STATE_CONFIG_HOLD_END = STATE_CONFIG_START + TOTAL_WRITE_CYCLE_COUNT;
 
   // -- Sync burst read states (explicit state assignments) --
-  localparam STATE_SYNC_SETUP = 60;
+  localparam STATE_SYNC_CE_SETUP = 59;  // CE# asserted, address loaded, ADV# still HIGH
+  localparam STATE_SYNC_SETUP = 60;     // ADV# goes LOW (CE# already stable for 1 cycle)
   localparam STATE_SYNC_WAIT  = 61;
   localparam STATE_SYNC_DATA  = 62;
   localparam STATE_SYNC_END   = 63;
@@ -193,16 +200,47 @@ module psram #(
   reg [5:0] latency_counter;
   reg [5:0] burst_counter;
 
+  // Debug counters (no reset — accumulate until power cycle)
+  initial begin
+    dbg_wait_seen = 0;
+    dbg_wait_cycles = 0;
+    dbg_burst_count = 0;
+  end
+
+  // Stale-detection diagnostic: track whether cram_dq_r holds stale data
+  // on the first valid capture of each burst.
+  reg [15:0] prev_burst_last_dq;   // Last cram_dq_r from previous burst
+  reg        first_capture_pending; // Waiting for first data capture
+  initial begin
+    prev_burst_last_dq = 16'h0;
+    first_capture_pending = 0;
+    dbg_stale_count = 0;
+  end
+
   assign cram_dq = data_out_en ? cram_data : 16'hZZ;
 
-  // Negedge capture register for sync burst read data.
-  // At 100 MHz, posedge and CRAM CLK timing make posedge capture impossible
-  // across process corners: reliable address latch needs φ≥5ns, but posedge
-  // data capture needs φ≤4ns. Negedge capture shifts the window by 5ns,
-  // making both work with φ=7ns (2ns margin on all paths).
-  reg [15:0] cram_dq_neg;
-  always @(negedge clk) begin
-    cram_dq_neg <= cram_dq;
+  // Posedge IOB capture registers for sync burst read data.
+  // FAST_INPUT_REGISTER in QSF guarantees IOB placement on posedge.
+  reg [15:0] cram_dq_r;
+  reg cram_wait_r;
+  always @(posedge clk) begin
+    cram_dq_r <= cram_dq;
+    cram_wait_r <= cram_wait;  // WAIT active HIGH (BCR bit10=1), during delay (bit8=0): HIGH=invalid, LOW=valid
+  end
+
+  // Fabric pipeline registers for sync burst data path.
+  // WAIT and DQ both transition on the same PSRAM CLK edge, but have different
+  // output delays (tCW vs tCKD, both 2-5.5ns).  The gap from PSRAM CLK edge
+  // to the next FPGA posedge is only ~3.8ns (9524ps - 5714ps phase).  When
+  // tCW < 3.8ns < tCKD, the IOB captures WAIT=LOW one posedge before DQ has
+  // valid data, causing the FSM to read stale DQ.  Adding one fabric pipeline
+  // stage ensures WAIT and DQ are always from the same IOB capture, with a
+  // full extra clock cycle (~9.5ns) of margin.
+  reg [15:0] cram_dq_r2;
+  reg cram_wait_r2;
+  always @(posedge clk) begin
+    cram_dq_r2 <= cram_dq_r;
+    cram_wait_r2 <= cram_wait_r;
   end
 
   always @(posedge clk) begin
@@ -283,18 +321,21 @@ module psram #(
 
           busy <= 1;
         end else if (sync_burst_en) begin
-          // Synchronous burst read
-          state <= STATE_SYNC_SETUP;
+          // Synchronous burst read — CE# setup phase.
+          // Assert CE# and load address ONE cycle before ADV# goes LOW.
+          // This guarantees tCSP (CE# setup to CLK) is met at the PSRAM CLK
+          // edge where the address is latched.
+          state <= STATE_SYNC_CE_SETUP;
 
           if (bank_sel) cram_ce1_n <= 0;
           else cram_ce0_n <= 0;
 
-          // Drive address
+          // Pre-load address on DQ/A bus (ADV# stays HIGH this cycle)
           cram_a <= addr[21:16];
           cram_data <= addr[15:0];
           data_out_en <= 1;
 
-          cram_adv_n <= 0;  // ADV# low to latch address
+          cram_adv_n <= 1;  // ADV# HIGH — address not latched yet
           cram_we_n <= 1;   // WE# high for read
           cram_oe_n <= 1;   // OE# high during address phase
           cram_ub_n <= 0;
@@ -302,7 +343,7 @@ module psram #(
 
           latency_counter <= SYNC_LATENCY[5:0];
           burst_counter <= sync_burst_len;
-
+          first_capture_pending <= 1;
           busy <= 1;
         end
       end
@@ -355,7 +396,7 @@ module psram #(
       end
       STATE_READ_DATA_RECEIVED: begin
         read_avail <= 1;
-        data_out <= cram_dq;
+        data_out <= cram_dq_r;  // Use posedge IOB-captured value
 
         state <= STATE_NONE;
         cram_ce0_n <= 1;
@@ -402,6 +443,14 @@ module psram #(
       // ============================================
       // Synchronous burst read states
       // ============================================
+      STATE_SYNC_CE_SETUP: begin
+        // CE# is now LOW (asserted previous cycle), address is on the bus.
+        // Assert ADV# LOW to begin the address latch phase.
+        // The next PSRAM CLK rising edge will see CE# with a full cycle of setup.
+        cram_adv_n <= 0;  // ADV# low — address will be latched on next PSRAM CLK edge
+        state <= STATE_SYNC_SETUP;
+      end
+
       STATE_SYNC_SETUP: begin
         // Address was driven in STATE_NONE, ADV# is low.
         // Deassert ADV# (address latched), release DQ, assert OE#
@@ -423,19 +472,40 @@ module psram #(
       end
 
       STATE_SYNC_DATA: begin
-        read_avail <= 1;
-        data_out <= cram_dq_neg;  // Use negedge-captured data for sync burst
-
-        if (burst_counter == 6'd0) begin
-          state <= STATE_SYNC_END;
+        // Use pipeline registers (cram_dq_r2/cram_wait_r2) to guarantee
+        // WAIT and DQ are from the same IOB capture posedge.
+        if (cram_wait_r2) begin
+          // WAIT HIGH — initial latency or row boundary crossing pause.
+          dbg_wait_seen <= 1'b1;
+          dbg_wait_cycles <= dbg_wait_cycles + 16'd1;
+          state <= STATE_SYNC_DATA;
         end else begin
-          burst_counter <= burst_counter - 6'd1;
-          state <= STATE_SYNC_DATA;  // Explicit: stay here
+          // WAIT LOW — data valid, capture halfword
+          read_avail <= 1;
+          data_out <= cram_dq_r2;
+
+          // Stale detection: on first capture, check if data matches
+          // the last halfword from the previous burst
+          if (first_capture_pending) begin
+            first_capture_pending <= 0;
+            if (cram_dq_r2 == prev_burst_last_dq)
+              dbg_stale_count <= dbg_stale_count + 16'd1;
+          end
+
+          if (burst_counter == 6'd0) begin
+            // Last halfword — save for stale detection on next burst
+            prev_burst_last_dq <= cram_dq_r2;
+            state <= STATE_SYNC_END;
+          end else begin
+            burst_counter <= burst_counter - 6'd1;
+            state <= STATE_SYNC_DATA;  // Explicit: stay here
+          end
         end
       end
 
       STATE_SYNC_END: begin
         // Burst complete — release everything
+        dbg_burst_count <= dbg_burst_count + 16'd1;
         state <= STATE_NONE;
         cram_ce0_n <= 1;
         cram_ce1_n <= 1;

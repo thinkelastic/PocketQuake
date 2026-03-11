@@ -167,7 +167,13 @@ module axi_periph_slave #(
     input wire  [31:0] scanline_reg_rdata,
 
     // Timer interrupt output (for CPU m_timer)
-    output wire        timer_irq
+    output wire        timer_irq,
+
+    // PSRAM debug (from psram.sv via psram_controller)
+    input wire         psram_dbg_wait_seen,
+    input wire  [15:0] psram_dbg_wait_cycles,
+    input wire  [15:0] psram_dbg_burst_count,
+    input wire  [15:0] psram_dbg_stale_count
 );
 
 wire reset = ~reset_n;
@@ -555,6 +561,9 @@ always @(*) begin
         6'b101001: sysreg_rdata = game_name_2_s;  // 0xA4 GAME_NAME[8:11]
         6'b101010: sysreg_rdata = mtimecmp_reg;  // 0xA8 MTIMECMP
         6'b101011: sysreg_rdata = cycle_counter[31:0]; // 0xAC MTIME_LO (for ISR)
+        6'b101100: sysreg_rdata = {psram_dbg_wait_seen, 15'b0, psram_dbg_burst_count}; // 0xB0 PSRAM_DBG0
+        6'b101101: sysreg_rdata = {16'b0, psram_dbg_wait_cycles}; // 0xB4 PSRAM_DBG1
+        6'b101110: sysreg_rdata = {16'b0, psram_dbg_stale_count}; // 0xB8 PSRAM_DBG2
         default: sysreg_rdata = 32'h0;
     endcase
 end
