@@ -22,6 +22,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "quakedef.h"
 #include "d_local.h"
 #include "libc.h"
+#include "scanline_accel.h"
 
 extern int	pq_combined_z_active;
 
@@ -129,6 +130,75 @@ void D_DrawSolidSurface (surf_t *surf, int color)
 D_CalcGradients
 ==============
 */
+#if HW_CALCGRAD_ACCEL
+
+static int calcgrad_frame_dirty;
+
+/*
+ * Load frame constants into HW CalcGradients engine.
+ * Called automatically when dirty (bmodel view matrix change).
+ */
+static void D_CalcGradients_LoadFrame (void)
+{
+	calcgrad_write_float(CG_VRIGHT0, vright[0]);
+	calcgrad_write_float(CG_VRIGHT1, vright[1]);
+	calcgrad_write_float(CG_VRIGHT2, vright[2]);
+	calcgrad_write_float(CG_VUP0, vup[0]);
+	calcgrad_write_float(CG_VUP1, vup[1]);
+	calcgrad_write_float(CG_VUP2, vup[2]);
+	calcgrad_write_float(CG_VPN0, vpn[0]);
+	calcgrad_write_float(CG_VPN1, vpn[1]);
+	calcgrad_write_float(CG_VPN2, vpn[2]);
+	calcgrad_write_float(CG_XSCALEINV, xscaleinv);
+	calcgrad_write_float(CG_YSCALEINV, yscaleinv);
+	calcgrad_write_float(CG_XCENTER, xcenter);
+	calcgrad_write_float(CG_YCENTER, ycenter);
+	calcgrad_write_float(CG_MODELORG0, transformed_modelorg[0]);
+	calcgrad_write_float(CG_MODELORG1, transformed_modelorg[1]);
+	calcgrad_write_float(CG_MODELORG2, transformed_modelorg[2]);
+	calcgrad_frame_dirty = 0;
+}
+
+PQ_FASTTEXT void D_CalcGradients (msurface_t *pface)
+{
+	if (calcgrad_frame_dirty)
+		D_CalcGradients_LoadFrame();
+	/* Write per-surface inputs */
+	calcgrad_write_float(CG_SVEC0, pface->texinfo->vecs[0][0]);
+	calcgrad_write_float(CG_SVEC1, pface->texinfo->vecs[0][1]);
+	calcgrad_write_float(CG_SVEC2, pface->texinfo->vecs[0][2]);
+	calcgrad_write_float(CG_SVEC3, pface->texinfo->vecs[0][3]);
+	calcgrad_write_float(CG_TVEC0, pface->texinfo->vecs[1][0]);
+	calcgrad_write_float(CG_TVEC1, pface->texinfo->vecs[1][1]);
+	calcgrad_write_float(CG_TVEC2, pface->texinfo->vecs[1][2]);
+	calcgrad_write_float(CG_TVEC3, pface->texinfo->vecs[1][3]);
+	calcgrad_write_int(CG_MIPLEVEL, miplevel);
+	calcgrad_write_int(CG_TEXMINS,
+		((unsigned int)(unsigned short)pface->texturemins[1] << 16) |
+		 (unsigned int)(unsigned short)pface->texturemins[0]);
+	calcgrad_write_int(CG_EXTENTS,
+		((unsigned int)(unsigned short)pface->extents[1] << 16) |
+		 (unsigned int)(unsigned short)pface->extents[0]);
+
+	/* Kick and wait */
+	calcgrad_write_int(CG_KICK, 1);
+	calcgrad_wait();
+
+	/* Read results */
+	d_sdivzstepu  = calcgrad_read_float(CG_SDIVZSTEPU);
+	d_tdivzstepu  = calcgrad_read_float(CG_TDIVZSTEPU);
+	d_sdivzstepv  = calcgrad_read_float(CG_SDIVZSTEPV);
+	d_tdivzstepv  = calcgrad_read_float(CG_TDIVZSTEPV);
+	d_sdivzorigin = calcgrad_read_float(CG_SDIVZORIGIN);
+	d_tdivzorigin = calcgrad_read_float(CG_TDIVZORIGIN);
+	sadjust       = calcgrad_read_int(CG_SADJUST);
+	tadjust       = calcgrad_read_int(CG_TADJUST);
+	bbextents     = calcgrad_read_int(CG_BBEXTENTS);
+	bbextentt     = calcgrad_read_int(CG_BBEXTENTT);
+}
+
+#else /* SW fallback */
+
 PQ_FASTTEXT void D_CalcGradients (msurface_t *pface)
 {
 	mplane_t	*pplane;
@@ -174,6 +244,8 @@ PQ_FASTTEXT void D_CalcGradients (msurface_t *pface)
 	bbextentt = ((pface->extents[1] << 16) >> miplevel) - 1;
 }
 
+#endif /* HW_CALCGRAD_ACCEL */
+
 
 /*
 ==============
@@ -193,6 +265,10 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 	currententity = &cl_entities[0];
 	TransformVector (modelorg, transformed_modelorg);
 	VectorCopy (transformed_modelorg, world_transformed_modelorg);
+
+#if HW_CALCGRAD_ACCEL
+	calcgrad_frame_dirty = 1;
+#endif
 
 // TODO: could preset a lot of this at mode set time
 	if (r_drawflat.value)
@@ -265,11 +341,17 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 							VectorCopy(base_vright, vright);
 							VectorCopy(base_modelorg, modelorg);
 							R_TransformFrustum();
+#if HW_CALCGRAD_ACCEL
+							calcgrad_frame_dirty = 1;
+#endif
 						}
 						currententity = s->entity;
 						VectorSubtract(r_origin, currententity->origin, local_modelorg);
 						TransformVector(local_modelorg, transformed_modelorg);
 						R_RotateBmodel();
+#if HW_CALCGRAD_ACCEL
+						calcgrad_frame_dirty = 1;
+#endif
 						last_bmodel_entity = s->entity;
 					}
 				}
@@ -282,6 +364,9 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 					VectorCopy(base_vright, vright);
 					VectorCopy(base_modelorg, modelorg);
 					R_TransformFrustum();
+#if HW_CALCGRAD_ACCEL
+					calcgrad_frame_dirty = 1;
+#endif
 					last_bmodel_entity = NULL;
 				}
 
@@ -306,11 +391,17 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 							VectorCopy(base_vright, vright);
 							VectorCopy(base_modelorg, modelorg);
 							R_TransformFrustum();
+#if HW_CALCGRAD_ACCEL
+							calcgrad_frame_dirty = 1;
+#endif
 						}
 						currententity = s->entity;
 						VectorSubtract(r_origin, currententity->origin, local_modelorg);
 						TransformVector(local_modelorg, transformed_modelorg);
 						R_RotateBmodel();
+#if HW_CALCGRAD_ACCEL
+						calcgrad_frame_dirty = 1;
+#endif
 						last_bmodel_entity = s->entity;
 					}
 				}
@@ -323,6 +414,9 @@ PQ_FASTTEXT void D_DrawSurfaces (void)
 					VectorCopy(base_vright, vright);
 					VectorCopy(base_modelorg, modelorg);
 					R_TransformFrustum();
+#if HW_CALCGRAD_ACCEL
+					calcgrad_frame_dirty = 1;
+#endif
 					last_bmodel_entity = NULL;
 				}
 

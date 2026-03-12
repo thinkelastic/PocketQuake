@@ -621,6 +621,7 @@ assign fifo_full_out = queue_full;
 reg [31:0] perf_cache_hits;
 reg [31:0] perf_cache_misses;
 reg [31:0] perf_pixels;
+reg        perf_tex_pending;  // Deferred perf counter update (timing closure)
 
 // Textured address computation
 // Treat S/T as signed fixed-point high words and clamp negative values to 0.
@@ -2728,15 +2729,22 @@ always @(posedge clk or negedge reset_n) begin
         perf_cache_hits   <= 0;
         perf_cache_misses <= 0;
         perf_pixels       <= 0;
+        perf_tex_pending  <= 0;
     end else if (perf_write_clear) begin
         perf_cache_hits   <= 0;
         perf_cache_misses <= 0;
         perf_pixels       <= 0;
+        perf_tex_pending  <= 0;
     end else begin
-        // Count texture cache hits/misses at ST_TEX_CACHE evaluation
-        if (state == ST_TEX_CACHE) begin
+        // Deferred perf counter update: set pending in ST_TEX_CACHE,
+        // process one cycle later using registered cache_hit_r.
+        // Breaks tex_byte_addr_r → cache_hit_comb → perf_counter critical path.
+        if (state == ST_TEX_CACHE)
+            perf_tex_pending <= 1'b1;
+        if (perf_tex_pending) begin
+            perf_tex_pending <= 1'b0;
             perf_pixels <= perf_pixels + 1;
-            if (cache_hit_comb)
+            if (cache_hit_r)
                 perf_cache_hits <= perf_cache_hits + 1;
             else
                 perf_cache_misses <= perf_cache_misses + 1;

@@ -680,6 +680,7 @@ wire [31:0] span_cmap_rdata;
 
 // Span rasterizer status
 wire        span_active;
+wire        span_fifo_full;
 
 // CPU AXI4 master → axi_periph_slave (local peripherals)
 wire        cpu_m_local_arvalid;
@@ -842,7 +843,7 @@ wire [31:0] sramfill_reg_rdata;
 // Scanline engine register interface (from axi_periph_slave)
 wire        scanline_reg_wr;
 wire        scanline_reg_rd;
-wire [3:0]  scanline_reg_addr;
+wire [5:0]  scanline_reg_addr;
 wire [31:0] scanline_reg_wdata;
 wire [31:0] scanline_reg_rdata;
 
@@ -869,14 +870,16 @@ sram_fill sram_fill_inst (
     .active(fill_active)
 );
 
-scanline_engine scanline_engine_inst (
+// calc_gradients replaces scanline_engine — FP32 D_CalcGradients in hardware
+calc_gradients calc_gradients_inst (
     .clk(clk_ram_controller),
     .reset_n(reset_n),
     .reg_wr(scanline_reg_wr),
     .reg_rd(scanline_reg_rd),
     .reg_addr(scanline_reg_addr),
     .reg_wdata(scanline_reg_wdata),
-    .reg_rdata(scanline_reg_rdata)
+    .reg_rdata(scanline_reg_rdata),
+    .busy_o()
 );
 
 // 3-way SRAM word arbitration mux (combinational priority)
@@ -1612,6 +1615,12 @@ assign video_hs = vidout_hs;
 
     // VexiiRiscv CPU system - running at 100 MHz (CPU + memory)
     // Pure bus routing: VexiiRiscv → arbiter → {SDRAM, PSRAM, Local} AXI4 masters
+    // CPU performance counters
+    wire [31:0] cpu_perf_icache_miss;
+    wire [31:0] cpu_perf_dcache_miss;
+    wire [31:0] cpu_perf_icache_stall;
+    wire [31:0] cpu_perf_dcache_stall;
+
     cpu_system cpu (
         .clk(clk_cpu),  // 100 MHz
         .reset_n(reset_n),
@@ -1675,7 +1684,11 @@ assign video_hs = vidout_hs;
         .m_local_wlast(cpu_m_local_wlast),
         .m_local_bvalid(cpu_m_local_bvalid),
         .m_local_bresp(cpu_m_local_bresp),
-        .timer_irq(timer_irq)
+        .timer_irq(timer_irq),
+        .perf_icache_miss(cpu_perf_icache_miss),
+        .perf_dcache_miss(cpu_perf_dcache_miss),
+        .perf_icache_stall(cpu_perf_icache_stall),
+        .perf_dcache_stall(cpu_perf_dcache_stall)
     );
 
     // AXI4 peripheral slave: BRAM, colormap, system registers, CDC, terminal,
@@ -1817,7 +1830,14 @@ assign video_hs = vidout_hs;
         .psram_dbg_wait_seen(psram_dbg_wait_seen),
         .psram_dbg_wait_cycles(psram_dbg_wait_cycles),
         .psram_dbg_burst_count(psram_dbg_burst_count),
-        .psram_dbg_stale_count(psram_dbg_stale_count)
+        .psram_dbg_stale_count(psram_dbg_stale_count),
+        // Performance counters
+        .span_active(span_active),
+        .span_fifo_full(span_fifo_full),
+        .perf_icache_miss(cpu_perf_icache_miss),
+        .perf_dcache_miss(cpu_perf_dcache_miss),
+        .perf_icache_stall(cpu_perf_icache_stall),
+        .perf_dcache_stall(cpu_perf_dcache_stall)
     );
 
     // Slave → io_sdram pulse adapter: axi_sdram_slave holds rd/wr high until
@@ -2075,6 +2095,7 @@ assign video_hs = vidout_hs;
         .sram_rdata_valid(span_sram_rdata_valid),
         // Status
         .active(span_active),
+        .fifo_full_out(span_fifo_full),
         // Colormap BRAM interface (port B, read-only)
         .cmap_addr(span_cmap_addr),
         .cmap_rdata(span_cmap_rdata)

@@ -2,3 +2,4 @@ config,seed,warm_setup,cold_setup,fast_setup,alm,m10k,m10k_pct
 build,13,-3.061,-2.996,3.379,93 %,306 / 308,99 %
 relaxedBranch,4,-1.340,-1.481,3.932,83 %,299 / 308,97 %
 rlxBr_rlxDiv,4,-1.339,-1.278,3.841,84 %,299 / 308,97 %
+build,19,-1.314,-1.298,4.198,88 %,297 / 308,96 %

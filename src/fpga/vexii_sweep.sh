@@ -27,7 +27,7 @@ export PATH="$QUARTUS_DIR:$PATH"
 
 PROJECT=ap_core
 QSF="${PROJECT}.qsf"
-DEFAULT_SEED=13
+DEFAULT_SEED=19
 
 # ============================================================
 # Base VexiiRiscv generation flags (current working config)
