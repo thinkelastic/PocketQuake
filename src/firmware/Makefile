@@ -2,7 +2,7 @@
 # Builds bootloader (BRAM) + Quake engine (SDRAM)
 
 # Toolchain
-CROSS = riscv64-unknown-elf-
+CROSS ?= riscv64-elf-
 CC = $(CROSS)gcc
 AS = $(CROSS)gcc
 LD = $(CROSS)gcc
@@ -160,9 +160,9 @@ LDFLAGS += -flto
 LIBGCC = $(shell $(CC) -march=$(ARCH) -mabi=$(ABI) -print-libgcc-file-name)
 LIBS = $(LIBGCC)
 
-# RAM size for MIF generation (64KB = 16384 words)
+# RAM size for MIF generation (32KB = 8192 words)
 # Only the bootloader goes into MIF (BRAM)
-RAM_WORDS = 16384
+RAM_WORDS = 8192
 
 # Default target
 all: $(TARGET).bin $(TARGET).mif $(TARGET).lst quake.bin
@@ -182,7 +182,6 @@ $(TARGET).mif: $(TARGET).elf
 		--only-section=.boot \
 		--only-section=.boot_data \
 		--only-section=.boot_bss \
-		--only-section=.fasttext \
 		--only-section=.fastdata \
 		$< boot.bin
 	@echo "-- Firmware RAM initialization - $(RAM_WORDS) x 32-bit words" > $@

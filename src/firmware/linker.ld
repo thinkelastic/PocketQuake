@@ -2,13 +2,13 @@
  * Linker script for PocketQuake on Analogue Pocket
  *
  * Two-stage boot:
- * - Bootloader: 64KB BRAM at 0x00000000 (initialized from firmware.mif)
+ * - Bootloader: 32KB BRAM at 0x00000000 (initialized from firmware.mif)
  * - Quake binary: bridge loads to SDRAM at 0x10200000,
  *   bootloader copies to PSRAM at 0x30000000 for execution
  * - PAK data: read on demand from SD card via dataslot_read()
  *
  * Memory layout:
- * - BRAM:     0x00000000 (64KB)  - Bootloader code, stack
+ * - BRAM:     0x00000000 (32KB)  - Bootloader code, stack
  * - SDRAM:    0x10000000 (64MB)  - BSS + Heap
  *   - 0x10200000: quake.bin LMA (bridge loads here, copied to PSRAM)
  *   - 0x10400000: BSS + Heap (~43.5MB, pak0.pak read on demand from SD)
@@ -21,7 +21,7 @@
 ENTRY(_start)
 
 MEMORY {
-    BRAM      (rwx) : ORIGIN = 0x00000000, LENGTH = 64K
+    BRAM      (rwx) : ORIGIN = 0x00000000, LENGTH = 32K
     PSRAM     (rx)  : ORIGIN = 0x30000000, LENGTH = 16M     /* Quake code VMA (CRAM0, read-only) */
     SDRAM_BSS (rwx) : ORIGIN = 0x10400000, LENGTH = 44M     /* BSS + Heap in SDRAM after quake.bin LMA */
 }
@@ -66,17 +66,6 @@ SECTIONS {
         *(.sbss.boot*)
         . = ALIGN(4);
         __bss_end = .;
-    } > BRAM
-
-    /* Hot Quake code/data pinned in BRAM for lower latency.
-     * Included in boot image generation (firmware.mif). */
-    .fasttext : {
-        . = ALIGN(4);
-        __fasttext_start = .;
-        KEEP(*(.fasttext*))
-        KEEP(*(.fastrodata*))
-        . = ALIGN(4);
-        __fasttext_end = .;
     } > BRAM
 
     .fastdata : {
@@ -152,6 +141,8 @@ SECTIONS {
     /* Timer ISR uses a separate 256-byte stack below the main trap stack.
      * Main trap frame is 272 bytes, so timer stack starts 512 bytes below top. */
     PROVIDE(_timer_stack_top = __stack_top - 512);
+    /* Single scratch word for trap handler to save t0 before reading mcause */
+    PROVIDE(_trap_scratch = __stack_top - 516);
     PROVIDE(_bss_start = __bss_start);
     PROVIDE(_bss_end = __bss_end);
     PROVIDE(_qbss_start = __qbss_start);
@@ -168,6 +159,6 @@ SECTIONS {
     PROVIDE(_data_copy_dst = __data_copy_dst);
     PROVIDE(_data_copy_size = __data_copy_size);
 
-    /* Keep at least 8 KB BRAM stack/trap headroom after hot sections. */
+    /* Keep at least 8 KB BRAM stack/trap headroom after fastdata. */
     ASSERT(__fastdata_end <= (__stack_top - 8192), "BRAM overflow: insufficient stack headroom")
 }

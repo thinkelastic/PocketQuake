@@ -10,9 +10,7 @@
  *   Timer interrupt (mcause 0x80000007) uses a fast path that only saves
  *   caller-saved registers.  All other traps use the full save path.
  *
- * BRAM scratch layout (0x0000F000):
- *   0x0000F000: boot magic / t0 save slot (shared; boot magic only read once)
- *   0x0000F004: (available)
+ * BRAM scratch: _trap_scratch (linker symbol, just below timer stack)
  */
 
 .section .text.start
@@ -34,10 +32,10 @@ _start:
     la t0, _trap_vector
     csrw mtvec, t0
 
-    /* Mark that we've booted (store magic value at fixed BRAM address) */
-    lui t0, 0x0000F     /* Use top of BRAM area 0x0000F000 as scratch */
+    /* Mark that we've booted (store magic value at BRAM scratch) */
+    lui t0, %hi(_trap_scratch)
     li t1, 0xDEAD0001
-    sw t1, 0(t0)
+    sw t1, %lo(_trap_scratch)(t0)
 
     /* Clear BSS section */
     lui a0, %hi(_bss_start)
@@ -74,10 +72,10 @@ _trap_vector:
     /* Step 1: Save original sp to mscratch */
     csrw mscratch, sp
 
-    /* Step 2: Save original t0 to fixed BRAM scratch (0x0000F000).
+    /* Step 2: Save original t0 to BRAM scratch word (_trap_scratch).
      * We use sp as a temp (original sp is safe in mscratch). */
-    lui sp, 0xF                 /* sp = 0x0000F000 */
-    sw t0, 0(sp)                /* BRAM[0xF000] = original t0 */
+    lui sp, %hi(_trap_scratch)
+    sw t0, %lo(_trap_scratch)(sp)
 
     /* Step 3: Read mcause into t0 (safe — original t0 is saved) */
     csrr t0, mcause
@@ -104,9 +102,9 @@ _trap_vector:
     /* Save ra */
     sw ra,  4(sp)
 
-    /* Save original t0 (from BRAM scratch at 0x0000F000) */
-    lui t0, 0xF
-    lw t0, 0(t0)
+    /* Save original t0 (from BRAM scratch) */
+    lui t0, %hi(_trap_scratch)
+    lw t0, %lo(_trap_scratch)(t0)
     sw t0,  8(sp)               /* frame[2] = original t0 (x5) */
 
     /* Save remaining caller-saved registers */
@@ -127,8 +125,10 @@ _trap_vector:
     csrr t0, mepc
     sw t0, 68(sp)               /* frame[17] = mepc */
 
-    /* Call audio ISR (integer-only, no FP save needed) */
-    jal ra, audio_timer_isr
+    /* Call audio ISR (integer-only, no FP save needed).
+     * Use JALR — function may be in PSRAM, beyond JAL ±1MB range. */
+    la t0, audio_timer_isr
+    jalr ra, t0, 0
 
     /* Restore mepc */
     lw t0, 68(sp)
@@ -175,8 +175,8 @@ _trap_vector:
  * ================================================ */
 _full_trap_path:
     /* Recover original t0 from BRAM scratch.
-     * sp is still 0x0000F000 from the lui above. */
-    lw t0, 0(sp)               /* t0 = original t0 */
+     * sp still holds %hi(_trap_scratch) from the lui in _trap_vector. */
+    lw t0, %lo(_trap_scratch)(sp)   /* t0 = original t0 */
 
     /* Switch to trap stack in BRAM */
     lui sp, %hi(_stack_top)

@@ -35,7 +35,7 @@ DEFAULT_SEED=13
 
 BASE_FLAGS=(
     --with-rvm --with-rva --with-rvf --with-rvc
-    --with-fetch-l1 --fetch-l1-sets=256 --fetch-l1-ways=1 --fetch-l1-refill-count=2
+    --with-fetch-l1 --fetch-l1-sets=512 --fetch-l1-ways=1 --fetch-l1-refill-count=2
     --fetch-l1-hardware-prefetch=nl --fetch-axi4
     --with-lsu-l1 --lsu-l1-sets=1024 --lsu-l1-ways=2
     --lsu-l1-refill-count=2 --lsu-l1-writeback-count=2 --lsu-l1-store-buffer-slots=2 --lsu-l1-store-buffer-ops=32
@@ -45,7 +45,7 @@ BASE_FLAGS=(
     --regfile-async --allow-bypass-from=0
     --relaxed-src
     --reset-vector=0
-    --region base=0,size=10000,main=0,exe=1
+    --region base=0,size=8000,main=0,exe=1
     --region base=10000000,size=4000000,main=1,exe=1
     --region base=20000000,size=10000000,main=0,exe=0
     --region base=30000000,size=8000000,main=1,exe=1

@@ -198,17 +198,17 @@ wire [31:0] ar_addr = s_axi_araddr;
 wire [31:0] aw_addr = s_axi_awaddr;
 
 // ============================================
-// BRAM (64KB = 16384 x 32-bit words)
+// BRAM (32KB = 8192 x 32-bit words)
 // ============================================
 wire [31:0] ram_rdata;
-reg  [13:0] ram_addr_mux;
+reg  [12:0] ram_addr_mux;
 wire ram_wren;
 
 altsyncram #(
     .operation_mode("SINGLE_PORT"),
     .width_a(32),
-    .widthad_a(14),
-    .numwords_a(16384),
+    .widthad_a(13),
+    .numwords_a(8192),
     .width_byteena_a(4),
     .lpm_type("altsyncram"),
     .outdata_reg_a("UNREGISTERED"),
@@ -638,26 +638,26 @@ wire term_pending = (state == S_TERM);
 // - S_IDLE: use AR/AW addr combinatorially for first-beat address setup
 // - S_BRAM_RD burst: advance combinatorially so BRAM captures NEXT address
 // - S_BRAM_WR / other: use latched addr
-wire [13:0] bram_next_word = req_addr[15:2] + 14'd1;
+wire [12:0] bram_next_word = req_addr[14:2] + 13'd1;
 
 always @(*) begin
     case (state)
         S_IDLE: begin
             // Combinatorial: pick address from AR or AW channel
             if (s_axi_arvalid && !s_axi_awvalid)
-                ram_addr_mux = ar_addr[15:2];
+                ram_addr_mux = ar_addr[14:2];
             else if (s_axi_awvalid)
-                ram_addr_mux = aw_addr[15:2];
+                ram_addr_mux = aw_addr[14:2];
             else
-                ram_addr_mux = 14'd0;
+                ram_addr_mux = 13'd0;
         end
         S_BRAM_RD: begin
             if (!beat_is_last)
                 ram_addr_mux = bram_next_word;
             else
-                ram_addr_mux = req_addr[15:2];
+                ram_addr_mux = req_addr[14:2];
         end
-        default: ram_addr_mux = req_addr[15:2];
+        default: ram_addr_mux = req_addr[14:2];
     endcase
 end
 

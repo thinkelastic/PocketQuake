@@ -32,9 +32,8 @@ extern void SNDDMA_DrainRing(void);
  * Called from the timer interrupt fast path in start.S.
  * Must NOT use floating-point (FP regs are not saved).
  * Must NOT call anything that allocates or touches the heap.
- * Must be in BRAM — start.S uses JAL which has ±1MB range.
  */
-void __attribute__((section(".fasttext"), noinline)) audio_timer_isr(void)
+void __attribute__((noinline)) audio_timer_isr(void)
 {
     /* Rearm timer first (minimize jitter) */
     unsigned int now = MTIME_LO;

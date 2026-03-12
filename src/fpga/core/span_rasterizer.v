@@ -10,7 +10,7 @@
 //   0x10: SPAN_T          (RW) - Initial T (16.16 fixed-point)
 //   0x14: SPAN_SSTEP      (RW) - S step per pixel (16.16 fixed-point)
 //   0x18: SPAN_TSTEP      (RW) - T step per pixel (16.16 fixed-point)
-//   0x1C: SPAN_CONTROL    (W)  - Write to enqueue: [15:0]=count, [16]=colormap, [17]=turb, [18]=persp, [19]=combined_z
+//   0x1C: SPAN_CONTROL    (W)  - Write to enqueue: [15:0]=count, [16]=cmap, [17]=turb, [18]=persp, [19]=combz, [23]=uv
 //   0x20: SPAN_STATUS     (R)  - bit0=busy, bit1=queue_full, bit2=can_accept, bit3=overflow
 //   0x24: ZSPAN_ADDR      (RW) - Z-buffer dest CPU byte address (short*)
 //   0x28: ZSPAN_IZI       (RW) - Initial izi fixed-point value (high 16 written)
@@ -30,6 +30,16 @@
 //   0x94: ALIAS_STSTEP    (RW) - Sticky: a_ststepxwhole (signed, combined whole s+t step)
 //   0x98: ALIAS_SFRAC     (RW) - Sticky: {skinwidth[15:0], a_sstepxfrac[15:0]} packed
 //   0x9C: ALIAS_TFRAC     (RW) - Sticky: {16'd0, a_tstepxfrac[15:0]}
+//   0xA0: PERSP_SDIVZ_ORIGIN (RW) - Sticky: sdivz origin (Q16.16)
+//   0xA4: PERSP_TDIVZ_ORIGIN (RW) - Sticky: tdivz origin (Q16.16)
+//   0xA8: PERSP_ZI_ORIGIN    (RW) - Sticky: zi origin (Q16.16)
+//   0xAC: PERSP_SDIVZ_STEPV  (RW) - Sticky: sdivz per-pixel stepv (Q16.16)
+//   0xB0: PERSP_TDIVZ_STEPV  (RW) - Sticky: tdivz per-pixel stepv (Q16.16)
+//   0xB4: PERSP_ZI_STEPV     (RW) - Sticky: zi per-pixel stepv (Q16.16)
+//   0xB8: PERSP_SDIVZ_STEPU  (RW) - Sticky: sdivz per-pixel stepu (Q16.16)
+//   0xBC: PERSP_TDIVZ_STEPU  (RW) - Sticky: tdivz per-pixel stepu (Q16.16)
+//   0xC0: PERSP_ZI_STEPU     (RW) - Sticky: zi per-pixel stepu (Q16.16)
+//   0xC4: SPAN_UV            (RW) - Per-span: packed {v[15:0], u[15:0]}
 //
 // Queueing:
 //   - One active command + 2-entry FIFO (depth=3 total).
@@ -85,6 +95,7 @@ module span_rasterizer (
 
     // Status
     output wire       active,
+    output wire       fifo_full_out,
 
     // Colormap BRAM interface (port B, read-only)
     output wire [11:0] cmap_addr,
@@ -137,6 +148,20 @@ reg signed [31:0] alias_ststep_reg;     // Sticky: a_ststepxwhole (combined whol
 reg [15:0] alias_sfrac_step_reg;        // Sticky: a_sstepxfrac (fractional s step)
 reg [15:0] alias_skinwidth_reg;         // Sticky: skin texture width in pixels
 reg [15:0] alias_tfrac_step_reg;        // Sticky: a_tstepxfrac (fractional t step)
+
+// UV MAD origin/step registers (sticky, set per-surface via slots 40-48)
+reg signed [31:0] persp_sdivz_origin_reg;  // sdivz origin (Q16.16)
+reg signed [31:0] persp_tdivz_origin_reg;  // tdivz origin (Q16.16)
+reg signed [31:0] persp_zi_origin_reg;     // zi origin (Q16.16)
+reg signed [31:0] persp_sdivz_stepv_reg;   // sdivz per-pixel stepv (Q16.16)
+reg signed [31:0] persp_tdivz_stepv_reg;   // tdivz per-pixel stepv (Q16.16)
+reg signed [31:0] persp_zi_stepv_reg;      // zi per-pixel stepv (Q16.16)
+reg signed [31:0] persp_sdivz_stepu_reg;   // sdivz per-pixel stepu (Q16.16)
+reg signed [31:0] persp_tdivz_stepu_reg;   // tdivz per-pixel stepu (Q16.16)
+reg signed [31:0] persp_zi_stepu_reg;      // zi per-pixel stepu (Q16.16)
+
+// UV per-span register (slot 49)
+reg [31:0] uv_reg;  // Packed {v[15:0], u[15:0]}
 
 // Active textured command state
 reg [31:0] cur_fb;
@@ -230,6 +255,13 @@ reg [5:0]  persp_shift_amt;           // Pre-computed shift amount (46 - lz)
 reg signed [31:0] persp_shifted_r;   // Registered barrel shift output (product >>> shift_amt)
 reg        persp_pre_advanced;       // Pre-advanced divz/zi in STEP (skip ACCUM+ADVANCE)
 
+// UV MAD active state
+reg        cur_uv_mode;             // UV MAD mode active for current command
+reg [4:0]  uv_mad_phase;            // Phase counter for UV MAD pipeline (0-18)
+reg signed [47:0] uv_sdivz_accum;   // Accumulator: origin + stepv*v
+reg signed [47:0] uv_tdivz_accum;
+reg signed [47:0] uv_zi_accum;
+
 // Command FIFO (2-entry circular buffer, total depth = 3 with active command)
 reg        fifo_wr_ptr;
 reg        fifo_rd_ptr;
@@ -270,6 +302,10 @@ reg signed [31:0] fifo_alias_ststep [0:1]; // Alias whole s+t step (was sticky b
 reg [15:0] fifo_alias_sfrac_step [0:1];   // Alias fractional s step
 reg [15:0] fifo_alias_tfrac_step [0:1];   // Alias fractional t step
 reg [15:0] fifo_alias_skinwidth  [0:1];   // Alias skin texture width
+
+// UV MAD FIFO fields
+reg        fifo_uv_mode [0:1];   // UV mode flag
+reg [31:0] fifo_uv      [0:1];   // Packed {v[15:0], u[15:0]}
 
 // Surface block FIFO fields
 reg [31:0] fifo_surf_light_tl [0:1];
@@ -548,6 +584,7 @@ localparam ST_ZTEST_WAIT     = 6'd38;  // Z-test: wait for SRAM read response
 localparam ST_ZTEST_CMP      = 6'd39;  // Z-test: register cache hit/compare (pipeline break)
 localparam ST_FIFO_DEQUEUE   = 6'd40;  // Consolidated FIFO dequeue (single readout point)
 localparam ST_TEX_PIPE       = 6'd41;  // Pipeline wait: t/s_int_eff_r → tex_byte_addr_r settle
+localparam ST_UV_MAD         = 6'd42;  // UV MAD: compute sdivz/tdivz/zi from origins+steps+u,v
 reg [5:0] state;
 reg       cmd_issued;      // Used for SRAM z-write path
 reg       seen_busy;       // Used for SRAM z-write path
@@ -557,6 +594,12 @@ wire busy_status = (state != ST_IDLE) || (fifo_count > 2'd0);
 wire queue_full  = (fifo_count == 2'd2);
 wire can_accept  = (fifo_count < 2'd2);
 assign active = busy_status;
+assign fifo_full_out = queue_full;
+
+// Performance counters (free-running, write-clear via perf_cache_hits write)
+reg [31:0] perf_cache_hits;
+reg [31:0] perf_cache_misses;
+reg [31:0] perf_pixels;
 
 // Textured address computation
 // Treat S/T as signed fixed-point high words and clamp negative values to 0.
@@ -753,9 +796,9 @@ always @(*) begin
         6'd20: reg_rdata = surf_tex_step_reg;
         6'd21: reg_rdata = surf_dest_step_reg;
         6'd22: reg_rdata = 32'd0; // SURF_CONTROL write-only
-        6'd23: reg_rdata = 32'd0;
-        6'd24: reg_rdata = 32'd0;
-        6'd25: reg_rdata = 32'd0;
+        6'd23: reg_rdata = perf_cache_hits;    // 0x5C SPAN_PERF_CACHE_HITS
+        6'd24: reg_rdata = perf_cache_misses;  // 0x60 SPAN_PERF_CACHE_MISSES
+        6'd25: reg_rdata = perf_pixels;         // 0x64 SPAN_PERF_PIXELS
         6'd26: reg_rdata = persp_sdivz_reg;
         6'd27: reg_rdata = persp_tdivz_reg;
         6'd28: reg_rdata = persp_zi_reg;
@@ -770,6 +813,16 @@ always @(*) begin
         6'd37: reg_rdata = alias_ststep_reg;
         6'd38: reg_rdata = {alias_skinwidth_reg, alias_sfrac_step_reg};
         6'd39: reg_rdata = {16'd0, alias_tfrac_step_reg};
+        6'd40: reg_rdata = persp_sdivz_origin_reg;
+        6'd41: reg_rdata = persp_tdivz_origin_reg;
+        6'd42: reg_rdata = persp_zi_origin_reg;
+        6'd43: reg_rdata = persp_sdivz_stepv_reg;
+        6'd44: reg_rdata = persp_tdivz_stepv_reg;
+        6'd45: reg_rdata = persp_zi_stepv_reg;
+        6'd46: reg_rdata = persp_sdivz_stepu_reg;
+        6'd47: reg_rdata = persp_tdivz_stepu_reg;
+        6'd48: reg_rdata = persp_zi_stepu_reg;
+        6'd49: reg_rdata = uv_reg;
         default: reg_rdata = 32'd0;
     endcase
 end
@@ -898,6 +951,21 @@ always @(posedge clk or negedge reset_n) begin
         alias_sfrac_step_reg <= 16'd0;
         alias_skinwidth_reg  <= 16'd0;
         alias_tfrac_step_reg <= 16'd0;
+        persp_sdivz_origin_reg <= 32'sd0;
+        persp_tdivz_origin_reg <= 32'sd0;
+        persp_zi_origin_reg    <= 32'sd0;
+        persp_sdivz_stepv_reg  <= 32'sd0;
+        persp_tdivz_stepv_reg  <= 32'sd0;
+        persp_zi_stepv_reg     <= 32'sd0;
+        persp_sdivz_stepu_reg  <= 32'sd0;
+        persp_tdivz_stepu_reg  <= 32'sd0;
+        persp_zi_stepu_reg     <= 32'sd0;
+        uv_reg                 <= 32'd0;
+        cur_uv_mode            <= 1'b0;
+        uv_mad_phase           <= 5'd0;
+        uv_sdivz_accum         <= 48'sd0;
+        uv_tdivz_accum         <= 48'sd0;
+        uv_zi_accum            <= 48'sd0;
         cur_alias_en         <= 1'b0;
         cur_noz_en           <= 1'b0;
         cur_alias_ptex       <= 32'd0;
@@ -1079,16 +1147,14 @@ always @(posedge clk or negedge reset_n) begin
                             end
                             if (reg_wdata[19]) begin
                                 cur_z_addr_comb <= z_addr_reg;
-                                cur_izi_comb    <= zi_reg;
+                                if (!reg_wdata[23])  // Legacy: CPU provides izi
+                                    cur_izi_comb <= zi_reg;
                                 cur_zistep      <= zistep_reg;
                                 z_pair_has_lo   <= 1'b0;
                                 z_pending_valid <= 1'b0;
                             end
+                            cur_uv_mode <= reg_wdata[23];
                             if (reg_wdata[18]) begin
-                                // Perspective mode: load per-span params → ST_PERSP_INIT
-                                persp_sdivz_cur <= persp_sdivz_reg;
-                                persp_tdivz_cur <= persp_tdivz_reg;
-                                persp_zi_cur    <= persp_zi_reg;
                                 persp_total_remaining <= reg_wdata[15:0];
                                 persp_more_chunks <= |reg_wdata[15:0];
                                 persp_is_initial <= 1'b1;
@@ -1096,7 +1162,17 @@ always @(posedge clk or negedge reset_n) begin
                                 if (reg_wdata[22]) begin
                                     z_cache_valid <= 1'b0;
                                 end
-                                state <= ST_PERSP_INIT;
+                                if (reg_wdata[23]) begin
+                                    // UV mode: compute sdivz/tdivz/zi from u,v via MAD pipeline
+                                    uv_mad_phase <= 5'd0;
+                                    state <= ST_UV_MAD;
+                                end else begin
+                                    // Legacy mode: CPU provides sdivz/tdivz/zi directly
+                                    persp_sdivz_cur <= persp_sdivz_reg;
+                                    persp_tdivz_cur <= persp_tdivz_reg;
+                                    persp_zi_cur    <= persp_zi_reg;
+                                    state <= ST_PERSP_INIT;
+                                end
                             end else if (reg_wdata[20] && reg_wdata[19] && !reg_wdata[21]) begin
                                 z_cache_valid <= 1'b0;
                                 state <= ST_ZTEST_CMP;
@@ -1126,9 +1202,12 @@ always @(posedge clk or negedge reset_n) begin
                             fifo_alias_en[fifo_wr_ptr]   <= reg_wdata[20];
                             fifo_noz_en[fifo_wr_ptr]     <= reg_wdata[21];
                             fifo_sprite_en[fifo_wr_ptr]  <= reg_wdata[22];
+                            fifo_uv_mode[fifo_wr_ptr]    <= reg_wdata[23];
+                            fifo_uv[fifo_wr_ptr]          <= uv_reg;
                             if (reg_wdata[19]) begin
                                 fifo_zaddr[fifo_wr_ptr]   <= z_addr_reg;
-                                fifo_izi[fifo_wr_ptr]     <= zi_reg;
+                                if (!reg_wdata[23])  // Legacy: store CPU-provided izi
+                                    fifo_izi[fifo_wr_ptr] <= zi_reg;
                                 fifo_zistep[fifo_wr_ptr]  <= zistep_reg;
                             end
                             if (reg_wdata[20]) begin
@@ -1238,6 +1317,17 @@ always @(posedge clk or negedge reset_n) begin
                 6'd37: alias_ststep_reg     <= reg_wdata;
                 6'd38: begin alias_skinwidth_reg <= reg_wdata[31:16]; alias_sfrac_step_reg <= reg_wdata[15:0]; end
                 6'd39: alias_tfrac_step_reg <= reg_wdata[15:0];
+
+                6'd40: persp_sdivz_origin_reg <= reg_wdata;
+                6'd41: persp_tdivz_origin_reg <= reg_wdata;
+                6'd42: persp_zi_origin_reg    <= reg_wdata;
+                6'd43: persp_sdivz_stepv_reg  <= reg_wdata;
+                6'd44: persp_tdivz_stepv_reg  <= reg_wdata;
+                6'd45: persp_zi_stepv_reg     <= reg_wdata;
+                6'd46: persp_sdivz_stepu_reg  <= reg_wdata;
+                6'd47: persp_tdivz_stepu_reg  <= reg_wdata;
+                6'd48: persp_zi_stepu_reg     <= reg_wdata;
+                6'd49: uv_reg                 <= reg_wdata;
 
                 default: ;
             endcase
@@ -2269,9 +2359,11 @@ always @(posedge clk or negedge reset_n) begin
                     cmd_issued    <= 1'b0;
                     seen_busy     <= 1'b0;
                     tex_addr_for_turb <= 1'b0;
+                    cur_uv_mode <= fifo_uv_mode[fifo_rd_ptr];
                     if (fifo_combined_z[fifo_rd_ptr]) begin
                         cur_z_addr_comb <= fifo_zaddr[fifo_rd_ptr];
-                        cur_izi_comb    <= fifo_izi[fifo_rd_ptr];
+                        if (!fifo_uv_mode[fifo_rd_ptr])  // Legacy: CPU-provided izi
+                            cur_izi_comb <= fifo_izi[fifo_rd_ptr];
                         cur_zistep      <= fifo_zistep[fifo_rd_ptr];
                         z_pair_has_lo   <= 1'b0;
                         z_pending_valid <= 1'b0;
@@ -2287,9 +2379,6 @@ always @(posedge clk or negedge reset_n) begin
                         cur_cmap_en          <= 1'b1;
                     end
                     if (fifo_is_persp[fifo_rd_ptr]) begin
-                        persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
-                        persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
-                        persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
                         persp_total_remaining <= fifo_count_f[fifo_rd_ptr];
                         persp_more_chunks <= 1'b1;
                         persp_is_initial <= 1'b1;
@@ -2297,7 +2386,18 @@ always @(posedge clk or negedge reset_n) begin
                         if (fifo_sprite_en[fifo_rd_ptr]) begin
                             z_cache_valid <= 1'b0;
                         end
-                        state <= ST_PERSP_INIT;
+                        if (fifo_uv_mode[fifo_rd_ptr]) begin
+                            // UV mode: restore u,v from FIFO, compute via MAD pipeline
+                            uv_reg <= fifo_uv[fifo_rd_ptr];
+                            uv_mad_phase <= 5'd0;
+                            state <= ST_UV_MAD;
+                        end else begin
+                            // Legacy: use pre-stored sdivz/tdivz/zi
+                            persp_sdivz_cur <= fifo_persp_sdivz[fifo_rd_ptr];
+                            persp_tdivz_cur <= fifo_persp_tdivz[fifo_rd_ptr];
+                            persp_zi_cur    <= fifo_persp_zi[fifo_rd_ptr];
+                            state <= ST_PERSP_INIT;
+                        end
                     end else if (fifo_alias_en[fifo_rd_ptr] && fifo_combined_z[fifo_rd_ptr] && !fifo_noz_en[fifo_rd_ptr]) begin
                         z_cache_valid <= 1'b0;
                         state <= ST_ZTEST_CMP;
@@ -2307,6 +2407,96 @@ always @(posedge clk or negedge reset_n) begin
                 end
                 fifo_rd_ptr <= ~fifo_rd_ptr;
                 did_dequeue = 1'b1;
+            end
+
+            // UV MAD: compute sdivz/tdivz/zi from origins + steps * u,v
+            // Uses the shared DSP (persp_mul_a * persp_mul_b, 3-cycle latency).
+            // 6 multiplies x 3 cycles = 18 phases + 1 final = 19 total.
+            // Phase sequence:
+            //   0-2:  sdivz_stepv * v → capture at 3
+            //   3-5:  tdivz_stepv * v → capture at 6
+            //   6-8:  zi_stepv * v    → capture at 9
+            //   9-11: sdivz_stepu * u → capture at 12
+            //  12-14: tdivz_stepu * u → capture at 15
+            //  15-17: zi_stepu * u    → capture at 18
+            //  18:    final accumulate, compute izi, → ST_PERSP_INIT
+            ST_UV_MAD: begin
+                case (uv_mad_phase)
+                    5'd0: begin
+                        // Launch sdivz_stepv * v
+                        persp_mul_a <= {{16{persp_sdivz_stepv_reg[31]}}, persp_sdivz_stepv_reg};
+                        persp_mul_b <= {1'b0, uv_reg[31:16]};  // v (positive, zero-extend)
+                        uv_mad_phase <= 5'd1;
+                    end
+                    5'd1: uv_mad_phase <= 5'd2;
+                    5'd2: uv_mad_phase <= 5'd3;
+                    5'd3: begin
+                        // Capture sdivz*v, accumulate with origin
+                        uv_sdivz_accum <= {{16{persp_sdivz_origin_reg[31]}}, persp_sdivz_origin_reg}
+                                        + $signed(persp_product[47:0]);
+                        // Launch tdivz_stepv * v
+                        persp_mul_a <= {{16{persp_tdivz_stepv_reg[31]}}, persp_tdivz_stepv_reg};
+                        // mul_b unchanged (still v)
+                        uv_mad_phase <= 5'd4;
+                    end
+                    5'd4: uv_mad_phase <= 5'd5;
+                    5'd5: uv_mad_phase <= 5'd6;
+                    5'd6: begin
+                        // Capture tdivz*v, accumulate with origin
+                        uv_tdivz_accum <= {{16{persp_tdivz_origin_reg[31]}}, persp_tdivz_origin_reg}
+                                        + $signed(persp_product[47:0]);
+                        // Launch zi_stepv * v
+                        persp_mul_a <= {{16{persp_zi_stepv_reg[31]}}, persp_zi_stepv_reg};
+                        uv_mad_phase <= 5'd7;
+                    end
+                    5'd7: uv_mad_phase <= 5'd8;
+                    5'd8: uv_mad_phase <= 5'd9;
+                    5'd9: begin
+                        // Capture zi*v, accumulate with origin
+                        uv_zi_accum <= {{16{persp_zi_origin_reg[31]}}, persp_zi_origin_reg}
+                                     + $signed(persp_product[47:0]);
+                        // Launch sdivz_stepu * u
+                        persp_mul_a <= {{16{persp_sdivz_stepu_reg[31]}}, persp_sdivz_stepu_reg};
+                        persp_mul_b <= {1'b0, uv_reg[15:0]};  // u (positive, zero-extend)
+                        uv_mad_phase <= 5'd10;
+                    end
+                    5'd10: uv_mad_phase <= 5'd11;
+                    5'd11: uv_mad_phase <= 5'd12;
+                    5'd12: begin
+                        // Capture sdivz*u, final sdivz = accum + product
+                        // Q8.24 MAD result >>> 8 = Q16.16 for perspective pipeline
+                        persp_sdivz_cur <= (uv_sdivz_accum + $signed(persp_product[47:0])) >>> 8;
+                        // Launch tdivz_stepu * u
+                        persp_mul_a <= {{16{persp_tdivz_stepu_reg[31]}}, persp_tdivz_stepu_reg};
+                        uv_mad_phase <= 5'd13;
+                    end
+                    5'd13: uv_mad_phase <= 5'd14;
+                    5'd14: uv_mad_phase <= 5'd15;
+                    5'd15: begin
+                        // Capture tdivz*u, final tdivz = accum + product
+                        // Q8.24 MAD result >>> 8 = Q16.16 for perspective pipeline
+                        persp_tdivz_cur <= (uv_tdivz_accum + $signed(persp_product[47:0])) >>> 8;
+                        // Launch zi_stepu * u
+                        persp_mul_a <= {{16{persp_zi_stepu_reg[31]}}, persp_zi_stepu_reg};
+                        uv_mad_phase <= 5'd16;
+                    end
+                    5'd16: uv_mad_phase <= 5'd17;
+                    5'd17: uv_mad_phase <= 5'd18;
+                    5'd18: begin
+                        // Capture zi*u, final zi = accum + product
+                        // Q8.24 MAD result >>> 8 = Q16.16 for perspective pipeline
+                        persp_zi_cur <= (uv_zi_accum + $signed(persp_product[47:0])) >>> 8;
+                        // Compute izi for combined z-write:
+                        // izi = zi_float * 2^31 = zi_q8.24 * 2^7
+                        // zi_q8.24 = accum + product, take bits [24:0] << 7
+                        if (cur_combined_z) begin
+                            cur_izi_comb[31:7] <= uv_zi_accum[24:0] + persp_product[24:0];
+                            cur_izi_comb[6:0]  <= 7'd0;
+                        end
+                        state <= ST_PERSP_INIT;
+                    end
+                    default: uv_mad_phase <= 5'd0;
+                endcase
             end
 
             default: begin
@@ -2322,6 +2512,33 @@ always @(posedge clk or negedge reset_n) begin
             // 2'b00: no change
             default: ;
         endcase
+    end
+end
+
+// ============================================
+// Performance counters (separate always block)
+// Write-clear: CPU write to reg 6'd23 (SPAN_PERF_CACHE_HITS) resets all three.
+// ============================================
+wire perf_write_clear = reg_wr && (reg_addr == 6'd23);
+
+always @(posedge clk or negedge reset_n) begin
+    if (!reset_n) begin
+        perf_cache_hits   <= 0;
+        perf_cache_misses <= 0;
+        perf_pixels       <= 0;
+    end else if (perf_write_clear) begin
+        perf_cache_hits   <= 0;
+        perf_cache_misses <= 0;
+        perf_pixels       <= 0;
+    end else begin
+        // Count texture cache hits/misses at ST_TEX_CACHE evaluation
+        if (state == ST_TEX_CACHE) begin
+            perf_pixels <= perf_pixels + 1;
+            if (cache_hit_comb)
+                perf_cache_hits <= perf_cache_hits + 1;
+            else
+                perf_cache_misses <= perf_cache_misses + 1;
+        end
     end
 end
 

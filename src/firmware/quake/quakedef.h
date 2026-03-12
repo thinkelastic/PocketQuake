@@ -116,7 +116,7 @@ void	VID_UnlockBuffer (void);
 
 /* Optional placement hints for hot code/data on PocketQuake. */
 #if defined(POCKET_QUAKE)
-#define PQ_FASTTEXT   __attribute__((section(".fasttext"), noinline))
+#define PQ_FASTTEXT
 #define PQ_FASTDATA   __attribute__((section(".fastdata")))
 #define PQ_FASTRODATA __attribute__((section(".fastrodata")))
 #else
