@@ -42,6 +42,13 @@ extern cvar_t	r_hwspan_queue;
 
 int		pq_combined_z_active;  /* Set by D_DrawSpans8 when HW combined z mode used */
 
+#if HW_PERSP_ACCEL
+/* DMA span descriptor buffer in SDRAM BSS.
+ * CPU writes via uncached alias (0x50xxxxxx), HW reads via AXI. */
+#define SPAN_DMA_BUF_SIZE 1024
+static unsigned int span_dma_buf[SPAN_DMA_BUF_SIZE] __attribute__((aligned(4)));
+#endif
+
 void D_DrawTurbulent8Span (void);
 
 
@@ -311,11 +318,12 @@ D_DrawSpans8
 */
 PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 {
-	int				count;
-	unsigned char	*pbase, *pdest;
-	float			sdivz, tdivz, zi, du, dv;
+	unsigned char	*pbase;
 	unsigned int	prof_start = 0;
 #if !HW_PERSP_ACCEL
+	int				count;
+	unsigned char	*pdest;
+	float			sdivz, tdivz, zi, du, dv;
 	int				spancount;
 	fixed16_t		s, t, snext, tnext, sstep, tstep;
 	float			z, spancountminus1;
@@ -330,11 +338,15 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 	pbase = (unsigned char *)cacheblock;
 
 #if HW_PERSP_ACCEL
-	// HW perspective: dispatch entire spans to hardware, which internally
-	// subdivides into 16-pixel affine chunks with reciprocal approximation.
+	// HW perspective + UV MAD + HW address gen + DMA span list:
+	// CPU builds descriptor list in SDRAM, hardware processes autonomously.
 	span_set_texture((unsigned int)pbase, cachewidth, (bbextentt >> 16) + 1);
-	span_set_perspective(d_sdivzstepu, d_tdivzstepu, d_zistepu,
-	                     sadjust, tadjust, bbextents, bbextentt);
+	span_set_framebuffer((unsigned int)d_viewbuffer, screenwidth,
+	                     (unsigned int)d_pzbuffer, d_zwidth * 2);
+	span_set_perspective_uv(d_sdivzstepu, d_tdivzstepu, d_zistepu,
+	                        d_sdivzstepv, d_tdivzstepv, d_zistepv,
+	                        d_sdivzorigin, d_tdivzorigin, d_ziorigin,
+	                        sadjust, tadjust, bbextents, bbextentt);
 
 #if HW_COMBINED_Z
 	{
@@ -342,49 +354,39 @@ PQ_FASTTEXT void D_DrawSpans8 (espan_t *pspan)
 	SPAN_ZISTEP = (unsigned int)izistep;
 	pq_combined_z_active = 1;
 
-	do
-	{
-		pdest = (unsigned char *)((byte *)d_viewbuffer +
-				(screenwidth * pspan->v) + pspan->u);
-		count = pspan->count;
+	// Set DMA control flags (sticky, applied to all descriptors)
+	SPAN_DMA_CTRL = SPAN_CTL_PERSP | SPAN_CTL_COMBZ | SPAN_CTL_UV;
 
-		du = (float)pspan->u;
-		dv = (float)pspan->v;
-
-		sdivz = d_sdivzorigin + dv*d_sdivzstepv + du*d_sdivzstepu;
-		tdivz = d_tdivzorigin + dv*d_tdivzstepv + du*d_tdivzstepu;
-		zi = d_ziorigin + dv*d_zistepv + du*d_zistepu;
-
-		int izi = (int)(zi * 0x8000 * 0x10000);
-		short *pzbuf = d_pzbuffer + (d_zwidth * pspan->v) + pspan->u;
-
-		while (!span_can_accept()) span_pump_audio();
-		span_draw_persp_z((unsigned int)pdest, sdivz, tdivz, zi,
-		                  (unsigned int)pzbuf, izi, count);
-
+	// Build descriptor list via uncached SDRAM alias
+	volatile unsigned int *buf = (volatile unsigned int *)
+		((unsigned int)span_dma_buf + 0x40000000);
+	int n = 0;
+	do {
+		buf[n++] = SPAN_DESC_PACK(pspan->u, pspan->v, pspan->count);
 	} while ((pspan = pspan->pnext) != NULL);
+
+	// Kick DMA: hardware reads descriptors from physical SDRAM
+	SPAN_DMA_BASE = (unsigned int)span_dma_buf;
+	SPAN_DMA_KICK = (unsigned int)n;
+
+	// Wait for all spans to complete (service audio while waiting)
+	while (SPAN_STATUS & SPAN_STATUS_BUSY) span_pump_audio();
 	}
 #else
-	do
-	{
-		pdest = (unsigned char *)((byte *)d_viewbuffer +
-				(screenwidth * pspan->v) + pspan->u);
-		count = pspan->count;
+	SPAN_DMA_CTRL = SPAN_CTL_PERSP | SPAN_CTL_UV;
 
-		du = (float)pspan->u;
-		dv = (float)pspan->v;
-
-		sdivz = d_sdivzorigin + dv*d_sdivzstepv + du*d_sdivzstepu;
-		tdivz = d_tdivzorigin + dv*d_tdivzstepv + du*d_tdivzstepu;
-		zi = d_ziorigin + dv*d_zistepv + du*d_zistepu;
-
-		while (!span_can_accept()) span_pump_audio();
-		span_draw_persp((unsigned int)pdest, sdivz, tdivz, zi, count);
-
+	volatile unsigned int *buf = (volatile unsigned int *)
+		((unsigned int)span_dma_buf + 0x40000000);
+	int n = 0;
+	do {
+		buf[n++] = SPAN_DESC_PACK(pspan->u, pspan->v, pspan->count);
 	} while ((pspan = pspan->pnext) != NULL);
-#endif
 
-	span_wait();
+	SPAN_DMA_BASE = (unsigned int)span_dma_buf;
+	SPAN_DMA_KICK = (unsigned int)n;
+
+	while (SPAN_STATUS & SPAN_STATUS_BUSY) span_pump_audio();
+#endif
 #else /* !HW_PERSP_ACCEL */
 	sstep = 0;	// keep compiler happy
 	tstep = 0;	// ditto

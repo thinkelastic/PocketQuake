@@ -40,6 +40,10 @@
 //   0xBC: PERSP_TDIVZ_STEPU  (RW) - Sticky: tdivz per-pixel stepu (Q16.16)
 //   0xC0: PERSP_ZI_STEPU     (RW) - Sticky: zi per-pixel stepu (Q16.16)
 //   0xC4: SPAN_UV            (RW) - Per-span: packed {v[15:0], u[15:0]}
+//   0xC8: SPAN_FB_BASE       (RW) - Sticky: framebuffer base byte address
+//   0xCC: SPAN_FB_STRIDE     (RW) - Sticky: framebuffer stride (bytes per row)
+//   0xD0: SPAN_Z_BASE        (RW) - Sticky: z-buffer base byte address
+//   0xD4: SPAN_Z_STRIDE      (RW) - Sticky: z-buffer stride (bytes per row)
 //
 // Queueing:
 //   - One active command + 2-entry FIFO (depth=3 total).
@@ -162,6 +166,20 @@ reg signed [31:0] persp_zi_stepu_reg;      // zi per-pixel stepu (Q16.16)
 
 // UV per-span register (slot 49)
 reg [31:0] uv_reg;  // Packed {v[15:0], u[15:0]}
+
+// HW address generation registers (sticky, slots 50-53)
+reg [31:0] fb_base_reg;     // Framebuffer base byte address
+reg [15:0] fb_stride_reg;   // Framebuffer stride (bytes per row)
+reg [31:0] z_base_reg;      // Z-buffer base byte address
+reg [15:0] z_stride_reg;    // Z-buffer stride (bytes per row)
+
+// DMA span list registers (slots 54-56)
+reg [31:0] dma_base_reg;    // SDRAM byte address of descriptor array
+reg [31:0] dma_ctrl_reg;    // Sticky: SPAN_CONTROL flag bits [23:16] for all descriptors
+reg        dma_active;      // DMA mode active (processing descriptor list)
+reg [15:0] dma_remaining;   // Descriptors remaining to fetch
+reg [25:0] dma_fetch_addr;  // Next SDRAM byte address to fetch (bits [25:0])
+reg [31:0] dma_descriptor;  // Fetched descriptor word
 
 // Active textured command state
 reg [31:0] cur_fb;
@@ -585,12 +603,15 @@ localparam ST_ZTEST_CMP      = 6'd39;  // Z-test: register cache hit/compare (pi
 localparam ST_FIFO_DEQUEUE   = 6'd40;  // Consolidated FIFO dequeue (single readout point)
 localparam ST_TEX_PIPE       = 6'd41;  // Pipeline wait: t/s_int_eff_r → tex_byte_addr_r settle
 localparam ST_UV_MAD         = 6'd42;  // UV MAD: compute sdivz/tdivz/zi from origins+steps+u,v
+localparam ST_DMA_FETCH      = 6'd43;  // DMA: issue AXI read for next descriptor
+localparam ST_DMA_FILL       = 6'd44;  // DMA: wait for AXI read data
+localparam ST_DMA_DISPATCH   = 6'd45;  // DMA: inject descriptor as span command
 reg [5:0] state;
 reg       cmd_issued;      // Used for SRAM z-write path
 reg       seen_busy;       // Used for SRAM z-write path
 reg       fb_wr_launched;  // AXI4 write AW+W asserted, waiting for acceptance
 
-wire busy_status = (state != ST_IDLE) || (fifo_count > 2'd0);
+wire busy_status = (state != ST_IDLE) || (fifo_count > 2'd0) || dma_active;
 wire queue_full  = (fifo_count == 2'd2);
 wire can_accept  = (fifo_count < 2'd2);
 assign active = busy_status;
@@ -823,6 +844,13 @@ always @(*) begin
         6'd47: reg_rdata = persp_tdivz_stepu_reg;
         6'd48: reg_rdata = persp_zi_stepu_reg;
         6'd49: reg_rdata = uv_reg;
+        6'd50: reg_rdata = fb_base_reg;
+        6'd51: reg_rdata = {16'd0, fb_stride_reg};
+        6'd52: reg_rdata = z_base_reg;
+        6'd53: reg_rdata = {16'd0, z_stride_reg};
+        6'd54: reg_rdata = dma_base_reg;
+        6'd55: reg_rdata = {15'd0, dma_active, dma_remaining};
+        6'd56: reg_rdata = dma_ctrl_reg;
         default: reg_rdata = 32'd0;
     endcase
 end
@@ -961,6 +989,16 @@ always @(posedge clk or negedge reset_n) begin
         persp_tdivz_stepu_reg  <= 32'sd0;
         persp_zi_stepu_reg     <= 32'sd0;
         uv_reg                 <= 32'd0;
+        fb_base_reg            <= 32'd0;
+        fb_stride_reg          <= 16'd0;
+        z_base_reg             <= 32'd0;
+        z_stride_reg           <= 16'd0;
+        dma_base_reg           <= 32'd0;
+        dma_ctrl_reg           <= 32'd0;
+        dma_active             <= 1'b0;
+        dma_remaining          <= 16'd0;
+        dma_fetch_addr         <= 26'd0;
+        dma_descriptor         <= 32'd0;
         cur_uv_mode            <= 1'b0;
         uv_mad_phase           <= 5'd0;
         uv_sdivz_accum         <= 48'sd0;
@@ -1112,7 +1150,9 @@ always @(posedge clk or negedge reset_n) begin
                     if (reg_wdata[15:0] != 16'd0) begin
                         if (state == ST_IDLE && fifo_count == 2'd0) begin
                             // Direct launch (bypass FIFO)
-                            cur_fb        <= fb_addr_reg;
+                            // UV mode: HW computes fb_addr from base+stride*v+u
+                            if (!reg_wdata[23])
+                                cur_fb    <= fb_addr_reg;
                             cur_tex_addr  <= tex_addr_reg;
                             cur_tex_width <= tex_width_reg;
                             cur_tex_height <= tex_height_reg;
@@ -1146,9 +1186,10 @@ always @(posedge clk or negedge reset_n) begin
                                 cur_cmap_en          <= 1'b1;  // alias always uses colormap
                             end
                             if (reg_wdata[19]) begin
-                                cur_z_addr_comb <= z_addr_reg;
-                                if (!reg_wdata[23])  // Legacy: CPU provides izi
+                                if (!reg_wdata[23]) begin  // Legacy: CPU provides addresses
+                                    cur_z_addr_comb <= z_addr_reg;
                                     cur_izi_comb <= zi_reg;
+                                end
                                 cur_zistep      <= zistep_reg;
                                 z_pair_has_lo   <= 1'b0;
                                 z_pending_valid <= 1'b0;
@@ -1328,6 +1369,23 @@ always @(posedge clk or negedge reset_n) begin
                 6'd47: persp_tdivz_stepu_reg  <= reg_wdata;
                 6'd48: persp_zi_stepu_reg     <= reg_wdata;
                 6'd49: uv_reg                 <= reg_wdata;
+                6'd50: fb_base_reg            <= reg_wdata;
+                6'd51: fb_stride_reg          <= reg_wdata[15:0];
+                6'd52: z_base_reg             <= reg_wdata;
+                6'd53: z_stride_reg           <= reg_wdata[15:0];
+                6'd54: dma_base_reg           <= reg_wdata;
+                6'd55: begin
+                    // DMA kick: start processing reg_wdata[15:0] descriptors
+                    if (reg_wdata[15:0] != 16'd0 && !dma_active) begin
+                        dma_active     <= 1'b1;
+                        dma_remaining  <= reg_wdata[15:0];
+                        dma_fetch_addr <= dma_base_reg[25:0];
+                        // If idle with empty FIFO, start fetching immediately
+                        if (state == ST_IDLE && fifo_count == 2'd0)
+                            state <= ST_DMA_FETCH;
+                    end
+                end
+                6'd56: dma_ctrl_reg           <= reg_wdata;
 
                 default: ;
             endcase
@@ -1339,6 +1397,12 @@ always @(posedge clk or negedge reset_n) begin
                 // If a command is queued in the FIFO, launch it.
                 if (fifo_count > 2'd0) begin
                     state <= ST_FIFO_DEQUEUE;
+                end else if (dma_active && dma_remaining > 16'd0) begin
+                    // DMA mode: fetch next descriptor from SDRAM
+                    state <= ST_DMA_FETCH;
+                end else if (dma_active && dma_remaining == 16'd0) begin
+                    // DMA complete: all descriptors dispatched and processed
+                    dma_active <= 1'b0;
                 end
             end
 
@@ -2337,7 +2401,8 @@ always @(posedge clk or negedge reset_n) begin
                     state          <= ST_SURF_INIT;
                 end else begin
                     // Textured / perspective / alias span command
-                    cur_fb        <= fifo_fb[fifo_rd_ptr];
+                    if (!fifo_uv_mode[fifo_rd_ptr])
+                        cur_fb    <= fifo_fb[fifo_rd_ptr];
                     cur_tex_addr  <= fifo_tex_addr[fifo_rd_ptr];
                     cur_tex_width <= fifo_tex_wh[fifo_rd_ptr][15:0];
                     cur_tex_height <= fifo_tex_wh[fifo_rd_ptr][31:16];
@@ -2361,9 +2426,10 @@ always @(posedge clk or negedge reset_n) begin
                     tex_addr_for_turb <= 1'b0;
                     cur_uv_mode <= fifo_uv_mode[fifo_rd_ptr];
                     if (fifo_combined_z[fifo_rd_ptr]) begin
-                        cur_z_addr_comb <= fifo_zaddr[fifo_rd_ptr];
-                        if (!fifo_uv_mode[fifo_rd_ptr])  // Legacy: CPU-provided izi
+                        if (!fifo_uv_mode[fifo_rd_ptr]) begin  // Legacy: CPU provides addresses
+                            cur_z_addr_comb <= fifo_zaddr[fifo_rd_ptr];
                             cur_izi_comb <= fifo_izi[fifo_rd_ptr];
+                        end
                         cur_zistep      <= fifo_zistep[fifo_rd_ptr];
                         z_pair_has_lo   <= 1'b0;
                         z_pending_valid <= 1'b0;
@@ -2411,7 +2477,7 @@ always @(posedge clk or negedge reset_n) begin
 
             // UV MAD: compute sdivz/tdivz/zi from origins + steps * u,v
             // Uses the shared DSP (persp_mul_a * persp_mul_b, 3-cycle latency).
-            // 6 multiplies x 3 cycles = 18 phases + 1 final = 19 total.
+            // 8 multiplies: 6 for perspective + 2 for HW address generation.
             // Phase sequence:
             //   0-2:  sdivz_stepv * v → capture at 3
             //   3-5:  tdivz_stepv * v → capture at 6
@@ -2419,7 +2485,11 @@ always @(posedge clk or negedge reset_n) begin
             //   9-11: sdivz_stepu * u → capture at 12
             //  12-14: tdivz_stepu * u → capture at 15
             //  15-17: zi_stepu * u    → capture at 18
-            //  18:    final accumulate, compute izi, → ST_PERSP_INIT
+            //  18:    final accumulate, compute izi, launch fb_stride*v
+            //  19-20: wait
+            //  21:    cur_fb = fb_base + product + u, launch z_stride*v
+            //  22-23: wait
+            //  24:    cur_z_addr_comb = z_base + product + u*2, → ST_PERSP_INIT
             ST_UV_MAD: begin
                 case (uv_mad_phase)
                     5'd0: begin
@@ -2493,10 +2563,142 @@ always @(posedge clk or negedge reset_n) begin
                             cur_izi_comb[31:7] <= uv_zi_accum[24:0] + persp_product[24:0];
                             cur_izi_comb[6:0]  <= 7'd0;
                         end
+                        // Launch fb_stride * v for HW address generation
+                        persp_mul_a <= {32'd0, fb_stride_reg};
+                        persp_mul_b <= {1'b0, uv_reg[31:16]};  // v
+                        uv_mad_phase <= 5'd19;
+                    end
+                    // --- HW address generation phases ---
+                    5'd19: uv_mad_phase <= 5'd20;
+                    5'd20: uv_mad_phase <= 5'd21;
+                    5'd21: begin
+                        // Capture fb_stride*v, compute fb_addr = base + product + u
+                        cur_fb <= fb_base_reg + persp_product[31:0]
+                                + {16'd0, uv_reg[15:0]};
+                        // Launch z_stride * v
+                        persp_mul_a <= {32'd0, z_stride_reg};
+                        // mul_b unchanged (still v)
+                        uv_mad_phase <= 5'd22;
+                    end
+                    5'd22: uv_mad_phase <= 5'd23;
+                    5'd23: uv_mad_phase <= 5'd24;
+                    5'd24: begin
+                        // Capture z_stride*v, compute z_addr = base + product + u*2
+                        if (cur_combined_z) begin
+                            cur_z_addr_comb <= z_base_reg + persp_product[31:0]
+                                            + {15'd0, uv_reg[15:0], 1'b0};
+                        end
                         state <= ST_PERSP_INIT;
                     end
                     default: uv_mad_phase <= 5'd0;
                 endcase
+            end
+
+            // DMA span list: fetch descriptors from SDRAM, inject as commands
+            ST_DMA_FETCH: begin
+                // Issue single-beat AXI4 read for next descriptor
+                if (!m_axi_arvalid && !pf_filling && !pf_rd_pending) begin
+                    m_axi_arvalid  <= 1'b1;
+                    m_axi_araddr   <= {6'b0, dma_fetch_addr[25:2], 2'b00};
+                    m_axi_arlen    <= 8'd0;  // Single beat
+                    state          <= ST_DMA_FILL;
+                end
+            end
+
+            ST_DMA_FILL: begin
+                // Wait for AXI read data
+                if (m_axi_arvalid && m_axi_arready)
+                    m_axi_arvalid <= 1'b0;
+                if (m_axi_rvalid) begin
+                    dma_descriptor  <= m_axi_rdata;
+                    dma_fetch_addr  <= dma_fetch_addr + 26'd4;
+                    dma_remaining   <= dma_remaining - 16'd1;
+                    state           <= ST_DMA_DISPATCH;
+                end
+            end
+
+            ST_DMA_DISPATCH: begin
+                // Unpack descriptor: {2'b0, count[9:0], v[9:0], u[9:0]}
+                // Inject as command (same as SPAN_CONTROL direct launch / FIFO enqueue)
+                // Build UV register from unpacked u,v
+                uv_reg <= {6'd0, dma_descriptor[19:10], 6'd0, dma_descriptor[9:0]};
+
+                if (fifo_count == 2'd0) begin
+                        // Direct launch (FIFO empty, no active command after us)
+                        cur_tex_addr  <= tex_addr_reg;
+                        cur_tex_width <= tex_width_reg;
+                        cur_tex_height <= tex_height_reg;
+                        cur_s         <= s_reg;
+                        cur_t         <= t_reg;
+                        cur_sstep     <= sstep_reg;
+                        cur_tstep     <= tstep_reg;
+                        cur_light     <= light_reg;
+                        cur_lightstep <= lightstep_reg;
+                        cur_cmap_en   <= dma_ctrl_reg[16];
+                        cur_turb_en   <= dma_ctrl_reg[17];
+                        cur_persp_en  <= dma_ctrl_reg[18];
+                        cur_combined_z <= dma_ctrl_reg[19];
+                        cur_alias_en  <= 1'b0;
+                        cur_noz_en    <= dma_ctrl_reg[21];
+                        cur_sprite_en <= dma_ctrl_reg[22];
+                        cur_uv_mode   <= dma_ctrl_reg[23];
+                        sprite_ztest_done <= 1'b0;
+                        remaining     <= {6'd0, dma_descriptor[29:20]};
+                        cmd_issued    <= 1'b0;
+                        seen_busy     <= 1'b0;
+                        tex_addr_for_turb <= 1'b0;
+                        if (dma_ctrl_reg[19]) begin
+                            cur_zistep  <= zistep_reg;
+                            z_pair_has_lo   <= 1'b0;
+                            z_pending_valid <= 1'b0;
+                        end
+                        if (dma_ctrl_reg[18]) begin
+                            persp_total_remaining <= {6'd0, dma_descriptor[29:20]};
+                            persp_more_chunks <= |dma_descriptor[29:20];
+                            persp_is_initial <= 1'b1;
+                            persp_pre_advanced <= 1'b0;
+                            uv_mad_phase <= 5'd0;
+                            state <= ST_UV_MAD;
+                        end else begin
+                            state <= ST_TEX_PIPE;
+                        end
+                    end else if (fifo_count < 2'd2) begin
+                        // Enqueue to FIFO
+                        fifo_is_z[fifo_wr_ptr]      <= 1'b0;
+                        fifo_is_surf[fifo_wr_ptr]   <= 1'b0;
+                        fifo_is_persp[fifo_wr_ptr]  <= dma_ctrl_reg[18];
+                        fifo_fb[fifo_wr_ptr]        <= 32'd0;  // Unused in UV mode
+                        fifo_tex_addr[fifo_wr_ptr]  <= tex_addr_reg;
+                        fifo_tex_wh[fifo_wr_ptr]    <= {tex_height_reg, tex_width_reg};
+                        fifo_s[fifo_wr_ptr]         <= s_reg;
+                        fifo_t[fifo_wr_ptr]         <= t_reg;
+                        fifo_sstep[fifo_wr_ptr]     <= sstep_reg;
+                        fifo_tstep[fifo_wr_ptr]     <= tstep_reg;
+                        fifo_light[fifo_wr_ptr]     <= light_reg;
+                        fifo_lightstep[fifo_wr_ptr] <= lightstep_reg;
+                        fifo_cmap_en[fifo_wr_ptr]   <= dma_ctrl_reg[16];
+                        fifo_turb_en[fifo_wr_ptr]   <= dma_ctrl_reg[17];
+                        fifo_count_f[fifo_wr_ptr]   <= {6'd0, dma_descriptor[29:20]};
+                        fifo_combined_z[fifo_wr_ptr] <= dma_ctrl_reg[19];
+                        fifo_alias_en[fifo_wr_ptr]  <= 1'b0;
+                        fifo_noz_en[fifo_wr_ptr]    <= dma_ctrl_reg[21];
+                        fifo_sprite_en[fifo_wr_ptr] <= dma_ctrl_reg[22];
+                        fifo_uv_mode[fifo_wr_ptr]   <= dma_ctrl_reg[23];
+                        fifo_uv[fifo_wr_ptr]        <= {6'd0, dma_descriptor[19:10], 6'd0, dma_descriptor[9:0]};
+                        if (dma_ctrl_reg[19]) begin
+                            fifo_zistep[fifo_wr_ptr] <= zistep_reg;
+                        end
+                        fifo_wr_ptr <= ~fifo_wr_ptr;
+                        did_enqueue = 1'b1;
+                        // Fetch next descriptor or finish
+                        if (dma_remaining > 16'd0)
+                            state <= ST_DMA_FETCH;
+                        else begin
+                            dma_active <= 1'b0;
+                            state <= ST_IDLE;
+                        end
+                    end
+                    // else: FIFO full, stay in ST_DMA_DISPATCH (wait for space)
             end
 
             default: begin

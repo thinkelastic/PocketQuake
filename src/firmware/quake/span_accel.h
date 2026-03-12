@@ -53,6 +53,36 @@
 #define SPAN_ALIAS_SFRAC  (*(volatile unsigned int *)(SPAN_BASE + 0x98))
 #define SPAN_ALIAS_TFRAC  (*(volatile unsigned int *)(SPAN_BASE + 0x9C))
 
+/* UV MAD origin/step registers (slots 40-49, sticky per-surface) */
+#define SPAN_PERSP_SDIVZ_ORIGIN  (*(volatile unsigned int *)(SPAN_BASE + 0xA0))
+#define SPAN_PERSP_TDIVZ_ORIGIN  (*(volatile unsigned int *)(SPAN_BASE + 0xA4))
+#define SPAN_PERSP_ZI_ORIGIN     (*(volatile unsigned int *)(SPAN_BASE + 0xA8))
+#define SPAN_PERSP_SDIVZ_STEPV   (*(volatile unsigned int *)(SPAN_BASE + 0xAC))
+#define SPAN_PERSP_TDIVZ_STEPV   (*(volatile unsigned int *)(SPAN_BASE + 0xB0))
+#define SPAN_PERSP_ZI_STEPV      (*(volatile unsigned int *)(SPAN_BASE + 0xB4))
+#define SPAN_PERSP_SDIVZ_STEPU   (*(volatile unsigned int *)(SPAN_BASE + 0xB8))
+#define SPAN_PERSP_TDIVZ_STEPU   (*(volatile unsigned int *)(SPAN_BASE + 0xBC))
+#define SPAN_PERSP_ZI_STEPU      (*(volatile unsigned int *)(SPAN_BASE + 0xC0))
+#define SPAN_UV                  (*(volatile unsigned int *)(SPAN_BASE + 0xC4))
+
+/* HW address generation registers (slots 50-53, sticky per-frame) */
+#define SPAN_FB_BASE             (*(volatile unsigned int *)(SPAN_BASE + 0xC8))
+#define SPAN_FB_STRIDE           (*(volatile unsigned int *)(SPAN_BASE + 0xCC))
+#define SPAN_Z_BASE              (*(volatile unsigned int *)(SPAN_BASE + 0xD0))
+#define SPAN_Z_STRIDE            (*(volatile unsigned int *)(SPAN_BASE + 0xD4))
+
+/* DMA span list registers (slots 54-56) */
+#define SPAN_DMA_BASE            (*(volatile unsigned int *)(SPAN_BASE + 0xD8))
+#define SPAN_DMA_KICK            (*(volatile unsigned int *)(SPAN_BASE + 0xDC))
+#define SPAN_DMA_STATUS          (*(volatile unsigned int *)(SPAN_BASE + 0xDC))
+#define SPAN_DMA_CTRL            (*(volatile unsigned int *)(SPAN_BASE + 0xE0))
+
+/* Pack a span descriptor: {count[29:20], v[19:10], u[9:0]} */
+#define SPAN_DESC_PACK(u, v, count) \
+    (((unsigned int)((count) & 0x3FF) << 20) | \
+     ((unsigned int)((v) & 0x3FF) << 10) | \
+     ((unsigned int)((u) & 0x3FF)))
+
 #define SPAN_CTL_CMAP   0x10000   /* bit 16: colormap enable */
 #define SPAN_CTL_TURB   0x20000   /* bit 17: turbulence enable */
 #define SPAN_CTL_PERSP  0x40000   /* bit 18: perspective enable */
@@ -60,6 +90,7 @@
 #define SPAN_CTL_ALIAS  0x100000  /* bit 20: alias texture stepping */
 #define SPAN_CTL_NOZ    0x200000  /* bit 21: skip all z-test/z-write */
 #define SPAN_CTL_SPRITE 0x400000  /* bit 22: sprite mode (transparency + z-test) */
+#define SPAN_CTL_UV     0x800000  /* bit 23: UV mode (HW computes sdivz/tdivz/zi from u,v) */
 
 /* Surface block registers */
 #define SURF_LIGHT_TL   (*(volatile unsigned int *)(SPAN_BASE + 0x40))
@@ -333,6 +364,67 @@ static inline void span_draw_persp_z(unsigned int fb_addr, float sdivz, float td
     SPAN_PERSP_TDIVZ = (unsigned int)(int)(tdivz * 65536.0f);
     SPAN_PERSP_ZI    = (unsigned int)(int)(zi * 65536.0f);
     SPAN_CONTROL     = (unsigned int)count | 0xC0000;  /* bits 18+19 = persp + combined z */
+}
+
+/* Set sticky perspective parameters with UV MAD origins and steps.
+ * Called once per surface. Hardware computes sdivz/tdivz/zi per-span
+ * from origins + steps * u,v, eliminating all per-span float math.
+ * Also sets the per-16px step registers for HW perspective subdivision. */
+static inline void span_set_perspective_uv(
+    float sdivzstepu, float tdivzstepu, float zistepu,
+    float sdivzstepv, float tdivzstepv, float zistepv,
+    float sdivzorigin, float tdivzorigin, float ziorigin,
+    int sadjust_val, int tadjust_val,
+    int bbextents_val, int bbextentt_val)
+{
+    /* Per-16px step registers (existing, used by HW perspective subdivision) */
+    SPAN_PERSP_SDIVZ_STEP = (unsigned int)(int)(sdivzstepu * 16.0f * 65536.0f);
+    SPAN_PERSP_TDIVZ_STEP = (unsigned int)(int)(tdivzstepu * 16.0f * 65536.0f);
+    SPAN_PERSP_ZI_STEP    = (unsigned int)(int)(zistepu * 16.0f * 65536.0f);
+    /* UV MAD origin registers (Q8.24: 24 fractional bits for precision) */
+    SPAN_PERSP_SDIVZ_ORIGIN = (unsigned int)(int)(sdivzorigin * 16777216.0f);
+    SPAN_PERSP_TDIVZ_ORIGIN = (unsigned int)(int)(tdivzorigin * 16777216.0f);
+    SPAN_PERSP_ZI_ORIGIN    = (unsigned int)(int)(ziorigin * 16777216.0f);
+    /* UV MAD per-pixel step registers (Q8.24) */
+    SPAN_PERSP_SDIVZ_STEPV  = (unsigned int)(int)(sdivzstepv * 16777216.0f);
+    SPAN_PERSP_TDIVZ_STEPV  = (unsigned int)(int)(tdivzstepv * 16777216.0f);
+    SPAN_PERSP_ZI_STEPV     = (unsigned int)(int)(zistepv * 16777216.0f);
+    SPAN_PERSP_SDIVZ_STEPU  = (unsigned int)(int)(sdivzstepu * 16777216.0f);
+    SPAN_PERSP_TDIVZ_STEPU  = (unsigned int)(int)(tdivzstepu * 16777216.0f);
+    SPAN_PERSP_ZI_STEPU     = (unsigned int)(int)(zistepu * 16777216.0f);
+    /* Adjust/clamp registers */
+    SPAN_PERSP_SADJUST    = (unsigned int)sadjust_val;
+    SPAN_PERSP_TADJUST    = (unsigned int)tadjust_val;
+    SPAN_PERSP_BBEXTENTS  = (unsigned int)bbextents_val;
+    SPAN_PERSP_BBEXTENTT  = (unsigned int)bbextentt_val;
+}
+
+/* Set HW address generation base/stride (call once per surface or frame).
+ * Hardware computes fb_addr = fb_base + fb_stride*v + u
+ *                   z_addr  = z_base  + z_stride*v + u*2  */
+static inline void span_set_framebuffer(unsigned int fb_base, int fb_stride,
+    unsigned int z_base, int z_stride_bytes)
+{
+    SPAN_FB_BASE   = fb_base;
+    SPAN_FB_STRIDE = (unsigned int)fb_stride;
+    SPAN_Z_BASE    = z_base;
+    SPAN_Z_STRIDE  = (unsigned int)z_stride_bytes;
+}
+
+/* Dispatch span with UV mode + combined z-buffer write (non-blocking).
+ * Hardware computes sdivz/tdivz/zi/izi AND fb_addr/z_addr from u,v.
+ * Only 2 MMIO writes per span. */
+static inline void span_draw_persp_z_uv(int u, int v, int count)
+{
+    SPAN_UV      = ((unsigned int)(v & 0xFFFF) << 16) | (u & 0xFFFF);
+    SPAN_CONTROL = (unsigned int)count | SPAN_CTL_PERSP | SPAN_CTL_COMBZ | SPAN_CTL_UV;
+}
+
+/* Dispatch span with UV mode, no z-write (non-blocking). */
+static inline void span_draw_persp_uv(int u, int v, int count)
+{
+    SPAN_UV      = ((unsigned int)(v & 0xFFFF) << 16) | (u & 0xFFFF);
+    SPAN_CONTROL = (unsigned int)count | SPAN_CTL_PERSP | SPAN_CTL_UV;
 }
 
 /* Set sticky alias stepping parameters (call once per triangle).
