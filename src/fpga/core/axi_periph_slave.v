@@ -162,7 +162,7 @@ module axi_periph_slave #(
     // Scanline engine register interface
     output reg         scanline_reg_wr,
     output reg         scanline_reg_rd,
-    output reg  [3:0]  scanline_reg_addr,
+    output reg  [5:0]  scanline_reg_addr,
     output reg  [31:0] scanline_reg_wdata,
     input wire  [31:0] scanline_reg_rdata,
 
@@ -173,7 +173,17 @@ module axi_periph_slave #(
     input wire         psram_dbg_wait_seen,
     input wire  [15:0] psram_dbg_wait_cycles,
     input wire  [15:0] psram_dbg_burst_count,
-    input wire  [15:0] psram_dbg_stale_count
+    input wire  [15:0] psram_dbg_stale_count,
+
+    // Span rasterizer active signal (for busy cycle counter)
+    input wire         span_active,
+    input wire         span_fifo_full,
+
+    // CPU cache performance counters (from cpu_system)
+    input wire  [31:0] perf_icache_miss,
+    input wire  [31:0] perf_dcache_miss,
+    input wire  [31:0] perf_icache_stall,
+    input wire  [31:0] perf_dcache_stall
 );
 
 wire reset = ~reset_n;
@@ -416,6 +426,24 @@ synch_3 #(.WIDTH(32)) s_game_name_1(.i(game_name_1), .o(game_name_1_s), .clk(clk
 synch_3 #(.WIDTH(32)) s_game_name_2(.i(game_name_2), .o(game_name_2_s), .clk(clk), .rise(), .fall());
 
 // ============================================
+// Free-running performance counters
+// ============================================
+reg [31:0] perf_span_busy;       // Span rasterizer active cycles
+reg [31:0] perf_span_fifo_full;  // Span FIFO full cycles
+
+always @(posedge clk) begin
+    if (reset) begin
+        perf_span_busy      <= 0;
+        perf_span_fifo_full <= 0;
+    end else begin
+        if (span_active)
+            perf_span_busy <= perf_span_busy + 1;
+        if (span_fifo_full)
+            perf_span_fifo_full <= perf_span_fifo_full + 1;
+    end
+end
+
+// ============================================
 // System register write logic
 // ============================================
 reg sysreg_wr_fire;
@@ -564,6 +592,13 @@ always @(*) begin
         6'b101100: sysreg_rdata = {psram_dbg_wait_seen, 15'b0, psram_dbg_burst_count}; // 0xB0 PSRAM_DBG0
         6'b101101: sysreg_rdata = {16'b0, psram_dbg_wait_cycles}; // 0xB4 PSRAM_DBG1
         6'b101110: sysreg_rdata = {16'b0, psram_dbg_stale_count}; // 0xB8 PSRAM_DBG2
+        // Performance counters (0xC0-0xD4)
+        6'b110000: sysreg_rdata = perf_span_busy;       // 0xC0 PERF_SPAN_BUSY
+        6'b110001: sysreg_rdata = perf_span_fifo_full;  // 0xC4 PERF_SPAN_FIFO_FULL
+        6'b110010: sysreg_rdata = perf_icache_miss;     // 0xC8 PERF_ICACHE_MISS
+        6'b110011: sysreg_rdata = perf_dcache_miss;     // 0xCC PERF_DCACHE_MISS
+        6'b110100: sysreg_rdata = perf_icache_stall;    // 0xD0 PERF_ICACHE_STALL
+        6'b110101: sysreg_rdata = perf_dcache_stall;    // 0xD4 PERF_DCACHE_STALL
         default: sysreg_rdata = 32'h0;
     endcase
 end
@@ -852,7 +887,7 @@ always @(posedge clk or posedge reset) begin
                     end
                     if (ar_dec_sramfill) sramfill_reg_addr <= ar_addr[6:2];
                     if (ar_dec_scanline) begin
-                        scanline_reg_addr <= ar_addr[5:2];
+                        scanline_reg_addr <= ar_addr[7:2];
                         if (ENABLE_DEBUG_CTRS) dbg_scanline_ar_hit <= dbg_scanline_ar_hit + 1;
                     end
                 end
@@ -947,7 +982,7 @@ always @(posedge clk or posedge reset) begin
                             end
                         end
                         if (aw_dec_scanline) begin
-                            scanline_reg_addr <= aw_addr[5:2];
+                            scanline_reg_addr <= aw_addr[7:2];
                             if (|s_axi_wstrb) begin
                                 scanline_reg_wr <= 1;
                                 scanline_reg_wdata <= s_axi_wdata;
@@ -1007,7 +1042,7 @@ always @(posedge clk or posedge reset) begin
                 burst_count <= burst_count + 1;
                 if (reg_scanline) begin
                     scanline_reg_rd <= 1;
-                    scanline_reg_addr <= req_addr[5:2];
+                    scanline_reg_addr <= req_addr[7:2];
                     if (ENABLE_DEBUG_CTRS) begin
                         dbg_scanline_rd_hit <= dbg_scanline_rd_hit + 1;
                         dbg_periph_rd_capture <= {reg_ram, reg_term, reg_sysreg,
@@ -1141,7 +1176,7 @@ always @(posedge clk or posedge reset) begin
                         end
                     end
                     if (reg_scanline) begin
-                        scanline_reg_addr <= req_addr[5:2];
+                        scanline_reg_addr <= req_addr[7:2];
                         if (|s_axi_wstrb) begin
                             scanline_reg_wr <= 1;
                             scanline_reg_wdata <= s_axi_wdata;
