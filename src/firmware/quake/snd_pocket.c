@@ -18,8 +18,9 @@
 
 #include "quakedef.h"
 
-// Stereo music sample from cd_pocket.c (writes L/R, returns 0 if silent)
-extern int CDAudio_ReadSampleStereo(int *out_l, int *out_r);
+// CD music: CPU feeds raw 44100Hz samples to HW resampler FIFO via MMIO.
+// HW handles resampling to 48kHz, volume, and mixing with SFX.
+extern void CDAudio_CopyToHW(void);
 
 // ============================================
 // Audio MMIO registers (FPGA audio_output module)
@@ -107,6 +108,10 @@ int SNDDMA_GetDMAPos(void)
 // ============================================
 PQ_FASTTEXT void SNDDMA_FillRing(void)
 {
+    // Keep the HW resampler's CD audio FIFO fed (runs at 44100 Hz).
+    // Must be called frequently to avoid underrun at low framerates.
+    CDAudio_CopyToHW();
+
     short *buf = snd_buffer;
     int fmask = (SND_BUFFER_SIZE / 2) - 1;
 
@@ -121,21 +126,17 @@ PQ_FASTTEXT void SNDDMA_FillRing(void)
         int sfx_l = buf[i0]     + (((buf[i1]     - buf[i0])     * f) >> 15);
         int sfx_r = buf[i0 + 1] + (((buf[i1 + 1] - buf[i0 + 1]) * f) >> 15);
 
-        // Mix in stereo music (resampled to 48 kHz in cd_pocket.c)
-        int music_l, music_r;
-        CDAudio_ReadSampleStereo(&music_l, &music_r);
-
-        int left  = sfx_l + music_l;
-        int right = sfx_r + music_r;
+        // CD music is mixed in hardware — just write SFX-only samples.
+        // The HW audio mixer adds the resampled CD music before the FIFO.
 
         // Clamp to 16-bit range
-        if (left > 32767) left = 32767;
-        else if (left < -32768) left = -32768;
-        if (right > 32767) right = 32767;
-        else if (right < -32768) right = -32768;
+        if (sfx_l > 32767) sfx_l = 32767;
+        else if (sfx_l < -32768) sfx_l = -32768;
+        if (sfx_r > 32767) sfx_r = 32767;
+        else if (sfx_r < -32768) sfx_r = -32768;
 
-        unsigned short out_l = (unsigned short)(short)left;
-        unsigned short out_r = (unsigned short)(short)right;
+        unsigned short out_l = (unsigned short)(short)sfx_l;
+        unsigned short out_r = (unsigned short)(short)sfx_r;
         out_ring[out_ring_wpos & OUT_RING_MASK] = ((unsigned int)out_l << 16) | out_r;
         out_ring_wpos++;
 

@@ -28,6 +28,10 @@ int audio_timer_active = 0;
 /* Drain BRAM ring → FIFO (defined in snd_pocket.c) */
 extern void SNDDMA_DrainRing(void);
 
+/* Feed CRAM1 CD audio → HW resampler FIFO (defined in cd_pocket.c).
+ * Only touches CRAM1 IO bus + MMIO — zero SDRAM contention. */
+extern void CDAudio_CopyToHW(void);
+
 /*
  * Called from the timer interrupt fast path in start.S.
  * Must NOT use floating-point (FP regs are not saved).
@@ -39,9 +43,15 @@ void __attribute__((noinline)) audio_timer_isr(void)
     unsigned int now = MTIME_LO;
     MTIMECMP = now + TIMER_INTERVAL;
 
-    /* Drain BRAM ring → FPGA FIFO (BRAM reads + MMIO writes only) */
-    if (audio_timer_active)
+    if (audio_timer_active) {
+        /* Drain BRAM ring → FPGA FIFO (BRAM reads + MMIO writes only) */
         SNDDMA_DrainRing();
+
+        /* Feed CD audio from CRAM1 → HW resampler FIFO.
+         * CRAM1 reads via IO bus (0x3Cxxxxxx) — no SDRAM contention,
+         * safe to call from ISR alongside span rasterizer. */
+        CDAudio_CopyToHW();
+    }
 }
 
 /*

@@ -3,6 +3,21 @@
       "magic": "APF_VER_1",
       "variables": [
         {
+          "name": "Scandoubler Mode",
+          "id": 10,
+          "type": "list",
+          "enabled": true,
+          "persist": true,
+          "address": "0xF7000000",
+          "defaultval": 0,
+          "mask": "0xFFF3FFFF",
+          "options": [
+              { "name": "Nearest", "value": "0x00000000" },
+              { "name": "Edge Smooth", "value": "0x00040000" },
+              { "name": "Bicubic", "value": "0x00080000" }
+          ]
+        },
+        {
           "name": "Enable Analogizer",
           "id": 20,
           "type": "list",

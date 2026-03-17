@@ -133,7 +133,9 @@ static inline uint32_t ds_read_cycles(void) {
 
 void dataslot_read_start(uint32_t slot_id, uint32_t offset, void *dest, uint32_t length) {
     uint32_t dest_addr = (uint32_t)dest;
-    uint32_t bridge_addr = CPU_TO_BRIDGE_ADDR(dest_addr);
+    /* CRAM1 (0x30xxxxxx) passes through directly; SDRAM subtracts base */
+    uint32_t bridge_addr = (dest_addr >= 0x30000000 && dest_addr < 0x31000000)
+                         ? dest_addr : CPU_TO_BRIDGE_ADDR(dest_addr);
 
     __asm__ volatile("fence");
 
@@ -166,9 +168,13 @@ int dataslot_read_poll(void) {
 
 __attribute__((section(".text.boot")))
 int dataslot_read(uint32_t slot_id, uint32_t offset, void *dest, uint32_t length) {
-    /* Validate destination is in SDRAM */
+    /* Validate destination is in SDRAM or CRAM1 (bridge DMA target).
+     * SDRAM: 0x10000000-0x13FFFFFF (64MB)
+     * CRAM1: 0x30000000-0x30FFFFFF (16MB, CD audio ring buffer) */
     uint32_t dest_addr = (uint32_t)dest;
-    if (dest_addr < 0x10000000 || dest_addr >= 0x14000000) {
+    int dest_sdram = (dest_addr >= 0x10000000 && dest_addr < 0x14000000);
+    int dest_cram1 = (dest_addr >= 0x30000000 && dest_addr < 0x31000000);
+    if (!dest_sdram && !dest_cram1) {
         return -10;  /* Invalid destination address */
     }
 
@@ -176,7 +182,9 @@ int dataslot_read(uint32_t slot_id, uint32_t offset, void *dest, uint32_t length
     if (dataslot_yield_hook)
         dataslot_yield_hook();
 
-    uint32_t bridge_addr = CPU_TO_BRIDGE_ADDR(dest_addr);
+    /* CRAM1 addresses pass through directly to the bridge (no SDRAM offset).
+     * SDRAM addresses subtract 0x10000000 to get the bridge-relative address. */
+    uint32_t bridge_addr = dest_cram1 ? dest_addr : CPU_TO_BRIDGE_ADDR(dest_addr);
 
     /* Debug: print parameters */
     DS_LOG("DS: slot=%d off=%x br=%x len=%x\n",

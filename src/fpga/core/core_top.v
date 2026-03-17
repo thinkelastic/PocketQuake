@@ -247,10 +247,7 @@ reg [4:0] snac_game_cont_type /* synthesis keep */;
 reg [3:0] snac_cont_assignment /* synthesis keep */;
 
 
-//synch_3 #(.WIDTH(32)) sync_analogizer(analogizer_settings, analogizer_settings_s, clk_core_49152);
-
-  //create aditional switch to blank Pocket screen.
-  //assign video_rgb = (analogizer_video_type[3]) ? 24'h000000: video_rgb_reg;
+wire [1:0] scandoubler_mode = analogizer_settings[19:18]; // 0=nearest, 1=edge, 2=bicubic
 
 always @(*) begin
   snac_game_cont_type   = analogizer_settings[4:0];
@@ -373,6 +370,7 @@ openFPGA_Pocket_Analogizer #(
     // Scandoubler (unused)
     .ce_pix(video_ce_pix),
     .scandoubler(1'b1),
+    .scandoubler_mode(scandoubler_mode),
     .fx(fx), //0 disable, 1 scanlines 25%, 2 scanlines 50%, 3 scanlines 75%, 4 hq2x
     // SNAC controller interface
     .conf_AB(snac_game_cont_type >= 5'd16),  //0 conf. A(default), 1 conf. B (see graph above)
@@ -497,18 +495,147 @@ psram_controller #(
     .cram_lb_n(cram0_lb_n)
 );
 
-// CRAM1 unused — tie off all outputs
-assign cram1_a     = 6'd0;
-assign cram1_dq    = 16'hZZZZ;
-assign cram1_clk   = 1'b0;
-assign cram1_adv_n = 1'b1;
-assign cram1_cre   = 1'b0;
-assign cram1_ce0_n = 1'b1;
-assign cram1_ce1_n = 1'b1;
-assign cram1_oe_n  = 1'b1;
-assign cram1_we_n  = 1'b1;
-assign cram1_ub_n  = 1'b1;
-assign cram1_lb_n  = 1'b1;
+// ============================================
+// CRAM1 PSRAM controller (16MB, CD audio DMA buffer — avoids SDRAM contention)
+// Bridge DMA writes CD audio at 0x30xxxxxx.
+// HW audio resampler reads CRAM1 directly (no CPU involvement).
+// ============================================
+wire        psram1_rd;
+wire        psram1_wr;
+wire [21:0] psram1_addr;
+wire [31:0] psram1_wdata;
+wire [3:0]  psram1_wstrb;
+wire [31:0] psram1_rdata;
+wire        psram1_busy;
+wire        psram1_rdata_valid;
+
+// Use PLL lock for reset (not core reset_n) — bridge may write before reset exit
+reg [2:0] pll_ram_locked_sync;
+always @(posedge clk_ram_controller)
+    pll_ram_locked_sync <= {pll_ram_locked_sync[1:0], pll_ram_locked};
+wire psram1_reset_n = pll_ram_locked_sync[2];
+
+psram_controller #(
+    .CLOCK_SPEED(105.0)
+) psram1 (
+    .clk(clk_ram_controller),
+    .reset_n(psram1_reset_n),
+    .word_rd(psram1_rd),
+    .word_wr(psram1_wr),
+    .word_addr(psram1_addr),
+    .word_data(psram1_wdata),
+    .word_wstrb(psram1_wstrb),
+    .word_q(psram1_rdata),
+    .word_busy(psram1_busy),
+    .word_q_valid(psram1_rdata_valid),
+    .raw_busy(),
+    .dbg_wait_seen(), .dbg_wait_cycles(), .dbg_burst_count(), .dbg_stale_count(),
+    .burst_rd(1'b0), .burst_len(6'd0), .burst_rdata_valid(), .burst_rdata(),
+    .config_en(1'b0), .config_data(16'd0), .config_bank_sel(1'b0),
+    .cram_a(cram1_a), .cram_dq(cram1_dq), .cram_wait(cram1_wait),
+    .cram_clk(cram1_clk), .cram_adv_n(cram1_adv_n), .cram_cre(cram1_cre),
+    .cram_ce0_n(cram1_ce0_n), .cram_ce1_n(cram1_ce1_n),
+    .cram_oe_n(cram1_oe_n), .cram_we_n(cram1_we_n),
+    .cram_ub_n(cram1_ub_n), .cram_lb_n(cram1_lb_n)
+);
+
+// Bridge → CRAM1 write path (dcfifo: clk_74a → clk_ram_controller)
+wire bridge_cram1_wr_detect = bridge_wr && (bridge_addr[31:24] == 8'h30);
+
+reg [53:0] cram1_wr_skid [0:3];
+reg [1:0]  cram1_wr_skid_wrptr, cram1_wr_skid_rdptr;
+reg [2:0]  cram1_wr_skid_count;
+wire       cram1_wr_skid_empty = (cram1_wr_skid_count == 0);
+wire       cram1_wr_fifo_full;
+wire       cram1_wr_skid_pop = !cram1_wr_skid_empty && !cram1_wr_fifo_full;
+wire       cram1_wr_skid_push = bridge_cram1_wr_detect &&
+                                (cram1_wr_skid_count != 3'd4 || cram1_wr_skid_pop);
+
+always @(posedge clk_74a) begin
+    if (cram1_wr_skid_pop)
+        cram1_wr_skid_rdptr <= cram1_wr_skid_rdptr + 2'd1;
+    if (cram1_wr_skid_push)
+        cram1_wr_skid[cram1_wr_skid_wrptr] <= {bridge_addr[23:2], bridge_wr_data};
+    if (cram1_wr_skid_push)
+        cram1_wr_skid_wrptr <= cram1_wr_skid_wrptr + 2'd1;
+    case ({cram1_wr_skid_push, cram1_wr_skid_pop})
+        2'b10: cram1_wr_skid_count <= cram1_wr_skid_count + 3'd1;
+        2'b01: cram1_wr_skid_count <= cram1_wr_skid_count - 3'd1;
+        default: ;
+    endcase
+end
+
+wire [53:0] cram1_wr_skid_head = cram1_wr_skid[cram1_wr_skid_rdptr];
+wire        cram1_wr_fifo_empty;
+wire [53:0] cram1_wr_fifo_q;
+wire        cram1_wr_fifo_drain;
+
+dcfifo cram1_wr_fifo (
+    .wrclk(clk_74a), .wrreq(cram1_wr_skid_pop), .data(cram1_wr_skid_head),
+    .wrfull(cram1_wr_fifo_full),
+    .rdclk(clk_ram_controller), .rdreq(cram1_wr_fifo_drain), .q(cram1_wr_fifo_q),
+    .rdempty(cram1_wr_fifo_empty),
+    .aclr(1'b0), .wrusedw(), .wrempty(), .rdfull(), .rdusedw()
+);
+defparam cram1_wr_fifo.intended_device_family = "Cyclone V",
+    cram1_wr_fifo.lpm_numwords  = 512,
+    cram1_wr_fifo.lpm_showahead = "ON",
+    cram1_wr_fifo.lpm_type      = "dcfifo",
+    cram1_wr_fifo.lpm_width     = 54,
+    cram1_wr_fifo.lpm_widthu    = 9,
+    cram1_wr_fifo.overflow_checking  = "ON",
+    cram1_wr_fifo.underflow_checking = "ON",
+    cram1_wr_fifo.rdsync_delaypipe   = 5,
+    cram1_wr_fifo.wrsync_delaypipe   = 5,
+    cram1_wr_fifo.use_eab       = "ON";
+
+// Write drain FSM — latch FIFO data before popping (showahead race fix).
+// With lpm_showahead, q shows the front entry before rdreq.  We latch q
+// into a register on the same edge we assert rdreq (drain), so the
+// latched data is stable for the multi-cycle PSRAM write that follows.
+reg        cram1_wr_pending, cram1_wr_started;
+reg [53:0] cram1_wr_latched;  // Latched {addr[21:0], data[31:0]} from FIFO
+assign cram1_wr_fifo_drain = !cram1_wr_fifo_empty && !cram1_wr_pending;
+
+// CPU CRAM1 read interface (IO bus at 0x3Cxxxxxx → axi_periph_slave)
+wire        cpu_cram1_rd;
+wire [21:0] cpu_cram1_addr;
+wire        cpu_cram1_busy;
+wire [31:0] cpu_cram1_rdata;
+wire        cpu_cram1_rdata_valid;
+
+// PSRAM1 mux: bridge write > CPU read
+// wr only asserted until controller accepts (cram1_wr_started), preventing
+// spurious duplicate writes when controller returns to ST_IDLE.
+assign psram1_rd    = cram1_wr_pending ? 1'b0 : cpu_cram1_rd;
+assign psram1_wr    = (cram1_wr_pending && !cram1_wr_started) ? 1'b1 : 1'b0;
+assign psram1_addr  = cram1_wr_pending ? cram1_wr_latched[53:32] : cpu_cram1_addr;
+assign psram1_wdata = cram1_wr_latched[31:0];
+assign psram1_wstrb = cram1_wr_pending ? 4'hF : 4'h0;
+assign cpu_cram1_busy = cram1_wr_pending || psram1_busy;
+assign cpu_cram1_rdata = psram1_rdata;
+assign cpu_cram1_rdata_valid = psram1_rdata_valid && !cram1_wr_pending;
+
+always @(posedge clk_ram_controller or negedge psram1_reset_n) begin
+    if (!psram1_reset_n) begin
+        cram1_wr_pending <= 0;
+        cram1_wr_started <= 0;
+        cram1_wr_latched <= 0;
+    end else begin
+        if (!cram1_wr_pending && !cram1_wr_fifo_empty) begin
+            cram1_wr_pending <= 1;
+            cram1_wr_started <= 0;
+            cram1_wr_latched <= cram1_wr_fifo_q;  // Latch before FIFO advances
+        end
+        if (cram1_wr_pending) begin
+            if (psram1_busy) cram1_wr_started <= 1;
+            if (cram1_wr_started && !psram1_busy) begin
+                cram1_wr_pending <= 0;
+                cram1_wr_started <= 0;
+            end
+        end
+    end
+end
 
 // ============================================
 // BCR init FSM — configure CRAM0 for synchronous burst mode
@@ -703,10 +830,19 @@ wire [31:0] atm_norm_wdata;
 wire        atm_busy;
 
 // Audio output interface (between cpu_system and audio_output)
-wire        audio_sample_wr;
-wire [31:0] audio_sample_data;
+wire        audio_sample_wr;    // CPU SFX sample write strobe
+wire [31:0] audio_sample_data;  // CPU SFX sample {L16, R16}
 wire [10:0] audio_fifo_level;
 wire        audio_fifo_full;
+
+// HW CD music resampler register interface (MMIO 0x4C000008+)
+wire        music_reg_wr;
+wire [3:0]  music_reg_addr;
+wire [31:0] music_reg_wdata;
+wire [31:0] music_reg_rdata;
+
+// HW CD music resampler output (mixed with SFX before audio FIFO)
+wire [15:0] music_l, music_r;
 
 // Link MMIO register interface (between cpu_system and link_mmio)
 wire        link_reg_wr;
@@ -893,12 +1029,12 @@ wire [4:0]  sramfill_reg_addr;
 wire [31:0] sramfill_reg_wdata;
 wire [31:0] sramfill_reg_rdata;
 
-// Scanline engine register interface (from axi_periph_slave)
+// Scanline engine removed — stub read data for axi_periph_slave
 wire        scanline_reg_wr;
 wire        scanline_reg_rd;
 wire [5:0]  scanline_reg_addr;
 wire [31:0] scanline_reg_wdata;
-wire [31:0] scanline_reg_rdata;
+wire [31:0] scanline_reg_rdata = 32'd0;
 
 // sram_fill word interface (to SRAM mux)
 wire        fill_sram_wr;
@@ -923,9 +1059,6 @@ sram_fill sram_fill_inst (
     .active(fill_active)
 );
 
-// calc_gradients removed — CPU FPU (rv32f) is faster than MMIO accelerator
-// (~120 cycles via fmul.s/fadd.s vs ~210 cycles via 30 MMIO writes + 50 HW cycles + 10 reads)
-assign scanline_reg_rdata = 32'd0;
 
 // 3-way SRAM word arbitration mux (combinational priority)
 // Priority: CPU > Span rasterizer > sram_fill
@@ -1779,7 +1912,8 @@ assign video_hs = vidout_hs;
         .s_axi_bready(1'b1),
         .s_axi_bresp(cpu_m_local_bresp),
         // CDC inputs
-        .dataslot_allcomplete(dataslot_allcomplete && bridge_wr_idle),
+        .dataslot_allcomplete(dataslot_allcomplete && bridge_wr_idle &&
+                              cram1_wr_fifo_empty && !cram1_wr_pending),
         .vsync(vidout_vs),
         .cont1_key(cont1_key),
         .cont1_joy(cont1_joy),
@@ -1854,6 +1988,11 @@ assign video_hs = vidout_hs;
         .audio_sample_data(audio_sample_data),
         .audio_fifo_level(audio_fifo_level),
         .audio_fifo_full(audio_fifo_full),
+        // CD music HW resampler register interface
+        .music_reg_wr(music_reg_wr),
+        .music_reg_addr(music_reg_addr),
+        .music_reg_wdata(music_reg_wdata),
+        .music_reg_rdata(music_reg_rdata),
         // Link MMIO interface
         .link_reg_wr(link_reg_wr),
         .link_reg_rd(link_reg_rd),
@@ -1872,6 +2011,12 @@ assign video_hs = vidout_hs;
         .cpu_sram_busy(cpu_sram_busy),
         .cpu_sram_q(cpu_sram_q),
         .cpu_sram_q_valid(cpu_sram_q_valid),
+        // CRAM1 read-only interface (CPU reads CD audio from CRAM1)
+        .cpu_cram1_rd(cpu_cram1_rd),
+        .cpu_cram1_addr(cpu_cram1_addr),
+        .cpu_cram1_busy(cpu_cram1_busy),
+        .cpu_cram1_rdata(cpu_cram1_rdata),
+        .cpu_cram1_rdata_valid(cpu_cram1_rdata_valid),
         // sram_fill register interface
         .sramfill_reg_wr(sramfill_reg_wr),
         .sramfill_reg_addr(sramfill_reg_addr),
@@ -2365,7 +2510,36 @@ link_mmio #(
 
 //
 // Audio output (FIFO + I2S)
-// CPU writes samples via MMIO, FIFO bridges to I2S at 48 kHz
+// HW CD audio resampler — CPU pushes raw samples via MMIO,
+// resampler handles 44100→48000 Hz interpolation + volume + mixing
+//
+audio_cd_resampler cd_resamp (
+    .clk             (clk_cpu),
+    .reset_n         (reset_n),
+
+    .mix_trigger     (audio_sample_wr),
+    .music_l         (music_l),
+    .music_r         (music_r),
+
+    .reg_wr          (music_reg_wr),
+    .reg_addr        (music_reg_addr),
+    .reg_wdata       (music_reg_wdata),
+    .reg_rdata       (music_reg_rdata)
+);
+
+// HW audio mixer: SFX (from CPU) + CD music (from HW resampler) → clamp → FIFO
+wire signed [16:0] mix_l_raw = $signed(audio_sample_data[31:16]) + $signed(music_l);
+wire signed [16:0] mix_r_raw = $signed(audio_sample_data[15:0])  + $signed(music_r);
+
+wire [15:0] mix_l_clamp = (mix_l_raw[16] != mix_l_raw[15]) ?
+                           (mix_l_raw[16] ? 16'h8000 : 16'h7FFF) : mix_l_raw[15:0];
+wire [15:0] mix_r_clamp = (mix_r_raw[16] != mix_r_raw[15]) ?
+                           (mix_r_raw[16] ? 16'h8000 : 16'h7FFF) : mix_r_raw[15:0];
+
+wire [31:0] mixed_audio_data = {mix_l_clamp, mix_r_clamp};
+
+// Audio output (FIFO + I2S)
+// Mixed SFX+music pushed to FIFO, bridges to I2S at 48 kHz
 //
 audio_output audio_out (
     .clk_sys     (clk_cpu),
@@ -2373,7 +2547,7 @@ audio_output audio_out (
     .reset_n     (reset_n),
 
     .sample_wr   (audio_sample_wr),
-    .sample_data (audio_sample_data),
+    .sample_data (mixed_audio_data),
     .fifo_level  (audio_fifo_level),
     .fifo_full   (audio_fifo_full),
 
@@ -2423,7 +2597,6 @@ mf_pllram_133 mp_ram (
 );
 
 // CPU runs at same clock as SDRAM controller (no CDC needed)
-// TODO: Implement proper CDC for split CPU/memory clocks
 assign clk_cpu = clk_ram_controller;
 
 

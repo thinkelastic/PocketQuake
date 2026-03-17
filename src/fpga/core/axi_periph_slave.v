@@ -132,6 +132,12 @@ module axi_periph_slave #(
     input wire  [10:0] audio_fifo_level,
     input wire         audio_fifo_full,
 
+    // CD music HW resampler register interface (0x4C000008+)
+    output reg         music_reg_wr,
+    output wire [3:0]  music_reg_addr,
+    output reg  [31:0] music_reg_wdata,
+    input wire  [31:0] music_reg_rdata,
+
     // Link MMIO interface
     output reg         link_reg_wr,
     output reg         link_reg_rd,
@@ -152,6 +158,13 @@ module axi_periph_slave #(
     input wire         cpu_sram_busy,
     input wire  [31:0] cpu_sram_q,
     input wire         cpu_sram_q_valid,
+
+    // CRAM1 read-only interface (CPU reads CD audio from CRAM1 via IO bus)
+    output reg         cpu_cram1_rd,
+    output reg  [21:0] cpu_cram1_addr,
+    input wire         cpu_cram1_busy,
+    input wire  [31:0] cpu_cram1_rdata,
+    input wire         cpu_cram1_rdata_valid,
 
     // sram_fill register interface
     output reg         sramfill_reg_wr,
@@ -618,7 +631,8 @@ wire [31:0] periph_rd_mux = reg_sysreg   ? sysreg_rdata :
                              reg_span     ? span_reg_rdata :
                              reg_cmap     ? cmap_rdata :
                              reg_atm      ? atm_reg_rdata :
-                             reg_audio    ? {20'b0, audio_fifo_full, audio_fifo_level} :
+                             reg_audio    ? (|req_addr[4:3] ? music_reg_rdata :
+                                            {20'b0, audio_fifo_full, audio_fifo_level}) :
                              reg_link     ? link_reg_rdata :
                              reg_sramfill ? sramfill_reg_rdata :
                              reg_scanline ? scanline_reg_rdata :
@@ -627,19 +641,23 @@ wire [31:0] periph_rd_mux = reg_sysreg   ? sysreg_rdata :
 // ============================================
 // FSM
 // ============================================
-localparam S_IDLE      = 3'd0;
-localparam S_BRAM_RD   = 3'd1;
-localparam S_PERIPH_RD = 3'd2;
-localparam S_PERIPH_WR = 3'd3;
-localparam S_TERM      = 3'd4;
-localparam S_WR_NEXT   = 3'd5;
-localparam S_BRAM_WR   = 3'd6;
-localparam S_SRAM_WAIT = 3'd7;
+localparam S_IDLE       = 4'd0;
+localparam S_BRAM_RD    = 4'd1;
+localparam S_PERIPH_RD  = 4'd2;
+localparam S_PERIPH_WR  = 4'd3;
+localparam S_TERM       = 4'd4;
+localparam S_WR_NEXT    = 4'd5;
+localparam S_BRAM_WR    = 4'd6;
+localparam S_SRAM_WAIT  = 4'd7;
+localparam S_CRAM1_WAIT = 4'd8;
 
-reg [2:0] state;
+reg [3:0] state;
 
 // Latched request fields
 reg [31:0] req_addr;
+
+// Music register address driven from current request address (combinational)
+assign music_reg_addr = req_addr[5:2];
 reg [31:0] req_wdata;
 reg [3:0]  req_wstrb;
 reg        is_write;
@@ -730,6 +748,7 @@ wire ar_dec_link   = (ar_addr[31:24] == 8'h4D);
 wire ar_dec_cmap   = (ar_addr[31:14] == 18'h15000);
 wire ar_dec_atm      = (ar_addr[31:13] == 19'h2C000);
 wire ar_dec_sram     = (ar_addr[31:24] == 8'h38);
+wire ar_dec_cram1    = (ar_addr[31:24] == 8'h3C);
 wire ar_dec_sramfill = (ar_addr[31:24] == 8'h5C);
 wire ar_dec_scanline = (ar_addr[31:24] == 8'h60);
 
@@ -743,6 +762,7 @@ wire aw_dec_link   = (aw_addr[31:24] == 8'h4D);
 wire aw_dec_cmap   = (aw_addr[31:14] == 18'h15000);
 wire aw_dec_atm      = (aw_addr[31:13] == 19'h2C000);
 wire aw_dec_sram     = (aw_addr[31:24] == 8'h38);
+// aw_dec_cram1 removed — HW resampler accesses CRAM1 directly
 wire aw_dec_sramfill = (aw_addr[31:24] == 8'h5C);
 wire aw_dec_scanline = (aw_addr[31:24] == 8'h60);
 
@@ -786,8 +806,11 @@ always @(posedge clk or posedge reset) begin
         cpu_sram_rd <= 0;
         cpu_sram_wr <= 0;
         cpu_sram_addr <= 0;
+        cpu_cram1_rd <= 0;
+        cpu_cram1_addr <= 0;
         cpu_sram_wdata <= 0;
         cpu_sram_wstrb <= 0;
+        music_reg_wr <= 0;
         sramfill_reg_wr <= 0;
         sramfill_reg_addr <= 0;
         sramfill_reg_wdata <= 0;
@@ -815,6 +838,8 @@ always @(posedge clk or posedge reset) begin
         atm_norm_wdata <= 0;
         audio_sample_wr <= 0;
         audio_sample_data <= 0;
+        music_reg_wr <= 0;
+        music_reg_wdata <= 0;
         link_reg_wr <= 0;
         link_reg_rd <= 0;
         link_reg_addr <= 0;
@@ -832,6 +857,7 @@ always @(posedge clk or posedge reset) begin
         atm_reg_wr <= 0;
         atm_norm_wr <= 0;
         audio_sample_wr <= 0;
+        music_reg_wr <= 0;
         link_reg_wr <= 0;
         link_reg_rd <= 0;
         sramfill_reg_wr <= 0;
@@ -876,6 +902,11 @@ always @(posedge clk or posedge reset) begin
                     cpu_sram_addr <= ar_addr[23:2];
                     sram_accepted <= 0;
                     state <= S_SRAM_WAIT;
+                end else if (ar_dec_cram1) begin
+                    cpu_cram1_rd <= 1;
+                    cpu_cram1_addr <= ar_addr[23:2];
+                    sram_accepted <= 0;
+                    state <= S_CRAM1_WAIT;
                 end else begin
                     state <= S_PERIPH_RD;
                     if (ar_dec_dma) dma_reg_addr <= ar_addr[6:2];
@@ -950,9 +981,14 @@ always @(posedge clk or posedge reset) begin
                                 span_reg_wdata <= s_axi_wdata;
                             end
                         end
-                        if (aw_dec_audio && |s_axi_wstrb && aw_addr[3:2] == 2'b00) begin
-                            audio_sample_wr <= 1;
-                            audio_sample_data <= s_axi_wdata;
+                        if (aw_dec_audio && |s_axi_wstrb) begin
+                            if (!(aw_addr[4] | aw_addr[3])) begin
+                                audio_sample_wr <= 1;
+                                audio_sample_data <= s_axi_wdata;
+                            end else begin
+                                music_reg_wr <= 1;
+                                music_reg_wdata <= s_axi_wdata;
+                            end
                         end
                         if (aw_dec_link && |s_axi_wstrb) begin
                             link_reg_wr <= 1;
@@ -1144,9 +1180,14 @@ always @(posedge clk or posedge reset) begin
                             span_reg_wdata <= s_axi_wdata;
                         end
                     end
-                    if (reg_audio && |s_axi_wstrb && req_addr[3:2] == 2'b00) begin
-                        audio_sample_wr <= 1;
-                        audio_sample_data <= s_axi_wdata;
+                    if (reg_audio && |s_axi_wstrb) begin
+                        if (!(req_addr[4] | req_addr[3])) begin
+                            audio_sample_wr <= 1;
+                            audio_sample_data <= s_axi_wdata;
+                        end else begin
+                            music_reg_wr <= 1;
+                            music_reg_wdata <= s_axi_wdata;
+                        end
                     end
                     if (reg_link && |s_axi_wstrb) begin
                         link_reg_wr <= 1;
@@ -1216,6 +1257,24 @@ always @(posedge clk or posedge reset) begin
                     s_axi_bresp <= 2'b00;
                     state <= S_IDLE;
                 end
+            end
+        end
+
+        // ============================================
+        // CRAM1 read: wait for psram_controller acceptance + data valid
+        // ============================================
+        S_CRAM1_WAIT: begin
+            if (!sram_accepted) begin
+                if (!cpu_cram1_busy) begin
+                    sram_accepted <= 1;
+                    cpu_cram1_rd <= 0;
+                end
+            end else if (cpu_cram1_rdata_valid) begin
+                s_axi_rvalid <= 1;
+                s_axi_rdata <= cpu_cram1_rdata;
+                s_axi_rresp <= 2'b00;
+                s_axi_rlast <= 1;
+                state <= S_IDLE;
             end
         end
 

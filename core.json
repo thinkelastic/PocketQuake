@@ -9,8 +9,8 @@
             "description": "Quake on VexiiRiscv RISC-V CPU",
             "author": "ThinkElastic",
             "url": "",
-            "version": "2.0.0",
-            "date_release": "2026-03-06"
+            "version": "2.1.0",
+            "date_release": "2026-03-15"
         },
         "framework": {
             "target_product": "Analogue Pocket",

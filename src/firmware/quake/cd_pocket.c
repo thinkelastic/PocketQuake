@@ -1,81 +1,62 @@
 /*
- * cd_pocket.c -- CD audio streaming for PocketQuake
+ * cd_pocket.c -- CD audio streaming for PocketQuake (HW resampler)
  *
- * Streams raw CD-ROM audio tracks (.bin) from SD card via APF data slots.
- * Format: 44100 Hz, 16-bit signed little-endian, stereo (Red Book CD audio).
- * Resampled to 48000 Hz and mixed into I2S output in SNDDMA_Submit.
+ * Bridge DMA loads CD audio into SDRAM, CPU reads via uncached alias
+ * (zero D-cache pollution) and pushes raw samples to HW resampler FIFO.
+ * Timer ISR feeds the FIFO at 200 Hz for glitch-free playback at any FPS.
+ *
+ * The HW resampler handles 44100→48000 Hz resampling, volume, and mixing.
  *
  * Data slot IDs 10-19 map to Quake CD tracks 2-11.
- * If the .bin files are not present, music is silently disabled.
- *
- * Non-blocking: uses async dataslot_read_start/poll to avoid stalling
- * the CPU during rendering.  At most one DMA completion per frame.
- *
- * Music ring buffer is in SRAM (uncached) alongside snd_buffer to avoid
- * D-cache coherency issues when read from timer ISR context.
  */
 
 #include "quakedef.h"
 #include "../dataslot.h"
 
-/* Data slot ID for a given CD track number (tracks 2-11 -> slots 10-19) */
 #define TRACK_SLOT_ID(track) ((track) + 8)
 #define TRACK_MIN  2
 #define TRACK_MAX  11
 
-/* Ring buffer: 64KB = 16384 stereo frames (L+R = 4 bytes each) = ~0.37s at 44100 Hz.
- * In cached SDRAM — all access is from the main loop (no ISR reads), so
- * D-cache coherency is not an issue.  Must be power-of-two for masking. */
+/* Ring buffer in SDRAM — accessed ONLY through uncached alias.
+ * 16384 stereo frames = 64KB, power-of-two. */
 #define MUSIC_BUF_FRAMES   16384
 #define MUSIC_BUF_MASK     (MUSIC_BUF_FRAMES - 1)
-static short music_buf_data[MUSIC_BUF_FRAMES * 2] __attribute__((aligned(4)));
-static short * const music_buffer = music_buf_data;
+#define MUSIC_BUF_ADDR     0x13F00000
+#define MUSIC_BUF_UC       ((volatile unsigned int *)SDRAM_UNCACHED(MUSIC_BUF_ADDR))
 
-/* Streaming state */
+#define MUSIC_DMA_CHUNK    (16 * 1024)
+
+/* HW resampler MMIO */
+#define MUSIC_CTRL       (*(volatile unsigned int *)0x4C000008)
+#define MUSIC_VOLUME     (*(volatile unsigned int *)0x4C00000C)
+#define MUSIC_FIFO_LEVEL (*(volatile unsigned int *)0x4C000014)
+#define MUSIC_DATA       (*(volatile unsigned int *)0x4C00001C)
+
+#define MUSIC_CTRL_ENABLE  (1 << 0)
+#define MUSIC_CTRL_PAUSE   (1 << 1)
+#define HW_FIFO_DEPTH      512
+
 static int  cd_playing;
-static int  cd_paused;
 static int  cd_looping;
 static byte cd_track;
 static int  cd_slot_id;
-static unsigned int cd_file_offset;  /* Current byte offset into raw PCM */
+static unsigned int cd_file_offset;
 
-/* Ring buffer positions (in stereo frames) */
-static unsigned int music_write_pos;
-static unsigned int music_read_pos;
-
-/* Resampling state: 44100 -> 48000 with linear interpolation */
-#define RESAMPLE_ONE    32768
-#define RESAMPLE_STEP   ((44100 * RESAMPLE_ONE + 24000) / 48000)  /* = 30106 */
-static int resample_frac;
-
-/* DMA refill: read 16KB chunks from SD card.
- * Must keep up with 176KB/sec consumption (44100 Hz stereo).
- * At 15fps: 15 * 16KB = 240KB/sec — sufficient headroom. */
-#define MUSIC_DMA_CHUNK  (16 * 1024)
-
-/* Volume (0-256, 256 = full volume) */
-static int cd_volume = 256;
+/* Ring buffer positions (monotonically increasing frame counts) */
+static volatile unsigned int music_write_pos;
+static volatile unsigned int music_read_pos;
 
 static int cd_available;
-
-/* Async DMA state */
-static int  cd_dma_pending;
+static int cd_dma_pending;
 static unsigned int cd_dma_frames;
 
-/* Forward declarations for static helpers */
-static void CDAudio_CopyChunk(unsigned int frames);
-static int  CDAudio_StartChunk(void);
+static int CDAudio_StartChunk(void);
 
-/*
- * Yield the dataslot for a blocking read by another caller (e.g., pak file I/O).
- * If an async CD DMA is in flight, wait for it to complete first.
- */
 void CDAudio_DataslotYield(void)
 {
     if (!cd_dma_pending)
         return;
 
-    /* Busy-wait for the in-flight DMA to finish */
     int rc;
     while ((rc = dataslot_read_poll()) == 0)
         ;
@@ -83,7 +64,11 @@ void CDAudio_DataslotYield(void)
     cd_dma_pending = 0;
 
     if (rc > 0) {
-        CDAudio_CopyChunk(cd_dma_frames);
+        volatile unsigned int *src = (volatile unsigned int *)SDRAM_UNCACHED(DMA_BUFFER);
+        unsigned int wp = music_write_pos;
+        for (unsigned int i = 0; i < cd_dma_frames; i++)
+            MUSIC_BUF_UC[(wp + i) & MUSIC_BUF_MASK] = src[i];
+        music_write_pos = wp + cd_dma_frames;
         cd_file_offset += cd_dma_frames * 4;
     } else if (rc < 0) {
         if (cd_looping)
@@ -95,25 +80,31 @@ void CDAudio_DataslotYield(void)
 
 static int CDAudio_Probe(void)
 {
-    int rc = dataslot_read(TRACK_SLOT_ID(2), 0, (void *)DMA_BUFFER, 4);
+    int rc = dataslot_read(TRACK_SLOT_ID(2), 0, (void *)(uintptr_t)DMA_BUFFER, 4);
     return (rc >= 0) ? 1 : 0;
 }
 
-static void CDAudio_CopyChunk(unsigned int frames)
+/*
+ * Push frames from uncached SDRAM ring to HW resampler FIFO.
+ * Called from timer ISR (200 Hz) and SNDDMA_FillRing.
+ * Uncached SDRAM reads: zero D-cache pollution, ~0.26% bus time.
+ */
+void CDAudio_CopyToHW(void)
 {
-    /* Copy DMA buffer (uncached SDRAM) into the cached music ring buffer. */
-    volatile unsigned int *src = (volatile unsigned int *)SDRAM_UNCACHED(DMA_BUFFER);
-    unsigned int wp = music_write_pos;
+    if (!cd_playing)
+        return;
 
-    for (unsigned int i = 0; i < frames; i++) {
-        unsigned int idx = (wp & MUSIC_BUF_MASK) * 2;
-        unsigned int word = src[i];
-        music_buffer[idx]     = (short)(word & 0xFFFF);
-        music_buffer[idx + 1] = (short)(word >> 16);
-        wp++;
-    }
+    unsigned int avail = music_write_pos - music_read_pos;
+    unsigned int hw_space = HW_FIFO_DEPTH - (MUSIC_FIFO_LEVEL & 0x3FF);
 
-    music_write_pos = wp;
+    unsigned int count = avail < hw_space ? avail : hw_space;
+    if (count > 128)
+        count = 128;
+
+    unsigned int rp = music_read_pos;
+    for (unsigned int i = 0; i < count; i++)
+        MUSIC_DATA = MUSIC_BUF_UC[(rp + i) & MUSIC_BUF_MASK];
+    music_read_pos = rp + count;
 }
 
 static int CDAudio_StartChunk(void)
@@ -122,145 +113,111 @@ static int CDAudio_StartChunk(void)
         return -1;
 
     cd_dma_frames = MUSIC_DMA_CHUNK / 4;
-    dataslot_read_start(cd_slot_id, cd_file_offset, (void *)DMA_BUFFER, MUSIC_DMA_CHUNK);
+    dataslot_read_start(cd_slot_id, cd_file_offset,
+                        (void *)(uintptr_t)DMA_BUFFER, MUSIC_DMA_CHUNK);
     cd_dma_pending = 1;
     return 0;
 }
 
-/*
- * Non-blocking refill: poll for DMA completion, copy data, start next.
- * Called from CDAudio_Update() once per frame.
- */
 static void CDAudio_Refill(void)
 {
-    if (!cd_playing || cd_paused)
+    if (!cd_playing)
         return;
 
     if (cd_dma_pending) {
         int rc = dataslot_read_poll();
         if (rc == 0)
-            return;  /* Still in flight */
+            return;
 
         cd_dma_pending = 0;
 
         if (rc < 0) {
-            /* EOF or error */
-            if (cd_looping) {
+            if (cd_looping)
                 cd_file_offset = 0;
-                CDAudio_StartChunk();
-            } else {
+            else {
                 cd_playing = 0;
+                return;
             }
-            return;
+        } else {
+            volatile unsigned int *src = (volatile unsigned int *)SDRAM_UNCACHED(DMA_BUFFER);
+            unsigned int wp = music_write_pos;
+            for (unsigned int i = 0; i < cd_dma_frames; i++)
+                MUSIC_BUF_UC[(wp + i) & MUSIC_BUF_MASK] = src[i];
+            music_write_pos = wp + cd_dma_frames;
+            cd_file_offset += cd_dma_frames * 4;
         }
-
-        /* DMA complete — copy to ring buffer */
-        CDAudio_CopyChunk(cd_dma_frames);
-        cd_file_offset += cd_dma_frames * 4;
     }
 
-    /* Start next chunk if buffer needs more */
     if (!cd_dma_pending)
         CDAudio_StartChunk();
-}
-
-int CDAudio_ReadSampleStereo(int *out_l, int *out_r)
-{
-    *out_l = 0;
-    *out_r = 0;
-
-    if (!cd_playing || cd_paused)
-        return 0;
-
-    if (music_write_pos - music_read_pos < 2)
-        return 0;
-
-    unsigned int idx0 = (music_read_pos & MUSIC_BUF_MASK) * 2;
-    unsigned int idx1 = ((music_read_pos + 1) & MUSIC_BUF_MASK) * 2;
-
-    int l0 = music_buffer[idx0];
-    int r0 = music_buffer[idx0 + 1];
-    int l1 = music_buffer[idx1];
-    int r1 = music_buffer[idx1 + 1];
-
-    int f = resample_frac;
-    int sl = l0 + (((l1 - l0) * f) >> 15);
-    int sr = r0 + (((r1 - r0) * f) >> 15);
-
-    *out_l = (sl * cd_volume) >> 8;
-    *out_r = (sr * cd_volume) >> 8;
-
-    resample_frac += RESAMPLE_STEP;
-    if (resample_frac >= RESAMPLE_ONE) {
-        resample_frac -= RESAMPLE_ONE;
-        music_read_pos++;
-    }
-
-    return 1;
 }
 
 void CDAudio_Play(byte track, qboolean looping)
 {
     if (!cd_available)
         return;
-
     if (track < TRACK_MIN || track > TRACK_MAX)
         return;
 
     CDAudio_Stop();
 
-    int slot = TRACK_SLOT_ID(track);
-
     cd_track = track;
-    cd_slot_id = slot;
+    cd_slot_id = TRACK_SLOT_ID(track);
     cd_file_offset = 0;
     cd_looping = looping;
-    cd_paused = 0;
-
+    cd_playing = 1;
     music_write_pos = 0;
     music_read_pos = 0;
-    resample_frac = 0;
 
-    cd_playing = 1;
-
-    /* Pre-fill the buffer (blocking — only at track start).
-     * Reduced from 8 to 4 chunks since buffer is now 64KB (halved).
-     * If the very first read fails, the track file doesn't exist — stop. */
     for (int i = 0; i < 4; i++) {
-        int rc = dataslot_read(cd_slot_id, cd_file_offset, (void *)DMA_BUFFER, MUSIC_DMA_CHUNK);
+        int rc = dataslot_read(cd_slot_id, cd_file_offset,
+                               (void *)(uintptr_t)DMA_BUFFER, MUSIC_DMA_CHUNK);
         if (rc < 0) {
             if (i == 0) {
                 Con_Printf("CD Audio: track %d not found\n", track);
                 cd_playing = 0;
+                return;
             }
             break;
         }
-        CDAudio_CopyChunk(MUSIC_DMA_CHUNK / 4);
+        volatile unsigned int *src = (volatile unsigned int *)SDRAM_UNCACHED(DMA_BUFFER);
+        unsigned int wp = music_write_pos;
+        for (unsigned int j = 0; j < MUSIC_DMA_CHUNK / 4; j++)
+            MUSIC_BUF_UC[(wp + j) & MUSIC_BUF_MASK] = src[j];
+        music_write_pos = wp + MUSIC_DMA_CHUNK / 4;
         cd_file_offset += MUSIC_DMA_CHUNK;
     }
     cd_dma_pending = 0;
+
+    CDAudio_CopyToHW();
+
+    extern cvar_t bgmvolume;
+    int vol = (int)(bgmvolume.value * 256);
+    if (vol < 0) vol = 0;
+    if (vol > 256) vol = 256;
+    MUSIC_VOLUME = vol;
+    MUSIC_CTRL = MUSIC_CTRL_ENABLE;
 }
 
 void CDAudio_Stop(void)
 {
+    MUSIC_CTRL = 0;
     cd_playing = 0;
-    cd_paused = 0;
     cd_dma_pending = 0;
     music_write_pos = 0;
     music_read_pos = 0;
-    resample_frac = 0;
 }
 
 void CDAudio_Pause(void)
 {
     if (cd_playing)
-        cd_paused = 1;
+        MUSIC_CTRL = MUSIC_CTRL_ENABLE | MUSIC_CTRL_PAUSE;
 }
 
 void CDAudio_Resume(void)
 {
     if (cd_playing)
-        cd_paused = 0;
+        MUSIC_CTRL = MUSIC_CTRL_ENABLE;
 }
 
 void CDAudio_Update(void)
@@ -269,11 +226,12 @@ void CDAudio_Update(void)
         return;
 
     extern cvar_t bgmvolume;
-    cd_volume = (int)(bgmvolume.value * 256);
-    if (cd_volume < 0) cd_volume = 0;
-    if (cd_volume > 256) cd_volume = 256;
+    int vol = (int)(bgmvolume.value * 256);
+    if (vol < 0) vol = 0;
+    if (vol > 256) vol = 256;
+    MUSIC_VOLUME = vol;
 
-    if (!cd_playing || cd_paused)
+    if (!cd_playing)
         return;
 
     CDAudio_Refill();
@@ -282,20 +240,15 @@ void CDAudio_Update(void)
 int CDAudio_Init(void)
 {
     cd_playing = 0;
-    cd_paused = 0;
     cd_available = 0;
-    cd_volume = 256;
     cd_dma_pending = 0;
+    MUSIC_CTRL = 0;
 
     cd_available = CDAudio_Probe();
-
-    /* Register yield hook so blocking dataslot_read/write() calls
-     * automatically complete any in-flight async CD DMA first.
-     * CDAudio_Refill() restarts async streaming once per frame. */
     dataslot_yield_hook = CDAudio_DataslotYield;
 
     if (cd_available)
-        Con_Printf("CD Audio: raw CD tracks found\n");
+        Con_Printf("CD Audio: HW resampler ready\n");
     else
         Con_Printf("CD Audio: no CD tracks (optional)\n");
 
