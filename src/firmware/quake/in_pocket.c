@@ -301,9 +301,16 @@ void IN_Move(usercmd_t *cmd)
         snac_rx = (int)((snac_joy >> 16) & 0xFF) - 128;
         snac_ry = (int)((snac_joy >> 24) & 0xFF) - 128;
         if (snac_rx > 16 || snac_rx < -16)
-            cl.viewangles[YAW] -= snac_rx * 0.03f;
-        if (snac_ry > 16 || snac_ry < -16)
-            cl.viewangles[PITCH] += snac_ry * 0.03f;
+            cl.viewangles[YAW] -= snac_rx * sensitivity.value * 0.03f;
+        if (snac_ry > 16 || snac_ry < -16) {
+            cl.viewangles[PITCH] += snac_ry *  sensitivity.value * 0.03f;
+            // Prevent CL_AdjustAngles() interference during stick input
+            cl.nodrift = true;
+            cl.laststop = cl.time;
+        } else {
+            // Re-enable drift when the stick is released.
+            cl.nodrift = false;
+        }
     }
 
     /* Dead zone */
